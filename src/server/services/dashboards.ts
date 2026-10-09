@@ -39,22 +39,25 @@ const MANAGEMENT_LAYOUT: DashboardLayout = {
 const PHOTOGRAPHER_LAYOUT: DashboardLayout = {
   widgets: [
     w("kpis", "kpis", 0, 0, 12, 2),
-    w("due_today", "due_today", 0, 2, 6, 4),
-    w("overdue", "overdue", 6, 2, 6, 4),
-    w("recent_activity", "recent_activity", 0, 6, 8, 4),
-    w("calendar", "calendar", 8, 6, 4, 4),
-    w("recent_completed", "recent_completed", 0, 10, 12, 4),
+    w("my_workload", "my_workload", 0, 2, 6, 4),
+    w("my_performance", "my_performance", 6, 2, 6, 4),
+    w("due_today", "due_today", 0, 6, 6, 4),
+    w("overdue", "overdue", 6, 6, 6, 4),
+    w("recent_activity", "recent_activity", 0, 10, 8, 4),
+    w("calendar", "calendar", 8, 10, 4, 4),
+    w("recent_completed", "recent_completed", 0, 14, 12, 4),
   ],
 };
 
 const EDITOR_LAYOUT: DashboardLayout = {
   widgets: [
-    w("my_workload", "my_workload", 0, 0, 6, 3),
-    w("my_performance", "my_performance", 6, 0, 6, 3),
-    w("due_today", "due_today", 0, 3, 6, 4),
-    w("overdue", "overdue", 6, 3, 6, 4),
-    w("recent_activity", "recent_activity", 0, 7, 8, 4),
-    w("calendar", "calendar", 8, 7, 4, 4),
+    w("kpis", "kpis", 0, 0, 12, 2),
+    w("my_workload", "my_workload", 0, 2, 6, 3),
+    w("my_performance", "my_performance", 6, 2, 6, 3),
+    w("due_today", "due_today", 0, 5, 6, 4),
+    w("overdue", "overdue", 6, 5, 6, 4),
+    w("recent_activity", "recent_activity", 0, 9, 8, 4),
+    w("calendar", "calendar", 8, 9, 4, 4),
   ],
 };
 

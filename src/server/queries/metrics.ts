@@ -578,6 +578,8 @@ export function jobCountsBy(
       dueToday: sql<number>`sum(case when ${bound} and ${jobs.dueDate} >= ${now} and ${jobs.dueDate} <= ${bounds.endOfToday} then 1 else 0 end)`.mapWith(Number),
       completed: sql<number>`sum(case when ${jobs.statusCategory} = 'completed' then 1 else 0 end)`.mapWith(Number),
       completedThisMonth: sql<number>`sum(case when ${jobs.statusCategory} = 'completed' and ${jobs.completedAt} >= ${month.from} and ${jobs.completedAt} < ${month.to} then 1 else 0 end)`.mapWith(Number),
+      lastActivityAt: sql<string | null>`max(${jobs.lastActivityAt})`,
+      nextDueDate: sql<string | null>`min(case when ${bound} then ${jobs.dueDate} else null end)`,
     })
     .from(jobs)
     .where(and(scopeWhere(ctx, opts.scope), isNotNull(col), opts.where))
@@ -593,6 +595,8 @@ export function jobCountsBy(
       dueToday: r.dueToday || 0,
       completed: r.completed || 0,
       completedThisMonth: r.completedThisMonth || 0,
+      lastActivityAt: r.lastActivityAt ?? null,
+      nextDueDate: r.nextDueDate ?? null,
     });
   }
   return out;

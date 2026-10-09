@@ -55,6 +55,13 @@ e2e/*                           Playwright
 
 Demo login (seeded, all `Password123!`): owner `owner@studio.test`; managers `manager1@`/`manager2@studio.test`; `photographer01..12@studio.test` (photographer01 has team-workload + analytics flags); `editor01..13@studio.test` (editor11 and editor13 are deactivated). Second org for isolation tests: `owner@other.test`. Full roster in `src/db/seed/catalog.ts`.
 
+## Page conventions (UI integration pass)
+- Pages: `const { ctx, db } = await pageContext(); guard(ctx, "<action>"); const x = load(() => query(db, ctx, …))` (`src/server/page.ts`). Client islands call `api` from `src/lib/api-client.ts` then `router.refresh()`; URL search params hold filter/sort/tab state.
+- **Real 403/404 status**: once a segment's `loading.tsx` streams, the status is locked at 200. Put permission/existence gates that must return a real 403/404 in a `layout.tsx` ABOVE the loading boundary (e.g. `settings/organisation/layout.tsx`, `jobs/[id]/layout.tsx`). A segment with child routes keeps its own `page`/`loading`/`error` in a `(list)` (or `(detail)`) route group so its skeleton does not wrap the children. `(app)/forbidden.tsx` and `(app)/not-found.tsx` render inside the app shell.
+- Shared display/actions live in `@/components/jobs` (StatusPill, PriorityPill, DueChip, PersonChip, WorkloadBand, CapacityBar, JobActionBar, ConflictDialog…), `@/components/common` (SectionCard, StatTile, ConfirmDialog, RouteError), `@/components/filters`. Do not write local copies.
+- Nav visibility: `src/config/nav.ts` items take `roles` plus an optional `grant` (`analytics` / `teamWorkloads` / `teamWork`) computed with `can()` in `src/app/(app)/layout.tsx`, so flag-based access (e.g. photographer analytics) shows in the sidebar and palette.
+- Theme/density boot script is mounted once in the root layout (`AppearanceBoot`, next/script `beforeInteractive`).
+
 ## Working agreements for agents
 - Stay inside the files/areas you were assigned. Shared files (`schema.ts`, `types.ts`, `permissions.ts`, nav config, `components/ui/*`) are owned by the foundation; if you must change one, keep it minimal and additive and say so in your report.
 - Run `npm run typecheck` (and `npm run lint` on your files) before reporting done. Report real results, not assumptions.

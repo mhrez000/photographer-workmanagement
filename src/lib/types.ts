@@ -555,6 +555,12 @@ export interface TrendPoint {
   revisionsRequested: number;
   becameOverdue: number;
   avgTurnaroundSeconds: number | null;
+  /** Jobs approved in the bucket (denominator of the two rates below). */
+  approved?: number;
+  /** 0..100 over jobs approved in the bucket with a due date; null when none. */
+  onTimePercent?: number | null;
+  /** 0..1 — approved jobs in the bucket that needed ≥1 revision; null when none approved. */
+  revisionRate?: number | null;
 }
 
 export interface AnalyticsOverview {
@@ -604,7 +610,16 @@ export interface TimelineEvent {
 }
 
 export interface TimelineRow {
-  job: JobRef & { priority: Priority; dueDate: string | null; editor: UserRef | null; photographer: UserRef | null; statusCategory: StatusCategory };
+  job: JobRef & {
+    priority: Priority;
+    dueDate: string | null;
+    editor: UserRef | null;
+    photographer: UserRef | null;
+    statusCategory: StatusCategory;
+    /** Set by getTimelineRows / getJobTimelineRow (Gantt labels and the project grouping). */
+    client?: ClientRef;
+    project?: { id: string; name: string };
+  };
   segments: TimelineEvent[];
 }
 
@@ -884,6 +899,10 @@ export interface JobCounts {
   dueToday: number;
   completed: number;
   completedThisMonth: number;
+  /** Most recent `jobs.last_activity_at` among the counted jobs (null when none). */
+  lastActivityAt?: string | null;
+  /** Earliest due date among open, deadline-bound jobs (null when none). */
+  nextDueDate?: string | null;
 }
 
 export interface ClientListItem {
@@ -1125,4 +1144,77 @@ export interface AutomationDryRunResult {
   /** Trigger not refuted, conditions met and not blocked. */
   wouldRun: boolean;
   actions: { action: import("@/db/schema").AutomationAction; description: string; problem: string | null }[];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Picker options + kanban drop (REST API extras, src/app/api/README.md) */
+/* ------------------------------------------------------------------ */
+
+/** `GET /api/users/options` — lightweight person picker row (assign dialogs, @mentions). */
+export interface UserOption extends UserRef {
+  /** Editors only, and only when the actor may view team workloads (else null). */
+  workload: { band: WorkloadBand; active: number; overdue: number } | null;
+}
+
+/** `GET /api/clients/options`. */
+export interface ClientOption {
+  id: string;
+  name: string;
+  colour: string;
+}
+
+/** `GET /api/projects/options?clientId=`. */
+export interface ProjectOption {
+  id: string;
+  name: string;
+  clientId: string;
+  clientName: string;
+}
+
+/** A candidate move offered by the kanban drop (ambiguous column or follow-up dialog). */
+export interface KanbanMoveOption {
+  toStatus: StatusRef;
+  label: string;
+  isReopen: boolean;
+  requiresRevisionPayload: boolean;
+  requiresReason: boolean;
+}
+
+/** `POST /api/kanban/drop` response (a "none" outcome is a 422 invalid_transition instead). */
+export type KanbanDropResponse =
+  | { kind: "noop" }
+  | { kind: "ambiguous"; candidates: KanbanMoveOption[] }
+  | { kind: "needs_revision_payload"; move: KanbanMoveOption }
+  | { kind: "needs_reason"; move: KanbanMoveOption }
+  | { kind: "moved"; job: Job; fromStatus: StatusRef; toStatus: StatusRef; warnings: string[] };
+
+/** `POST /api/jobs/:id/timer` response. */
+export interface TimerActionResult {
+  action: "start" | "pause" | "stop";
+  session: WorkSession;
+  /** start: the timer was already running on this job (no new session). */
+  alreadyRunning: boolean;
+  /** start with `switchFromRunning`: the session that was stopped on another job. */
+  stopped: WorkSession | null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Team pages — a person's finished work in a range                    */
+/* ------------------------------------------------------------------ */
+
+/** One finished job on `/team/users/[id]` ("what did they work on"). */
+export interface CompletedWorkItem {
+  job: JobRow;
+  approvedAt: string | null;
+  completedAt: string | null;
+  /** approvedAt <= dueDateAtApproval; null when there was no due date. */
+  wasOnTime: boolean | null;
+}
+
+/** `getUserCompletedWork()` — finished jobs in range + completions per week (last 8 weeks). */
+export interface UserCompletedWork {
+  range: ResolvedRange;
+  items: CompletedWorkItem[];
+  /** Oldest → newest; `week` = civil start date of the 7-day bucket. */
+  weekly: { week: string; completed: number; onTime: number; late: number }[];
 }

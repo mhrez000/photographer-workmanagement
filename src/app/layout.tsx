@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { APPEARANCE_BOOT_SCRIPT } from "@/components/settings/appearance";
+import { AppearanceBoot } from "@/components/settings/appearance-boot";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -39,7 +41,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-canvas text-ink">{children}</body>
+      <head>
+        {/* Applies the stored theme/density (Settings → Appearance) synchronously, before first paint. */}
+        <script id="pwm-appearance-boot" dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOT_SCRIPT }} />
+      </head>
+      <body className="min-h-full flex flex-col bg-canvas text-ink">
+        <AppearanceBoot />
+        {children}
+      </body>
     </html>
   );
 }

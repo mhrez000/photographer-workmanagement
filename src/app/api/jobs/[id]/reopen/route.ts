@@ -1,0 +1,5 @@
+/** POST /api/jobs/:id/reopen { expectedVersion, toStatusId?, reason? } - completed -> in_progress | revision | approved ({ toCategory?, reason, revision? }) */
+import { mutateById } from "@/app/api/_lib/route";
+import { reopenJob } from "@/server/services/workflow";
+
+export const POST = mutateById("jobId", reopenJob);

@@ -9,6 +9,7 @@ import {
   mobileTabsForRole,
   navigationForRole,
   quickActionsForRole,
+  type NavGrants,
 } from "@/config/nav";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +37,8 @@ export interface AppShellProps {
   title?: React.ReactNode;
   /** Toast position. */
   toasterPosition?: "bottom-right" | "bottom-center" | "top-right" | "top-center";
+  /** Per-user / org grants that reveal extra nav items (e.g. Insights for a photographer with analytics). */
+  navGrants?: NavGrants;
 }
 
 /**
@@ -51,6 +54,7 @@ export function AppShell({
   logoutAction = "/api/auth/logout",
   title,
   toasterPosition = "bottom-right",
+  navGrants,
 }: AppShellProps) {
   const pathname = usePathname();
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
@@ -64,7 +68,7 @@ export function AppShell({
     if (mobileNavOpen) setMobileNavOpen(false);
   }
 
-  const groups = React.useMemo(() => navigationForRole(user.role), [user.role]);
+  const groups = React.useMemo(() => navigationForRole(user.role, navGrants), [user.role, navGrants]);
   const tabs = React.useMemo(() => mobileTabsForRole(user.role), [user.role]);
   const primaryAction = React.useMemo(
     () => quickActionsForRole(user.role).find((action) => action.primary),

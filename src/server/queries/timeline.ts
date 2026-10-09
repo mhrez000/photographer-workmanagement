@@ -87,6 +87,8 @@ function rowJob(raw: RawJobRow): TimelineRow["job"] {
     editor: raw.editor ? { ...raw.editor } : null,
     photographer: raw.photographer ? { ...raw.photographer } : null,
     statusCategory: raw.job.statusCategory,
+    client: { id: raw.client.id, name: raw.client.name },
+    project: { id: raw.project.id, name: raw.project.name },
   };
 }
 

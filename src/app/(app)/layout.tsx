@@ -2,9 +2,13 @@ import * as React from "react";
 import { redirect } from "next/navigation";
 import { after } from "next/server";
 import { AppShell } from "@/components/shell";
+import { CommandPaletteMount } from "@/components/search/command-palette";
+import type { NavGrants } from "@/config/nav";
+import { can } from "@/server/auth/permissions";
 import { getOptionalContext, getViewer } from "@/server/auth/session";
 import { unreadCount } from "@/server/services/notifications";
 import { lazySweep } from "@/server/services/sweep";
+import { canViewTeamWork } from "./workspace/team/access";
 
 /**
  * Authenticated app chrome. A missing/stale/revoked session redirects to
@@ -19,6 +23,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const viewer = ctx ? await getViewer() : null;
   if (!ctx || !viewer) redirect("/login?expired=1");
 
+  // Flag-based access beyond the role defaults (ARCHITECTURE §3.2), so e.g. a
+  // photographer with can_view_analytics can reach Insights from the nav.
+  const navGrants: NavGrants = {
+    analytics: can(ctx, "analytics.view"),
+    teamWorkloads: can(ctx, "workloads.view_team"),
+    teamWork: canViewTeamWork(ctx),
+  };
+
   const organisationId = ctx.organisationId;
   try {
     after(() => lazySweep(organisationId));
@@ -32,8 +44,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       orgName={viewer.organisationName}
       unreadCount={unreadCount(ctx)}
       logoutAction="/api/auth/logout"
+      navGrants={navGrants}
     >
       {children}
+      <CommandPaletteMount role={viewer.role} grants={navGrants} />
     </AppShell>
   );
 }

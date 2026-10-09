@@ -13,7 +13,7 @@
 import { and, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
-import { activityEvents, jobs, users } from "@/db/schema";
+import { activityEvents, jobs, projects, users } from "@/db/schema";
 import { ENTITY_TYPES, EVENT_TYPES, type EventType } from "@/lib/constants";
 import { describeEventForFeed } from "@/lib/audit-summaries";
 import { endOfCivilDayIso, startOfCivilDayIso } from "@/lib/dates";
@@ -38,6 +38,10 @@ const bound = one(z.string().regex(/^\d{4}-\d{2}-\d{2}(T.*)?$/, "Expected YYYY-M
 export const ActivityFiltersSchema = z.object({
   userId: one(z.string().min(1).optional()),
   jobId: one(z.string().min(1).optional()),
+  /** Events of the project itself and of every job in it. */
+  projectId: one(z.string().min(1).optional()),
+  /** Events of the client itself, its projects, and every job of the client. */
+  clientId: one(z.string().min(1).optional()),
   eventType: listOf(z.enum(EVENT_TYPES)),
   entityType: listOf(z.enum(ENTITY_TYPES)),
   /** Civil date (org tz, inclusive) or ISO instant (inclusive). */
@@ -162,6 +166,24 @@ export function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}):
   const parts: (SQL | undefined)[] = [activityScopeWhere(db, ctx)];
   if (f.userId) parts.push(eq(activityEvents.actorUserId, f.userId));
   if (f.jobId) parts.push(eq(activityEvents.jobId, f.jobId));
+  if (f.projectId) {
+    const inProject = db.select({ one: sql`1` }).from(jobs).where(and(eq(jobs.id, activityEvents.jobId), eq(jobs.projectId, f.projectId)));
+    parts.push(or(and(eq(activityEvents.entityType, "project"), eq(activityEvents.entityId, f.projectId)), exists(inProject)));
+  }
+  if (f.clientId) {
+    const inClient = db.select({ one: sql`1` }).from(jobs).where(and(eq(jobs.id, activityEvents.jobId), eq(jobs.clientId, f.clientId)));
+    const clientProject = db
+      .select({ one: sql`1` })
+      .from(projects)
+      .where(and(eq(projects.id, activityEvents.entityId), eq(projects.clientId, f.clientId), eq(projects.organisationId, ctx.organisationId)));
+    parts.push(
+      or(
+        and(eq(activityEvents.entityType, "client"), eq(activityEvents.entityId, f.clientId)),
+        and(eq(activityEvents.entityType, "project"), exists(clientProject)),
+        exists(inClient),
+      ),
+    );
+  }
   if (f.eventType?.length) parts.push(inArray(activityEvents.eventType, f.eventType));
   if (f.entityType?.length) parts.push(inArray(activityEvents.entityType, f.entityType));
   if (f.from) parts.push(boundSql(f.from, "from", tz));

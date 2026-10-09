@@ -11,10 +11,10 @@
  *   Due Today → Due Tomorrow → Upcoming (later or no due date).
  * Deadlines are judged in the organisation timezone.
  */
-import { and, desc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
-import { jobs, workSessions } from "@/db/schema";
-import { CATEGORY_GROUPS } from "@/lib/constants";
+import { jobNotes, jobs, workSessions } from "@/db/schema";
+import { CATEGORY_GROUPS, MANAGEMENT_ROLES, type NoteKind } from "@/lib/constants";
 import type { AuthContext, JobRow, MyWorkQueue, WorkSessionView } from "@/lib/types";
 import { isDeadlineBound, isReviewerHolds } from "@/lib/workflow";
 import { toWorkSessionView } from "./jobDetail";
@@ -86,4 +86,42 @@ export function getMyWorkQueue(db: DbLike, ctx: AuthContext): MyWorkQueue {
   };
   for (const row of rows) queue[myWorkSectionOf(row, bounds)].push(row);
   return queue;
+}
+
+/** Latest visible note of a job, for the My Work card preview. */
+export interface MyWorkNotePreview {
+  kind: NoteKind;
+  body: string;
+  isPinned: boolean;
+  updatedAt: string;
+}
+
+/**
+ * One note preview per job (pinned first, then most recently edited; archived
+ * notes skipped). Internal notes are only previewed for owners/managers — the
+ * same rule as `note.read` for non-management roles. Callers pass job ids they
+ * already loaded through `getMyWorkQueue` (so visibility is already scoped).
+ */
+export function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Record<string, MyWorkNotePreview> {
+  const out: Record<string, MyWorkNotePreview> = {};
+  const ids = [...new Set(jobIds)].slice(0, MY_WORK_MAX_JOBS);
+  if (ids.length === 0) return out;
+  const rows = db
+    .select({ jobId: jobNotes.jobId, kind: jobNotes.kind, body: jobNotes.body, isPinned: jobNotes.isPinned, updatedAt: jobNotes.updatedAt })
+    .from(jobNotes)
+    .where(
+      and(
+        eq(jobNotes.organisationId, ctx.organisationId),
+        inArray(jobNotes.jobId, ids),
+        isNull(jobNotes.archivedAt),
+        MANAGEMENT_ROLES.includes(ctx.role) ? undefined : ne(jobNotes.kind, "internal"),
+      ),
+    )
+    .orderBy(desc(jobNotes.isPinned), desc(jobNotes.updatedAt))
+    .all();
+  for (const r of rows) {
+    if (out[r.jobId]) continue;
+    out[r.jobId] = { kind: r.kind, body: r.body, isPinned: r.isPinned, updatedAt: r.updatedAt };
+  }
+  return out;
 }

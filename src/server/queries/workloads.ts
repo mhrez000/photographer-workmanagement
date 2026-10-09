@@ -18,7 +18,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from
 import type { DbLike } from "@/db/index";
 import { jobAssignments, jobs, users } from "@/db/schema";
 import { CATEGORY_GROUPS, WORKLOAD_THRESHOLDS } from "@/lib/constants";
-import { addCivilDays, todayCivil } from "@/lib/dates";
+import { addCivilDays, civilDate, civilDiffDays, startOfCivilDayIso, todayCivil } from "@/lib/dates";
 import {
   avgSecondsPerCategory,
   editingSeconds,
@@ -35,7 +35,7 @@ import {
   type AssignmentLike,
   type BottleneckEditor,
 } from "@/lib/metrics";
-import type { AuthContext, OrganisationSettings, User, UserRef, WorkloadDetail, WorkloadRow } from "@/lib/types";
+import type { AuthContext, CompletedWorkItem, OrganisationSettings, User, UserCompletedWork, UserRef, WorkloadDetail, WorkloadRow } from "@/lib/types";
 import { isWorkloadCategory } from "@/lib/workflow";
 import { assertCan, can, isManagement } from "@/server/auth/permissions";
 import { loadUserInOrg } from "@/server/services/_shared";
@@ -51,12 +51,13 @@ import {
   loadTransitionsByJob,
   mean,
   monthRangeAt,
+  resolveRangeInput,
   toPercent,
   weekRangeAt,
   workloadSettingsOf,
   type MetricJob,
 } from "./metrics";
-import { categoryIn, selectJobRows } from "./scope";
+import { categoryIn, mapJobRows, selectJobRows, selectRawJobs } from "./scope";
 
 const BAND_ORDER = { overloaded: 0, near_capacity: 1, healthy: 2 } as const;
 
@@ -340,4 +341,60 @@ export function openJobCountFor(db: DbLike, ctx: AuthContext, userId: string): n
     )
     .get();
   return row?.n ?? 0;
+}
+
+const COMPLETED_WORK_LIMIT = 200;
+const COMPLETED_WORK_WEEKS = 8;
+
+/**
+ * `/team/users/[id]` "what did they work on": the person's finished jobs
+ * (approved or completed within the range; editor_id for editors,
+ * photographer_id for photographers) with on-time flags, plus completions per
+ * 7-day bucket over the last 8 weeks. Same permission as getWorkloadDetail:
+ * self (workloads.view_self) or management (performance.view). Rows follow
+ * job visibility.
+ */
+export function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): UserCompletedWork {
+  const target = loadUserInOrg(db, ctx, userId);
+  if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
+  else assertCan(ctx, "performance.view");
+  const range = resolveRangeInput(ctx, rawRange);
+  const holder = target.role === "photographer" ? jobs.photographerId : jobs.editorId;
+  const within = (col: typeof jobs.completedAt | typeof jobs.approvedAt, from: string, to: string) => and(gte(col, from), lt(col, to));
+
+  const raws = selectRawJobs(db, ctx, {
+    where: and(
+      eq(holder, target.id),
+      categoryIn(CATEGORY_GROUPS.DONE),
+      or(within(jobs.completedAt, range.from, range.to), within(jobs.approvedAt, range.from, range.to)),
+    ),
+    orderBy: [sql`coalesce(${jobs.completedAt}, ${jobs.approvedAt}) desc`, asc(jobs.id)],
+    limit: COMPLETED_WORK_LIMIT,
+  });
+  const rows = mapJobRows(db, ctx, raws);
+  const items: CompletedWorkItem[] = raws.map((r, i) => ({
+    job: rows[i],
+    approvedAt: r.job.approvedAt,
+    completedAt: r.job.completedAt,
+    wasOnTime: r.job.wasOnTime,
+  }));
+
+  const tz = ctx.settings.timezone;
+  const now = ctx.now();
+  const today = todayCivil(tz, new Date(now));
+  const firstWeek = addCivilDays(today, -(COMPLETED_WORK_WEEKS * 7 - 1));
+  const from = startOfCivilDayIso(firstWeek, tz);
+  const to = startOfCivilDayIso(addCivilDays(today, 1), tz);
+  const done = completedJobsInRange(db, ctx, { from, to }, { scope: "org", where: eq(holder, target.id) });
+  const weekly = Array.from({ length: COMPLETED_WORK_WEEKS }, (_, i) => ({ week: addCivilDays(firstWeek, i * 7), completed: 0, onTime: 0, late: 0 }));
+  for (const j of done) {
+    const day = civilDate(j.completedAt, tz);
+    if (!day) continue;
+    const bucket = weekly[Math.floor(civilDiffDays(firstWeek, day) / 7)];
+    if (!bucket) continue;
+    bucket.completed += 1;
+    if (j.wasOnTime === true) bucket.onTime += 1;
+    else if (j.wasOnTime === false) bucket.late += 1;
+  }
+  return { range, items, weekly };
 }

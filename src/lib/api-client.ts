@@ -105,6 +105,8 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
     if (res.status === 401 && typeof window !== "undefined") {
       // Session expired or revoked: bounce to login, preserving where we were.
       const next = encodeURIComponent(window.location.pathname + window.location.search);
+      // A full page load (not router.push) is deliberate: it drops all client state of the dead session.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign(`/login?expired=1&next=${next}`);
     }
     throw new ApiError(

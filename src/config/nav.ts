@@ -54,6 +54,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** Allow-list. Omitted = visible to every role. */
   roles?: readonly RoleKey[];
+  /** Also visible to roles outside `roles` when the viewer holds this per-user/org grant. */
+  grant?: NavGrant;
   /** Match only the exact pathname (default: prefix match). */
   exact?: boolean;
   /** Optional short description for the command palette / tooltips. */
@@ -61,6 +63,14 @@ export interface NavItem {
   /** Keyboard chord for the command palette, e.g. "g d". */
   shortcut?: string;
 }
+
+/**
+ * Permission grants that open a page to roles outside its default allow-list
+ * (ARCHITECTURE §3.2): e.g. a photographer with `can_view_analytics` sees the
+ * Insights pages. Computed server-side in the (app) layout from `can()`.
+ */
+export type NavGrant = "analytics" | "teamWorkloads" | "teamWork";
+export type NavGrants = Partial<Record<NavGrant, boolean>>;
 
 export interface NavGroup {
   id: string;
@@ -127,7 +137,8 @@ export const navigation: NavGroup[] = [
         label: "Team Work",
         href: "/workspace/team",
         icon: UsersRound,
-        roles: ["owner", "manager", "photographer"],
+        roles: MANAGEMENT_ROLES,
+        grant: "teamWork",
         description: "What everyone on the team is working on",
       },
       {
@@ -186,7 +197,6 @@ export const navigation: NavGroup[] = [
   {
     id: "team",
     label: "Team",
-    roles: MANAGEMENT_ROLES,
     items: [
       {
         id: "photographers",
@@ -207,6 +217,8 @@ export const navigation: NavGroup[] = [
         label: "Workloads",
         href: "/team/workloads",
         icon: Gauge,
+        roles: MANAGEMENT_ROLES,
+        grant: "teamWorkloads",
         description: "Who is healthy, near capacity or overloaded",
       },
       {
@@ -214,6 +226,7 @@ export const navigation: NavGroup[] = [
         label: "Performance",
         href: "/team/performance",
         icon: BarChart3,
+        roles: MANAGEMENT_ROLES,
         description: "Turnaround, on-time rate and revision rate per person",
       },
     ],
@@ -221,13 +234,14 @@ export const navigation: NavGroup[] = [
   {
     id: "insights",
     label: "Insights",
-    roles: MANAGEMENT_ROLES,
     items: [
       {
         id: "analytics",
         label: "Analytics",
         href: "/insights/analytics",
         icon: Activity,
+        roles: MANAGEMENT_ROLES,
+        grant: "analytics",
         description: "Volume, throughput and trends",
       },
       {
@@ -235,6 +249,8 @@ export const navigation: NavGroup[] = [
         label: "Bottlenecks",
         href: "/insights/bottlenecks",
         icon: Funnel,
+        roles: MANAGEMENT_ROLES,
+        grant: "analytics",
         description: "Where jobs are getting stuck",
       },
       {
@@ -242,6 +258,8 @@ export const navigation: NavGroup[] = [
         label: "Reports",
         href: "/insights/reports",
         icon: ClipboardList,
+        roles: MANAGEMENT_ROLES,
+        grant: "analytics",
         description: "Production, editor, photographer and business reports",
       },
     ],
@@ -287,6 +305,14 @@ export const navigation: NavGroup[] = [
         icon: KeyRound,
         roles: MANAGEMENT_ROLES,
         description: "What each role can see and do",
+      },
+      {
+        id: "teams",
+        label: "Teams",
+        href: "/settings/teams",
+        icon: UsersRound,
+        roles: MANAGEMENT_ROLES,
+        description: "Groups, leads and memberships",
       },
       {
         id: "workflows",
@@ -401,15 +427,16 @@ export function isRoleKey(value: string): value is RoleKey {
   return (ALL_ROLES as readonly string[]).includes(value);
 }
 
-export function canAccess(entry: { roles?: readonly RoleKey[] }, role: RoleKey): boolean {
-  return !entry.roles || entry.roles.includes(role);
+export function canAccess(entry: { roles?: readonly RoleKey[]; grant?: NavGrant }, role: RoleKey, grants?: NavGrants): boolean {
+  if (!entry.roles || entry.roles.includes(role)) return true;
+  return entry.grant !== undefined && grants?.[entry.grant] === true;
 }
 
-/** The navigation tree with groups/items the role cannot see removed. */
-export function navigationForRole(role: RoleKey): NavGroup[] {
+/** The navigation tree with groups/items the role (plus its grants) cannot see removed. */
+export function navigationForRole(role: RoleKey, grants?: NavGrants): NavGroup[] {
   return navigation
-    .filter((group) => canAccess(group, role))
-    .map((group) => ({ ...group, items: group.items.filter((item) => canAccess(item, role)) }))
+    .filter((group) => canAccess(group, role, grants))
+    .map((group) => ({ ...group, items: group.items.filter((item) => canAccess(item, role, grants)) }))
     .filter((group) => group.items.length > 0);
 }
 

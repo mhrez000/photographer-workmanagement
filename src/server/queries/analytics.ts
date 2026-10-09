@@ -121,17 +121,20 @@ export function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: Tre
   );
 
   const inBucket = (iso: string | null, b: { from: string; to: string }) => iso !== null && iso >= b.from && iso < b.to;
-  return trendBuckets(range, tz).map((b) => ({
-    date: b.date,
-    created: created.filter((j) => inBucket(j.createdAt, b)).length,
-    completed: completed.filter((j) => inBucket(j.completedAt, b)).length,
-    revisionsRequested: revisions.filter((r) => inBucket(r.requestedAt, b)).length,
-    becameOverdue: overdue.filter((e) => inBucket(e.createdAt, b)).length,
-    avgTurnaroundSeconds: avgTurnaround(
-      approved.filter((j) => inBucket(j.approvedAt, b)),
-      transitions,
-    ),
-  }));
+  return trendBuckets(range, tz).map((b) => {
+    const approvedInBucket = approved.filter((j) => inBucket(j.approvedAt, b));
+    return {
+      date: b.date,
+      created: created.filter((j) => inBucket(j.createdAt, b)).length,
+      completed: completed.filter((j) => inBucket(j.completedAt, b)).length,
+      revisionsRequested: revisions.filter((r) => inBucket(r.requestedAt, b)).length,
+      becameOverdue: overdue.filter((e) => inBucket(e.createdAt, b)).length,
+      avgTurnaroundSeconds: avgTurnaround(approvedInBucket, transitions),
+      approved: approvedInBucket.length,
+      onTimePercent: toPercent(onTimeRate(approvedInBucket).rate),
+      revisionRate: revisionRate(approvedInBucket).rate,
+    };
+  });
 }
 
 /* ------------------------------------------------------------------ */
