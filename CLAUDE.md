@@ -46,9 +46,14 @@ e2e/*                           Playwright
 ```
 
 ## Commands
-`npm run dev` · `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` · `npm run db:push` · `npm run db:seed` · `npm run db:reset` · `npm run e2e`
+`npm run dev` · `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` · `npm run db:push` · `npm run db:guard` · `npm run db:seed` · `npm run db:reset` · `npm run db:verify` · `npm run e2e`
 
-Demo login (seeded): owner `owner@studio.test` / `Password123!` (see `src/db/seed.ts` for all demo users).
+- `db:reset` (dev only) = delete `data/app.db*` → `db:push` → `db:guard` (28 integrity triggers) → `db:seed` (real services under a fake clock, ~15 s; exits 1 on drift or a missed §39 minimum). `db:seed` refuses to run when organisations already exist.
+- `db:verify` recomputes every derived job column from the ledgers (same check as `GET /api/system/integrity`); must report 0 drift.
+- After any `schema.ts` change run `npx drizzle-kit generate` (the committed `drizzle/` DDL feeds `makeTestDb()`).
+- Env: `.env` needs `SESSION_SECRET` (≥ 32 chars) and optional `DATABASE_PATH` (default `./data/app.db`); see `.env.example`.
+
+Demo login (seeded, all `Password123!`): owner `owner@studio.test`; managers `manager1@`/`manager2@studio.test`; `photographer01..12@studio.test` (photographer01 has team-workload + analytics flags); `editor01..13@studio.test` (editor11 and editor13 are deactivated). Second org for isolation tests: `owner@other.test`. Full roster in `src/db/seed/catalog.ts`.
 
 ## Working agreements for agents
 - Stay inside the files/areas you were assigned. Shared files (`schema.ts`, `types.ts`, `permissions.ts`, nav config, `components/ui/*`) are owned by the foundation; if you must change one, keep it minimal and additive and say so in your report.

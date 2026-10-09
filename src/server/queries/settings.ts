@@ -1,0 +1,46 @@
+/**
+ * Settings views (ARCHITECTURE.md §10 `/settings/organisation`,
+ * `/settings/roles`, `/settings/notifications`).
+ */
+import { and, eq } from "drizzle-orm";
+import type { DbLike } from "@/db/index";
+import { organisations, userNotificationPrefs } from "@/db/schema";
+import { NOTIFICATION_TYPES, NOTIFICATION_TYPE_META } from "@/lib/constants";
+import type { AuthContext, NotificationPrefView, PermissionMatrixRow, SettingsView } from "@/lib/types";
+import { assertCan, can, permissionMatrix } from "@/server/auth/permissions";
+import { NotFoundError } from "@/server/errors";
+import { loadOrgSettings } from "./metrics";
+
+/** `GET /api/settings` (settings.view = O/M; `canManage` = settings.manage = owner). */
+export function getSettingsView(db: DbLike, ctx: AuthContext): SettingsView {
+  assertCan(ctx, "settings.view");
+  const org = db
+    .select({ id: organisations.id, name: organisations.name, slug: organisations.slug })
+    .from(organisations)
+    .where(eq(organisations.id, ctx.organisationId))
+    .get();
+  if (!org) throw new NotFoundError("Organisation");
+  return { organisation: org, settings: loadOrgSettings(db, ctx), canManage: can(ctx, "settings.manage") };
+}
+
+/** `GET /api/settings/permissions` — the Roles page matrix (settings.view). */
+export function getPermissionMatrix(ctx: AuthContext): PermissionMatrixRow[] {
+  assertCan(ctx, "settings.view");
+  return permissionMatrix();
+}
+
+/** `GET /api/users/:me/notification-prefs` view: every type with its effective toggle (missing row = enabled). */
+export function getNotificationPrefs(db: DbLike, ctx: AuthContext): NotificationPrefView[] {
+  if (ctx.userId === null) return [];
+  assertCan(ctx, "notification.prefs", { userId: ctx.userId, organisationId: ctx.organisationId });
+  const rows = db
+    .select({ type: userNotificationPrefs.type, enabled: userNotificationPrefs.enabled })
+    .from(userNotificationPrefs)
+    .where(and(eq(userNotificationPrefs.organisationId, ctx.organisationId), eq(userNotificationPrefs.userId, ctx.userId)))
+    .all();
+  const byType = new Map(rows.map((r) => [r.type, r.enabled]));
+  return NOTIFICATION_TYPES.map((type) => {
+    const meta = NOTIFICATION_TYPE_META[type];
+    return { type, label: meta.label, mandatory: meta.mandatory, enabled: meta.mandatory ? true : (byType.get(type) ?? true) };
+  });
+}

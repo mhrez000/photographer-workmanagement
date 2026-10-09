@@ -89,9 +89,15 @@ export function startOfCivilDayIso(civil: string, timeZone = DEFAULT_TIMEZONE): 
   return new Date(guess - offsetMs).toISOString();
 }
 
-/** End of the civil day (exclusive bound = start of next day). */
+/**
+ * End of the civil day in the timezone: the LAST millisecond of that day
+ * (start of the next day − 1 ms), so `civilDate(endOfCivilDayIso(d)) === d`.
+ * This is the stored encoding for calendar deadlines (ARCHITECTURE.md §1) and
+ * an INCLUSIVE bound — compare with `<=`. For an exclusive bound use
+ * `startOfCivilDayIso(addCivilDays(civil, 1))`.
+ */
 export function endOfCivilDayIso(civil: string, timeZone = DEFAULT_TIMEZONE): string {
-  return startOfCivilDayIso(addCivilDays(civil, 1), timeZone);
+  return new Date(Date.parse(startOfCivilDayIso(addCivilDays(civil, 1), timeZone)) - 1).toISOString();
 }
 
 /** Offset of `timeZone` from UTC at instant `date`, in ms (positive east of UTC). */

@@ -12,6 +12,7 @@
  */
 import Database from "better-sqlite3";
 import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import fs from "node:fs";
 import path from "node:path";
 import * as schema from "./schema";
@@ -20,6 +21,11 @@ import { installGuards, tablesExist } from "./guard";
 export type Db = BetterSQLite3Database<typeof schema>;
 /** The transaction handle services receive. */
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/**
+ * Anything you can run Drizzle queries on: the root `Db` or a `Tx`.
+ * Read helpers (loaders, queries) accept this; writes take a `Tx`.
+ */
+export type DbLike = BaseSQLiteDatabase<"sync", Database.RunResult, typeof schema>;
 
 export const DEFAULT_DATABASE_PATH = "./data/app.db";
 
@@ -27,7 +33,9 @@ export function resolveDatabasePath(): string {
   const raw = process.env.DATABASE_PATH?.trim();
   if (!raw) return path.resolve(process.cwd(), DEFAULT_DATABASE_PATH);
   if (raw === ":memory:") return raw;
-  return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+  // DATABASE_PATH is runtime config, not a bundled asset: keep Turbopack from
+  // tracing the whole project into the server output.
+  return path.isAbsolute(raw) ? raw : path.resolve(/*turbopackIgnore: true*/ process.cwd(), raw);
 }
 
 export interface DatabaseHandle {
@@ -78,5 +86,29 @@ export const db: Db = handle.db;
 
 /** Raw better-sqlite3 handle (used by guard/verify/tests; never by components). */
 export const sqlite: Database.Database = handle.sqlite;
+
+/* ------------------------------------------------------------------ */
+/*  Injection point                                                    */
+/*                                                                     */
+/*  Convention: every service mutation is                               */
+/*    `fn(tx: Tx, ctx: AuthContext, input: unknown)`                    */
+/*  and route handlers / server actions wrap it with                    */
+/*  `withTx((tx) => fn(tx, ctx, input))` from services/_shared.ts.      */
+/*  Read helpers take `DbLike` (a Db or a Tx). Code that has no db/tx  */
+/*  parameter (session, layout, route glue) calls `getDb()`, which      */
+/*  tests can redirect with `setDbOverride(testDb)`.                    */
+/* ------------------------------------------------------------------ */
+
+let dbOverride: Db | null = null;
+
+/** The Drizzle instance to use when none is passed explicitly. */
+export function getDb(): Db {
+  return dbOverride ?? db;
+}
+
+/** Tests only: route `getDb()` to another database (pass null to restore). */
+export function setDbOverride(next: Db | null): void {
+  dbOverride = next;
+}
 
 export { schema };

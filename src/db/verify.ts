@@ -4,6 +4,12 @@
  * (must be clean before exit), CI, `GET /api/system/integrity` and tests.
  *
  * Reads only the ledgers + jobs; no services, no permissions.
+ *
+ * An open (non-terminal) job held by an inactive editor is a structural
+ * issue UNLESS that editor's latest `user.deactivated` event lists the job
+ * with `action: "kept"` — the deliberate "deactivate without hand-over"
+ * case behind the editor-unavailable bottleneck (the "flagged" exception
+ * of §2.8; the demo seed's editor11 relies on it).
  */
 import type Database from "better-sqlite3";
 import type { IntegrityReport } from "@/lib/types";
@@ -73,6 +79,15 @@ export function verifyDerived(sqlite: Database.Database, organisationId?: string
         SELECT 1 FROM activity_events e WHERE e.event_type = 'revision.requested' AND json_extract(e.metadata, '$.revisionId') = r.id)`,
   );
   const inactiveEditor = sqlite.prepare(`SELECT is_active FROM users WHERE id = ?`);
+  // "Flagged" = the editor's latest deactivation explicitly KEPT this job (neither reassign nor
+  // unassign was chosen): the editor-unavailable bottleneck case, not an inconsistency (§2.8).
+  const keptOnDeactivation = sqlite.prepare(
+    `SELECT 1 FROM activity_events e, json_each(e.metadata, '$.openJobs') o
+      WHERE e.event_type = 'user.deactivated' AND e.entity_id = ?
+        AND e.rowid = (SELECT MAX(e2.rowid) FROM activity_events e2 WHERE e2.event_type = 'user.deactivated' AND e2.entity_id = e.entity_id)
+        AND json_extract(o.value, '$.jobId') = ? AND json_extract(o.value, '$.role') = 'editor' AND json_extract(o.value, '$.action') = 'kept'
+      LIMIT 1`,
+  );
 
   const push = (jobId: string, column: string, stored: unknown, derived: unknown) => {
     if (stored !== derived) drift.push({ jobId, column, stored, derived });
@@ -123,8 +138,9 @@ export function verifyDerived(sqlite: Database.Database, organisationId?: string
     push(j.id, "editor_id", j.editor_id, (ed[0]?.user_id as string | undefined) ?? null);
     if (j.editor_id) {
       const u = inactiveEditor.get(j.editor_id) as { is_active: number } | undefined;
-      if (u && !u.is_active && j.status_category !== "completed" && j.status_category !== "cancelled") {
-        structural.push({ check: "active_job_held_by_inactive_editor", jobId: j.id, detail: `editor ${j.editor_id} is inactive (expected only for seeded editor-unavailable cases)` });
+      const terminal = j.status_category === "completed" || j.status_category === "cancelled";
+      if (u && !u.is_active && !terminal && !keptOnDeactivation.get(j.editor_id, j.id)) {
+        structural.push({ check: "active_job_held_by_inactive_editor", jobId: j.id, detail: `editor ${j.editor_id} is inactive and the deactivation did not keep this job` });
       }
     }
 

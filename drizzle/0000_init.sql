@@ -1,0 +1,653 @@
+CREATE TABLE `activity_events` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`actor_user_id` text,
+	`automation_run_id` text,
+	`job_id` text,
+	`entity_type` text NOT NULL,
+	`entity_id` text NOT NULL,
+	`event_type` text NOT NULL,
+	`action` text NOT NULL,
+	`previous_value` text,
+	`new_value` text,
+	`metadata` text DEFAULT '{}' NOT NULL,
+	`summary` text NOT NULL,
+	`visibility` text DEFAULT 'all' NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`actor_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`automation_run_id`) REFERENCES `automation_runs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `activity_events_org_created_idx` ON `activity_events` (`organisation_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `activity_events_job_idx` ON `activity_events` (`job_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `activity_events_actor_idx` ON `activity_events` (`organisation_id`,`actor_user_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `activity_events_type_idx` ON `activity_events` (`organisation_id`,`event_type`,`created_at`);--> statement-breakpoint
+CREATE INDEX `activity_events_entity_idx` ON `activity_events` (`entity_type`,`entity_id`);--> statement-breakpoint
+CREATE TABLE `automation_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`automation_id` text NOT NULL,
+	`trigger_event_id` text NOT NULL,
+	`job_id` text,
+	`depth` integer DEFAULT 0 NOT NULL,
+	`status` text DEFAULT 'pending' NOT NULL,
+	`conditions_snapshot` text DEFAULT '[]' NOT NULL,
+	`actions_performed` text DEFAULT '[]' NOT NULL,
+	`error` text,
+	`created_at` text NOT NULL,
+	`started_at` text,
+	`finished_at` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`automation_id`) REFERENCES `automations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`trigger_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `automation_runs_dedupe_uq` ON `automation_runs` (`automation_id`,`trigger_event_id`);--> statement-breakpoint
+CREATE INDEX `automation_runs_pending_idx` ON `automation_runs` (`organisation_id`,`status`,`created_at`);--> statement-breakpoint
+CREATE INDEX `automation_runs_automation_idx` ON `automation_runs` (`automation_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `automation_runs_job_idx` ON `automation_runs` (`job_id`,`created_at`);--> statement-breakpoint
+CREATE TABLE `automations` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`is_enabled` integer DEFAULT true NOT NULL,
+	`trigger_type` text NOT NULL,
+	`trigger` text NOT NULL,
+	`conditions` text DEFAULT '[]' NOT NULL,
+	`actions` text NOT NULL,
+	`sort_order` integer DEFAULT 0 NOT NULL,
+	`created_by_user_id` text NOT NULL,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `automations_org_trigger_idx` ON `automations` (`organisation_id`,`trigger_type`,`is_enabled`);--> statement-breakpoint
+CREATE TABLE `clients` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`name` text NOT NULL,
+	`contact_name` text,
+	`email` text,
+	`phone` text,
+	`notes` text,
+	`colour` text DEFAULT '#0ea5e9' NOT NULL,
+	`created_by_user_id` text,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `clients_org_name_idx` ON `clients` (`organisation_id`,`name`);--> statement-breakpoint
+CREATE INDEX `clients_org_archived_idx` ON `clients` (`organisation_id`,`archived_at`);--> statement-breakpoint
+CREATE TABLE `comment_mentions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`comment_id` text NOT NULL,
+	`mentioned_user_id` text NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`comment_id`) REFERENCES `job_comments`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`mentioned_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `comment_mentions_uq` ON `comment_mentions` (`comment_id`,`mentioned_user_id`);--> statement-breakpoint
+CREATE INDEX `comment_mentions_user_idx` ON `comment_mentions` (`organisation_id`,`mentioned_user_id`,`created_at`);--> statement-breakpoint
+CREATE TABLE `dashboard_layouts` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`layout` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `dashboard_layouts_user_uq` ON `dashboard_layouts` (`user_id`);--> statement-breakpoint
+CREATE TABLE `job_assignments` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`role` text NOT NULL,
+	`user_id` text NOT NULL,
+	`assigned_by_user_id` text,
+	`assigned_at` text NOT NULL,
+	`reason` text,
+	`status_category_at_assign` text,
+	`unassigned_at` text,
+	`unassigned_by_user_id` text,
+	`unassign_reason` text,
+	`activity_event_id` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`assigned_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`unassigned_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`activity_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `job_assignments_open_uq` ON `job_assignments` (`job_id`,`role`) WHERE unassigned_at IS NULL;--> statement-breakpoint
+CREATE INDEX `job_assignments_user_idx` ON `job_assignments` (`organisation_id`,`user_id`,`role`,`unassigned_at`);--> statement-breakpoint
+CREATE INDEX `job_assignments_job_idx` ON `job_assignments` (`job_id`,`assigned_at`);--> statement-breakpoint
+CREATE TABLE `job_comments` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`parent_comment_id` text,
+	`root_comment_id` text,
+	`revision_id` text,
+	`author_user_id` text NOT NULL,
+	`kind` text DEFAULT 'comment' NOT NULL,
+	`body` text NOT NULL,
+	`edited_at` text,
+	`edit_count` integer DEFAULT 0 NOT NULL,
+	`deleted_at` text,
+	`deleted_by_user_id` text,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`parent_comment_id`) REFERENCES `job_comments`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`root_comment_id`) REFERENCES `job_comments`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`revision_id`) REFERENCES `job_revisions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`author_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`deleted_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `job_comments_job_idx` ON `job_comments` (`job_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `job_comments_root_idx` ON `job_comments` (`root_comment_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `job_comments_parent_idx` ON `job_comments` (`parent_comment_id`);--> statement-breakpoint
+CREATE INDEX `job_comments_author_idx` ON `job_comments` (`organisation_id`,`author_user_id`);--> statement-breakpoint
+CREATE TABLE `job_links` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`kind` text NOT NULL,
+	`url` text NOT NULL,
+	`label` text,
+	`provider` text,
+	`added_by_user_id` text NOT NULL,
+	`created_at` text NOT NULL,
+	`supersedes_link_id` text,
+	`superseded_at` text,
+	`superseded_by_link_id` text,
+	`removed_at` text,
+	`removed_by_user_id` text,
+	`remove_reason` text,
+	`activity_event_id` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`added_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`supersedes_link_id`) REFERENCES `job_links`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`superseded_by_link_id`) REFERENCES `job_links`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`removed_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`activity_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `job_links_job_kind_idx` ON `job_links` (`job_id`,`kind`,`superseded_at`,`removed_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `job_links_superseded_by_uq` ON `job_links` (`superseded_by_link_id`) WHERE superseded_by_link_id IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `job_links_supersedes_uq` ON `job_links` (`supersedes_link_id`) WHERE supersedes_link_id IS NOT NULL;--> statement-breakpoint
+CREATE TABLE `job_notes` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`kind` text NOT NULL,
+	`body` text NOT NULL,
+	`author_user_id` text NOT NULL,
+	`last_edited_by_user_id` text,
+	`edit_count` integer DEFAULT 0 NOT NULL,
+	`revision_id` text,
+	`is_pinned` integer DEFAULT false NOT NULL,
+	`archived_at` text,
+	`archived_by_user_id` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`author_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`last_edited_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`revision_id`) REFERENCES `job_revisions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`archived_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `job_notes_job_kind_idx` ON `job_notes` (`job_id`,`kind`,`archived_at`);--> statement-breakpoint
+CREATE TABLE `job_revisions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`revision_number` integer NOT NULL,
+	`requested_by_user_id` text NOT NULL,
+	`assignee_user_id` text,
+	`reason` text NOT NULL,
+	`description` text NOT NULL,
+	`instructions` text,
+	`priority` text DEFAULT 'normal' NOT NULL,
+	`due_date` text,
+	`requested_at` text NOT NULL,
+	`request_transition_id` text,
+	`resolved_at` text,
+	`resolved_by_user_id` text,
+	`resolution` text,
+	`resolution_note` text,
+	`resolve_transition_id` text,
+	`activity_event_id` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`requested_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`assignee_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`request_transition_id`) REFERENCES `job_status_transitions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`resolved_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`resolve_transition_id`) REFERENCES `job_status_transitions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`activity_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `job_revisions_number_uq` ON `job_revisions` (`job_id`,`revision_number`);--> statement-breakpoint
+CREATE UNIQUE INDEX `job_revisions_open_uq` ON `job_revisions` (`job_id`) WHERE resolved_at IS NULL;--> statement-breakpoint
+CREATE INDEX `job_revisions_org_requested_idx` ON `job_revisions` (`organisation_id`,`requested_at`);--> statement-breakpoint
+CREATE INDEX `job_revisions_assignee_idx` ON `job_revisions` (`organisation_id`,`assignee_user_id`,`resolved_at`);--> statement-breakpoint
+CREATE TABLE `job_status_transitions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`sequence` integer NOT NULL,
+	`kind` text DEFAULT 'transition' NOT NULL,
+	`from_status_id` text,
+	`to_status_id` text NOT NULL,
+	`from_category` text,
+	`to_category` text NOT NULL,
+	`status_name` text NOT NULL,
+	`actor_user_id` text,
+	`automation_run_id` text,
+	`reason` text,
+	`is_reopen` integer DEFAULT false NOT NULL,
+	`is_override` integer DEFAULT false NOT NULL,
+	`entered_at` text NOT NULL,
+	`exited_at` text,
+	`duration_seconds` integer,
+	`editor_id_at_entry` text,
+	`photographer_id_at_entry` text,
+	`activity_event_id` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`from_status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`to_status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`actor_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`automation_run_id`) REFERENCES `automation_runs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`editor_id_at_entry`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`photographer_id_at_entry`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`activity_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `jst_open_uq` ON `job_status_transitions` (`job_id`) WHERE exited_at IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `jst_seq_uq` ON `job_status_transitions` (`job_id`,`sequence`);--> statement-breakpoint
+CREATE INDEX `jst_org_cat_entered_idx` ON `job_status_transitions` (`organisation_id`,`to_category`,`entered_at`);--> statement-breakpoint
+CREATE INDEX `jst_editor_cat_idx` ON `job_status_transitions` (`organisation_id`,`editor_id_at_entry`,`to_category`);--> statement-breakpoint
+CREATE INDEX `jst_job_entered_idx` ON `job_status_transitions` (`job_id`,`entered_at`);--> statement-breakpoint
+CREATE TABLE `job_types` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`name` text NOT NULL,
+	`colour` text DEFAULT '#0ea5e9' NOT NULL,
+	`workflow_id` text NOT NULL,
+	`default_estimated_hours` real,
+	`sort_order` integer DEFAULT 0 NOT NULL,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`workflow_id`) REFERENCES `workflows`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `job_types_org_name_uq` ON `job_types` (`organisation_id`,`name`);--> statement-breakpoint
+CREATE TABLE `jobs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_number` text NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`client_id` text NOT NULL,
+	`project_id` text NOT NULL,
+	`job_type_id` text NOT NULL,
+	`workflow_id` text NOT NULL,
+	`priority` text DEFAULT 'normal' NOT NULL,
+	`status_id` text NOT NULL,
+	`status_category` text NOT NULL,
+	`previous_status_id` text,
+	`status_entered_at` text NOT NULL,
+	`photographer_id` text,
+	`editor_id` text,
+	`previous_editor_id` text,
+	`shoot_date` text,
+	`due_date` text,
+	`review_due_date` text,
+	`delivery_due_date` text,
+	`estimated_hours` real,
+	`completion_percent` integer DEFAULT 0 NOT NULL,
+	`is_paused` integer DEFAULT false NOT NULL,
+	`paused_at` text,
+	`revision_count` integer DEFAULT 0 NOT NULL,
+	`open_revision_id` text,
+	`started_at` text,
+	`first_submitted_at` text,
+	`last_submitted_at` text,
+	`approved_at` text,
+	`approved_by_user_id` text,
+	`due_date_at_approval` text,
+	`delivered_at` text,
+	`completed_at` text,
+	`due_date_at_completion` text,
+	`was_on_time` integer,
+	`cancelled_at` text,
+	`reopened_count` integer DEFAULT 0 NOT NULL,
+	`last_activity_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	`created_by_user_id` text NOT NULL,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_type_id`) REFERENCES `job_types`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`workflow_id`) REFERENCES `workflows`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`previous_status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`photographer_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`editor_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`previous_editor_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`open_revision_id`) REFERENCES `job_revisions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`approved_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `jobs_org_number_uq` ON `jobs` (`organisation_id`,`job_number`);--> statement-breakpoint
+CREATE INDEX `jobs_org_cat_due_idx` ON `jobs` (`organisation_id`,`status_category`,`due_date`);--> statement-breakpoint
+CREATE INDEX `jobs_org_editor_cat_idx` ON `jobs` (`organisation_id`,`editor_id`,`status_category`);--> statement-breakpoint
+CREATE INDEX `jobs_org_photographer_cat_idx` ON `jobs` (`organisation_id`,`photographer_id`,`status_category`);--> statement-breakpoint
+CREATE INDEX `jobs_org_status_idx` ON `jobs` (`organisation_id`,`status_id`);--> statement-breakpoint
+CREATE INDEX `jobs_org_completed_idx` ON `jobs` (`organisation_id`,`completed_at`);--> statement-breakpoint
+CREATE INDEX `jobs_org_shoot_idx` ON `jobs` (`organisation_id`,`shoot_date`);--> statement-breakpoint
+CREATE INDEX `jobs_org_review_due_idx` ON `jobs` (`organisation_id`,`review_due_date`);--> statement-breakpoint
+CREATE INDEX `jobs_org_delivery_due_idx` ON `jobs` (`organisation_id`,`delivery_due_date`);--> statement-breakpoint
+CREATE INDEX `jobs_org_project_idx` ON `jobs` (`organisation_id`,`project_id`);--> statement-breakpoint
+CREATE INDEX `jobs_org_client_idx` ON `jobs` (`organisation_id`,`client_id`);--> statement-breakpoint
+CREATE INDEX `jobs_org_activity_idx` ON `jobs` (`organisation_id`,`last_activity_at`);--> statement-breakpoint
+CREATE INDEX `jobs_org_created_by_idx` ON `jobs` (`organisation_id`,`created_by_user_id`);--> statement-breakpoint
+CREATE TABLE `notifications` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`type` text NOT NULL,
+	`title` text NOT NULL,
+	`body` text,
+	`job_id` text,
+	`actor_user_id` text,
+	`activity_event_id` text,
+	`link_path` text NOT NULL,
+	`dedupe_key` text,
+	`read_at` text,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`actor_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`activity_event_id`) REFERENCES `activity_events`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `notifications_user_unread_idx` ON `notifications` (`user_id`,`read_at`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `notifications_event_uq` ON `notifications` (`user_id`,`activity_event_id`,`type`) WHERE activity_event_id IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `notifications_dedupe_uq` ON `notifications` (`user_id`,`dedupe_key`) WHERE dedupe_key IS NOT NULL;--> statement-breakpoint
+CREATE TABLE `organisation_settings` (
+	`organisation_id` text PRIMARY KEY NOT NULL,
+	`timezone` text DEFAULT 'Australia/Sydney' NOT NULL,
+	`week_starts_on` integer DEFAULT 1 NOT NULL,
+	`job_number_prefix` text DEFAULT 'PJ' NOT NULL,
+	`time_tracking_enabled` integer DEFAULT false NOT NULL,
+	`work_session_auto_timeout_minutes` integer DEFAULT 600 NOT NULL,
+	`default_capacity_hours_per_week` real DEFAULT 38 NOT NULL,
+	`default_estimated_hours` real DEFAULT 2 NOT NULL,
+	`workload_near_capacity_ratio` real DEFAULT 0.7 NOT NULL,
+	`workload_overloaded_ratio` real DEFAULT 1 NOT NULL,
+	`max_active_jobs_per_editor` integer DEFAULT 12 NOT NULL,
+	`review_bottleneck_hours` integer DEFAULT 24 NOT NULL,
+	`review_bottleneck_min_jobs` integer DEFAULT 3 NOT NULL,
+	`editing_bottleneck_due_within_hours` integer DEFAULT 48 NOT NULL,
+	`editing_bottleneck_min_due_soon` integer DEFAULT 3 NOT NULL,
+	`unassigned_backlog_min` integer DEFAULT 10 NOT NULL,
+	`stalled_days` integer DEFAULT 5 NOT NULL,
+	`revision_spike_min_count` integer DEFAULT 5 NOT NULL,
+	`revision_spike_multiplier` real DEFAULT 1.5 NOT NULL,
+	`review_sla_hours` integer DEFAULT 24 NOT NULL,
+	`photographers_see_all_jobs` integer DEFAULT false NOT NULL,
+	`photographers_see_team_jobs` integer DEFAULT true NOT NULL,
+	`editors_see_team_jobs` integer DEFAULT false NOT NULL,
+	`editors_see_team_workloads` integer DEFAULT false NOT NULL,
+	`automations_enabled` integer DEFAULT true NOT NULL,
+	`audit_notifications` integer DEFAULT false NOT NULL,
+	`last_overdue_sweep_at` text,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE TABLE `organisations` (
+	`id` text PRIMARY KEY NOT NULL,
+	`name` text NOT NULL,
+	`slug` text NOT NULL,
+	`job_sequence` integer DEFAULT 0 NOT NULL,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `organisations_slug_uq` ON `organisations` (`slug`);--> statement-breakpoint
+CREATE TABLE `projects` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`client_id` text NOT NULL,
+	`name` text NOT NULL,
+	`address` text,
+	`description` text,
+	`start_date` text,
+	`end_date` text,
+	`created_by_user_id` text,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `projects_org_client_idx` ON `projects` (`organisation_id`,`client_id`);--> statement-breakpoint
+CREATE INDEX `projects_org_name_idx` ON `projects` (`organisation_id`,`name`);--> statement-breakpoint
+CREATE TABLE `saved_views` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`owner_user_id` text NOT NULL,
+	`name` text NOT NULL,
+	`scope` text NOT NULL,
+	`config` text NOT NULL,
+	`is_shared` integer DEFAULT false NOT NULL,
+	`is_default` integer DEFAULT false NOT NULL,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `saved_views_owner_scope_idx` ON `saved_views` (`owner_user_id`,`scope`,`archived_at`);--> statement-breakpoint
+CREATE INDEX `saved_views_org_shared_idx` ON `saved_views` (`organisation_id`,`is_shared`,`scope`);--> statement-breakpoint
+CREATE TABLE `team_memberships` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`team_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`added_by_user_id` text,
+	`joined_at` text NOT NULL,
+	`left_at` text,
+	`removed_by_user_id` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`team_id`) REFERENCES `teams`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`added_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`removed_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `team_memberships_active_uq` ON `team_memberships` (`team_id`,`user_id`) WHERE left_at IS NULL;--> statement-breakpoint
+CREATE INDEX `team_memberships_user_idx` ON `team_memberships` (`organisation_id`,`user_id`,`left_at`);--> statement-breakpoint
+CREATE INDEX `team_memberships_team_idx` ON `team_memberships` (`team_id`,`left_at`);--> statement-breakpoint
+CREATE TABLE `teams` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`lead_user_id` text,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`lead_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `teams_org_name_uq` ON `teams` (`organisation_id`,`name`);--> statement-breakpoint
+CREATE TABLE `user_notification_prefs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`type` text NOT NULL,
+	`enabled` integer DEFAULT true NOT NULL,
+	`updated_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `user_notification_prefs_uq` ON `user_notification_prefs` (`user_id`,`type`);--> statement-breakpoint
+CREATE TABLE `users` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`email` text NOT NULL,
+	`password_hash` text NOT NULL,
+	`name` text NOT NULL,
+	`role` text NOT NULL,
+	`title` text,
+	`is_active` integer DEFAULT true NOT NULL,
+	`deactivated_at` text,
+	`deactivated_by_user_id` text,
+	`anonymised_at` text,
+	`capacity_hours_per_week` real,
+	`avatar_colour` text DEFAULT '#6366f1' NOT NULL,
+	`can_view_team_workloads` integer DEFAULT false NOT NULL,
+	`can_view_analytics` integer DEFAULT false NOT NULL,
+	`session_version` integer DEFAULT 1 NOT NULL,
+	`last_login_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`deactivated_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `users_email_uq` ON `users` (`email`);--> statement-breakpoint
+CREATE INDEX `users_org_role_idx` ON `users` (`organisation_id`,`role`,`is_active`);--> statement-breakpoint
+CREATE TABLE `work_sessions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`status_id_at_start` text NOT NULL,
+	`category_at_start` text NOT NULL,
+	`transition_id` text NOT NULL,
+	`started_at` text NOT NULL,
+	`ended_at` text,
+	`end_reason` text,
+	`duration_seconds` integer,
+	`note` text,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`status_id_at_start`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`transition_id`) REFERENCES `job_status_transitions`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `work_sessions_open_per_user_uq` ON `work_sessions` (`user_id`) WHERE ended_at IS NULL;--> statement-breakpoint
+CREATE INDEX `work_sessions_job_idx` ON `work_sessions` (`job_id`,`started_at`);--> statement-breakpoint
+CREATE INDEX `work_sessions_user_idx` ON `work_sessions` (`organisation_id`,`user_id`,`started_at`);--> statement-breakpoint
+CREATE INDEX `work_sessions_transition_idx` ON `work_sessions` (`transition_id`);--> statement-breakpoint
+CREATE TABLE `workflow_statuses` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`workflow_id` text NOT NULL,
+	`key` text NOT NULL,
+	`name` text NOT NULL,
+	`category` text NOT NULL,
+	`colour` text DEFAULT '#94a3b8' NOT NULL,
+	`sort_order` integer NOT NULL,
+	`is_initial` integer DEFAULT false NOT NULL,
+	`description` text,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`workflow_id`) REFERENCES `workflows`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `workflow_statuses_key_uq` ON `workflow_statuses` (`workflow_id`,`key`);--> statement-breakpoint
+CREATE UNIQUE INDEX `workflow_statuses_name_uq` ON `workflow_statuses` (`workflow_id`,`name`) WHERE archived_at IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `workflow_statuses_initial_uq` ON `workflow_statuses` (`workflow_id`) WHERE is_initial = 1 AND archived_at IS NULL;--> statement-breakpoint
+CREATE INDEX `workflow_statuses_wf_order_idx` ON `workflow_statuses` (`workflow_id`,`sort_order`);--> statement-breakpoint
+CREATE INDEX `workflow_statuses_org_cat_idx` ON `workflow_statuses` (`organisation_id`,`category`);--> statement-breakpoint
+CREATE TABLE `workflow_transitions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`workflow_id` text NOT NULL,
+	`from_status_id` text NOT NULL,
+	`to_status_id` text NOT NULL,
+	`label` text,
+	`allowed_roles` text NOT NULL,
+	`requires_assigned_editor` integer DEFAULT false NOT NULL,
+	`assignee_only` integer DEFAULT false NOT NULL,
+	`is_reopen` integer DEFAULT false NOT NULL,
+	`archived_at` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`workflow_id`) REFERENCES `workflows`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`from_status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`to_status_id`) REFERENCES `workflow_statuses`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `workflow_transitions_uq` ON `workflow_transitions` (`from_status_id`,`to_status_id`);--> statement-breakpoint
+CREATE INDEX `workflow_transitions_from_idx` ON `workflow_transitions` (`workflow_id`,`from_status_id`);--> statement-breakpoint
+CREATE TABLE `workflows` (
+	`id` text PRIMARY KEY NOT NULL,
+	`organisation_id` text NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`is_default` integer DEFAULT false NOT NULL,
+	`archived_at` text,
+	`created_by_user_id` text,
+	`created_at` text NOT NULL,
+	`updated_at` text NOT NULL,
+	`version` integer DEFAULT 1 NOT NULL,
+	FOREIGN KEY (`organisation_id`) REFERENCES `organisations`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_by_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `workflows_org_name_uq` ON `workflows` (`organisation_id`,`name`);--> statement-breakpoint
+CREATE UNIQUE INDEX `workflows_one_default_uq` ON `workflows` (`organisation_id`) WHERE is_default = 1 AND archived_at IS NULL;

@@ -134,9 +134,15 @@ export function capitalise(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-/** "in-progress" → "In progress" (for displaying enum-like keys). */
+/** "in-progress" → "In progress", "stalledDays" → "Stalled days" (for displaying enum-like / field keys). */
 export function humanise(key: string): string {
-  return capitalise(key.replace(/[-_]+/g, " ").trim());
+  return capitalise(
+    key
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[-_]+/g, " ")
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 /** Detect Apple platforms on the client for ⌘ vs Ctrl hints. Safe on server. */

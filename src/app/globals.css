@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Never scan the SQLite directory: WAL/SHM files are locked while the app runs (Turbopack panics on them). */
+@source not "../../data";
 
 /* ------------------------------------------------------------------ */
 /*  Proofline design tokens                                            */

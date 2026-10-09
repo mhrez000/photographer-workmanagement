@@ -650,3 +650,41 @@ export const LOGIN_RATE_LIMIT = { attempts: 5, windowMinutes: 15 } as const;
 export const SWEEP_MIN_INTERVAL_MINUTES = 5;
 export const BCRYPT_COST = 12;
 export const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#8b5cf6", "#64748b", "#d97706", "#0891b2"] as const;
+
+/* ------------------------------------------------------------------ */
+/*  Audit causes (activity_events.metadata.cause)                      */
+/* ------------------------------------------------------------------ */
+
+/** Why an event was written; recorded in every activity_events.metadata (ARCHITECTURE.md §5). */
+export const EVENT_CAUSES = ["user", "automation", "sweep", "seed", "recompute"] as const;
+export type EventCause = (typeof EVENT_CAUSES)[number];
+
+/* ------------------------------------------------------------------ */
+/*  External link providers (job_links.provider, derived from host)    */
+/* ------------------------------------------------------------------ */
+
+/** Values written to job_links.provider (see deriveLinkProvider in src/lib/validation/links.ts). */
+export const LINK_PROVIDERS = ["drive", "dropbox", "onedrive", "frameio", "wetransfer", "lightroom", "pixieset", "other"] as const;
+export type LinkProvider = (typeof LINK_PROVIDERS)[number];
+
+export const LINK_PROVIDER_LABELS: Record<LinkProvider, string> = {
+  drive: "Google Drive",
+  dropbox: "Dropbox",
+  onedrive: "OneDrive",
+  frameio: "Frame.io",
+  wetransfer: "WeTransfer",
+  lightroom: "Lightroom",
+  pixieset: "Pixieset",
+  other: "Link",
+};
+
+/* ------------------------------------------------------------------ */
+/*  Reports (read-side queries part 2)                                 */
+/* ------------------------------------------------------------------ */
+
+/** `GET /api/reports/:kind` kinds. */
+export const REPORT_KINDS = ["production", "editors", "photographers", "business"] as const;
+export type ReportKind = (typeof REPORT_KINDS)[number];
+
+/** Reporting range presets (mirrors `RangePreset` in src/lib/dates.ts). */
+export const RANGE_PRESETS = ["today", "this_week", "this_month", "last_month", "last_7_days", "last_30_days", "custom"] as const;

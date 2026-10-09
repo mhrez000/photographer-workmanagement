@@ -29,7 +29,9 @@ describe("civil dates in timezone", () => {
   it("computes tz offset and day bounds", () => {
     expect(tzOffsetMs(NOW, TZ)).toBe(11 * 3_600_000);
     expect(startOfCivilDayIso("2026-10-09", TZ)).toBe("2026-10-08T13:00:00.000Z");
-    expect(endOfCivilDayIso("2026-10-09", TZ)).toBe("2026-10-09T13:00:00.000Z");
+    expect(endOfCivilDayIso("2026-10-09", TZ)).toBe("2026-10-09T12:59:59.999Z");
+    expect(civilDate(endOfCivilDayIso("2026-10-09", TZ), TZ)).toBe("2026-10-09");
+    expect(daysRemaining(endOfCivilDayIso("2026-10-09", TZ), TZ, NOW)).toBe(0);
     // Winter (no DST): UTC+10
     expect(startOfCivilDayIso("2026-06-15", TZ)).toBe("2026-06-14T14:00:00.000Z");
   });

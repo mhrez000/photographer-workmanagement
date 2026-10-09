@@ -11,6 +11,7 @@ import type * as s from "@/db/schema";
 import type {
   Action,
   BottleneckKind,
+  EventCause,
   EventType,
   EventVisibility,
   KanbanColumn,
@@ -113,6 +114,8 @@ export interface ContextSettings {
   editorsSeeTeamJobs: boolean;
   editorsSeeTeamWorkloads: boolean;
   automationsEnabled: boolean;
+  /** organisation_settings.audit_notifications (write a notification.sent event per notification). */
+  auditNotifications?: boolean;
 }
 
 /**
@@ -136,6 +139,13 @@ export interface AuthContext {
   now: () => string;
   /** Request correlation id written into event metadata. */
   requestId: string;
+  /**
+   * Default `metadata.cause` for events written with this context. Omitted →
+   * "user" for human contexts, "sweep" for the system context.
+   */
+  cause?: EventCause;
+  /** Set by the automation runner: stamped on events (activity_events.automation_run_id). */
+  automationRunId?: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -230,6 +240,8 @@ export interface JobRow {
   primaryLink: { id: string; kind: LinkKind; url: string; label: string | null } | null;
   estimatedHours: number | null;
   version: number;
+  /** Seconds since the job entered its current status (`now − statusEnteredAt`); set by src/server/queries. */
+  timeInStatusSeconds?: number;
 }
 
 export interface LinkView {
@@ -633,6 +645,8 @@ export interface ActivityFeedItem {
   job: JobRef | null;
   /** Actor-less frozen sentence; UI renders "<actor> <summary>". */
   summary: string;
+  /** Full feed line incl. actor and job (describeEventForFeed), e.g. `Sarah completed “PJ-0007 Smith St”`. */
+  sentence?: string;
   previousValue: unknown;
   newValue: unknown;
   metadata: Record<string, unknown>;
@@ -699,7 +713,17 @@ export interface Paginated<T> {
 
 export interface ApiErrorBody {
   error: {
-    code: "validation" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "invalid_transition" | "rate_limited" | "internal";
+    code:
+      | "validation"
+      | "unauthorized"
+      | "forbidden"
+      | "not_found"
+      | "conflict"
+      | "invalid_transition"
+      | "ambiguous_target"
+      | "editor_required"
+      | "rate_limited"
+      | "internal";
     message: string;
     details?: unknown;
     /** For 409: the current row so the client can show a conflict dialog. */
@@ -729,3 +753,376 @@ export interface PermissionMatrixRow {
 }
 
 export type { Action, KpiBucket };
+
+/** The actor's running timer with its job (topbar pill, My Work). */
+export interface RunningSessionView extends WorkSessionView {
+  job: JobRef;
+}
+
+/** One entry of a note's edit-history drawer (read from note.* activity events). */
+export interface NoteHistoryEntry {
+  eventId: string;
+  eventType: "note.added" | "note.edited" | "note.archived" | "note.restored";
+  at: string;
+  actor: UserRef | null;
+  previousBody: string | null;
+  newBody: string | null;
+  editCount: number | null;
+}
+
+/** Time-tracking totals for a job (Time tab). Running sessions count up to now. */
+export interface SessionTotals {
+  totalSeconds: number;
+  runningCount: number;
+  byUser: { user: UserRef; seconds: number }[];
+  byCategory: Partial<Record<StatusCategory, number>>;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Part 3 — read-side queries part 2 (dashboard, analytics, reports,  */
+/*  directories, settings views). Produced by src/server/queries/*.    */
+/* ------------------------------------------------------------------ */
+
+/** A user row without secrets (same shape as services/_shared SafeUser). */
+export type UserProfile = Omit<User, "passwordHash" | "sessionVersion">;
+
+/** Mean closed-stage duration per category (stage averages). */
+export interface StageAverage {
+  category: StatusCategory;
+  avgSeconds: number;
+  /** Closed stage rows measured. */
+  count: number;
+}
+
+/** Declaration merge: per-person tables and stage averages on the analytics overview. */
+export interface AnalyticsOverview {
+  editors?: PerformanceRow[];
+  photographers?: PhotographerPerformanceRow[];
+  stageAverages?: StageAverage[];
+}
+
+/** `/team/performance`: both tables for one range. */
+export interface PerformanceReport {
+  range: ResolvedRange;
+  editors: PerformanceRow[];
+  photographers: PhotographerPerformanceRow[];
+}
+
+/** `/api/analytics/editors/:userId`. */
+export interface EditorAnalytics {
+  range: ResolvedRange;
+  editor: UserRef;
+  performance: PerformanceRow;
+  trend: TrendPoint[];
+  stageAverages: StageAverage[];
+}
+
+/** `/api/analytics/me` (My Performance). */
+export interface MyAnalytics {
+  range: ResolvedRange;
+  role: Role;
+  /** Editing performance (editors, or anyone who edited in range). */
+  editor: PerformanceRow | null;
+  /** Shooting performance (photographers). */
+  photographer: PhotographerPerformanceRow | null;
+  trend: TrendPoint[];
+  stageAverages: StageAverage[];
+}
+
+export interface DashboardPersonal {
+  myWorkload: WorkloadRow | null;
+  myPerformance: PerformanceRow | null;
+  myPhotographerPerformance: PhotographerPerformanceRow | null;
+  /** Next jobs for the actor (editor: held jobs; photographer: own jobs), overdue first then by due date. */
+  queuePreview: JobRow[];
+}
+
+/** `GET /api/dashboard`. Lists are already scoped to the viewer. */
+export interface DashboardData {
+  variant: "management" | "personal";
+  kpis: KpiSummary;
+  /** null when the viewer may not see team workloads. */
+  workloads: WorkloadRow[] | null;
+  bottlenecks: BottleneckAlert[];
+  recentActivity: ActivityFeedItem[];
+  dueToday: JobRow[];
+  overdue: JobRow[];
+  recentCompleted: JobRow[];
+  /** This month (org tz) over the viewer's scope; revisionRate 0..1, onTimePercent 0..100. */
+  rates: { completedThisMonth: number; revisionRate: number | null; onTimePercent: number | null };
+  /** Editor leaderboard for this month (performance.view only). */
+  editorPerformance: PerformanceRow[] | null;
+  personal: DashboardPersonal | null;
+  layout: import("@/db/schema").DashboardLayout;
+  asOf: string;
+}
+
+export type ReportCell = string | number | boolean | null;
+
+export interface ReportColumn {
+  key: string;
+  label: string;
+  /** hours = number of hours (2 dp); percent = 0..100 (1 dp); date = ISO instant. */
+  kind: "text" | "number" | "hours" | "percent" | "date";
+}
+
+export interface Report {
+  kind: import("./constants").ReportKind;
+  title: string;
+  range: ResolvedRange;
+  generatedAt: string;
+  columns: ReportColumn[];
+  rows: Record<string, ReportCell>[];
+  totals: Record<string, ReportCell> | null;
+}
+
+/** Job counts per client / project / person (visible jobs only for P/E). */
+export interface JobCounts {
+  total: number;
+  open: number;
+  overdue: number;
+  dueToday: number;
+  completed: number;
+  completedThisMonth: number;
+}
+
+export interface ClientListItem {
+  client: Pick<Client, "id" | "name" | "contactName" | "email" | "phone" | "colour" | "archivedAt" | "createdByUserId" | "createdAt" | "version">;
+  projectCount: number;
+  counts: JobCounts;
+}
+
+export interface ProjectListItem {
+  project: Pick<Project, "id" | "name" | "clientId" | "address" | "startDate" | "endDate" | "archivedAt" | "createdByUserId" | "createdAt" | "version">;
+  client: ClientRef;
+  counts: JobCounts;
+}
+
+export interface ClientDetail extends ClientListItem {
+  notes: string | null;
+  createdBy: UserRef | null;
+  projects: ProjectListItem[];
+  jobs: JobRow[];
+}
+
+export interface ProjectDetail extends ProjectListItem {
+  description: string | null;
+  createdBy: UserRef | null;
+  jobs: JobRow[];
+}
+
+export interface TeamRef {
+  id: string;
+  name: string;
+}
+
+export interface DirectoryStats {
+  active: number;
+  dueToday: number;
+  overdue: number;
+  completedThisMonth: number;
+  /** 0..1 over the last 30 days; null when nothing was approved. */
+  revisionRate: number | null;
+}
+
+/** `/team/photographers`, `/team/editors` rows. email/title are null in the reduced projection. */
+export interface DirectoryEntry {
+  user: UserRef;
+  email: string | null;
+  title: string | null;
+  teams: TeamRef[];
+  /** null without workloads.view_team (except the viewer's own row). */
+  stats: DirectoryStats | null;
+}
+
+/** `/team/users/[id]` and `/settings/users/[id]`. */
+export interface UserDetailView {
+  ref: UserRef;
+  /** Full safe row for management and self; null in the reduced projection. */
+  profile: UserProfile | null;
+  teams: TeamRef[];
+  /** Resolved capacity (null in the reduced projection). */
+  capacityHoursPerWeek: number | null;
+  openJobCount: number | null;
+  workload: WorkloadDetail | null;
+  canManage: boolean;
+}
+
+export interface TeamMembershipView {
+  id: string;
+  user: UserRef;
+  joinedAt: string;
+  leftAt: string | null;
+  addedBy: UserRef | null;
+  removedBy: UserRef | null;
+}
+
+export interface TeamView {
+  id: string;
+  name: string;
+  description: string | null;
+  lead: UserRef | null;
+  archivedAt: string | null;
+  version: number;
+  members: UserRef[];
+  memberCount: number;
+}
+
+export interface TeamDetail extends TeamView {
+  /** Full membership ledger (team.manage only; [] otherwise). */
+  memberships: TeamMembershipView[];
+}
+
+export interface SettingsView {
+  organisation: { id: string; name: string; slug: string };
+  settings: OrganisationSettings;
+  canManage: boolean;
+}
+
+export interface NotificationPrefView {
+  type: NotificationType;
+  label: string;
+  mandatory: boolean;
+  enabled: boolean;
+}
+
+export interface JobTypeView {
+  id: string;
+  name: string;
+  colour: string;
+  workflow: { id: string; name: string };
+  defaultEstimatedHours: number | null;
+  sortOrder: number;
+  archivedAt: string | null;
+  version: number;
+  openJobCount: number;
+}
+
+export interface WorkflowListItem {
+  id: string;
+  name: string;
+  description: string | null;
+  isDefault: boolean;
+  archivedAt: string | null;
+  version: number;
+  statusCount: number;
+  openJobCount: number;
+  jobTypes: JobTypeRef[];
+}
+
+export interface WorkflowStatusView extends StatusRef {
+  isInitial: boolean;
+  description: string | null;
+  archivedAt: string | null;
+  version: number;
+  /** Jobs currently in this status. */
+  jobCount: number;
+}
+
+export interface WorkflowTransitionView {
+  id: string;
+  fromStatusId: string;
+  toStatusId: string;
+  label: string | null;
+  allowedRoles: Role[];
+  requiresAssignedEditor: boolean;
+  assigneeOnly: boolean;
+  isReopen: boolean;
+  archivedAt: string | null;
+  /** true for engine-generated cancel edges not stored in workflow_transitions. */
+  generated: boolean;
+}
+
+export interface WorkflowGraph {
+  workflow: WorkflowListItem;
+  statuses: WorkflowStatusView[];
+  transitions: WorkflowTransitionView[];
+  /** validateWorkflowDefinition() messages (empty = valid). */
+  validation: string[];
+}
+
+export interface AutomationRunCounts {
+  total: number;
+  pending: number;
+  matched: number;
+  skipped: number;
+  succeeded: number;
+  failed: number;
+}
+
+export interface AutomationListItem {
+  id: string;
+  name: string;
+  description: string | null;
+  isEnabled: boolean;
+  triggerType: Automation["triggerType"];
+  trigger: import("@/db/schema").AutomationTrigger;
+  conditions: import("@/db/schema").AutomationCondition[];
+  actions: import("@/db/schema").AutomationAction[];
+  sortOrder: number;
+  archivedAt: string | null;
+  version: number;
+  createdBy: UserRef | null;
+  createdAt: string;
+  updatedAt: string;
+  runCounts: AutomationRunCounts;
+  lastRunAt: string | null;
+}
+
+export interface AutomationRunView {
+  id: string;
+  automation: { id: string; name: string };
+  job: JobRef | null;
+  triggerEventId: string;
+  triggerEventType: string | null;
+  depth: number;
+  status: AutomationRun["status"];
+  conditionsSnapshot: import("@/db/schema").AutomationCondition[];
+  actionsPerformed: import("@/db/schema").AutomationActionResult[];
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface AutomationDetail extends AutomationListItem {
+  recentRuns: AutomationRunView[];
+}
+
+export interface SavedViewItem {
+  id: string;
+  name: string;
+  scope: SavedView["scope"];
+  config: import("@/db/schema").SavedViewConfig;
+  isShared: boolean;
+  isDefault: boolean;
+  owner: UserRef;
+  isMine: boolean;
+  archivedAt: string | null;
+  version: number;
+  updatedAt: string;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Part 4 — automations engine (dry run)                              */
+/* ------------------------------------------------------------------ */
+
+/** `POST /api/automations/:id/dry-run { jobId }` — what the rule would do to this job, without writing. */
+export interface AutomationDryRunResult {
+  automationId: string;
+  job: JobRef;
+  trigger: {
+    type: import("@/lib/constants").AutomationTriggerType;
+    /** null = no event on this job to test the trigger against. */
+    matched: boolean | null;
+    eventId: string | null;
+    detail: string;
+  };
+  conditions: { condition: import("@/db/schema").AutomationCondition; met: boolean; detail: string }[];
+  conditionsMet: boolean;
+  /** Why the rule would not run at all (kill switch / disabled / archived); null = it would. */
+  blockedBy: string | null;
+  /** Trigger not refuted, conditions met and not blocked. */
+  wouldRun: boolean;
+  actions: { action: import("@/db/schema").AutomationAction; description: string; problem: string | null }[];
+}
