@@ -4,7 +4,7 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 import { buttonVariants, type ButtonProps } from "./button";
 import { Spinner } from "./spinner";
-import { useAutoFlip, useControllableOpen, useDismissable } from "./use-dismissable";
+import { useAutoFlip, useControllableOpen, useDismissable, useViewportClamp } from "./use-dismissable";
 
 interface PopoverContextValue {
   open: boolean;
@@ -106,6 +106,7 @@ export function PopoverContent(props: PopoverContentProps) {
 function PopoverPanel({ align = "start", side = "bottom", className, children, onKeyDown, ...props }: PopoverContentProps) {
   const { setOpen, triggerRef, contentRef, contentId } = usePopoverContext("PopoverContent");
   useAutoFlip(contentRef, side);
+  useViewportClamp(contentRef, align);
 
   React.useEffect(() => {
     const frame = requestAnimationFrame(() => {

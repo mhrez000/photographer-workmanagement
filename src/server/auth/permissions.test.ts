@@ -381,6 +381,29 @@ describe("links, notes, comments", () => {
     expect(can(ctx("editor"), "comment.edit", { ...recent, deletedAt: NOW })).toBe(false);
   });
 
+  it("comment.edit / comment.delete: a PAST editor's own comments are read-only (matches comment.add)", () => {
+    const recent = "2026-10-09T02:55:00.000Z";
+    const onPast = { job: job("past"), authorUserId: ME, createdAt: recent, deletedAt: null };
+    const onAssigned = { job: job("assigned"), authorUserId: ME, createdAt: recent, deletedAt: null };
+    // past editor (reassigned off the job): can still see it, but no longer write to its thread
+    expect(can(ctx("editor"), "job.view", job("past"))).toBe(true);
+    expect(can(ctx("editor"), "comment.add", job("past"))).toBe(false);
+    expect(can(ctx("editor"), "comment.edit", onPast)).toBe(false);
+    expect(can(ctx("editor"), "comment.delete", onPast)).toBe(false);
+    // a teammate's job seen through editorsSeeTeamJobs is read-only as well
+    const onTeam = { ...onPast, job: job("team") };
+    expect(can(ctx("editor", {}, { editorsSeeTeamJobs: true }), "comment.edit", onTeam)).toBe(false);
+    expect(can(ctx("editor", {}, { editorsSeeTeamJobs: true }), "comment.delete", onTeam)).toBe(false);
+    // the current editor keeps both
+    expect(can(ctx("editor"), "comment.edit", onAssigned)).toBe(true);
+    expect(can(ctx("editor"), "comment.delete", onAssigned)).toBe(true);
+    // photographers keep job.view scope (team job visible via the flag)
+    const photoTeam = { ...onPast, job: job("team") };
+    expect(can(ctx("photographer", {}, { photographersSeeTeamJobs: true }), "comment.edit", photoTeam)).toBe(true);
+    expect(can(ctx("photographer", {}, { photographersSeeTeamJobs: true }), "comment.delete", photoTeam)).toBe(true);
+    expect(can(ctx("photographer"), "comment.delete", photoTeam)).toBe(false);
+  });
+
   it("comment.delete: management any, others own", () => {
     const c = { job: job("assigned"), authorUserId: STRANGER, createdAt: NOW };
     expect(can(ctx("manager"), "comment.delete", c)).toBe(true);

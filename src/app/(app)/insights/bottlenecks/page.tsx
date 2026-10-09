@@ -127,7 +127,8 @@ function AlertCard({ alert, rows, timeZone, canReassign }: { alert: BottleneckAl
   const Icon = meta.icon;
   const critical = alert.severity === "critical";
   const jobs = alert.jobs.map((j) => ({ ref: j, row: rows.get(j.id) ?? null }));
-  const hidden = alert.jobs.length - jobs.filter((j) => j.row).length;
+  // Refs the server withheld (not visible to this viewer) + any that vanished since the alert was computed.
+  const hidden = (alert.hiddenJobCount ?? 0) + (alert.jobs.length - jobs.filter((j) => j.row).length);
 
   const jobItem = ({ ref, row }: (typeof jobs)[number]) => (
     <li key={ref.id} className="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:gap-4">
@@ -143,7 +144,7 @@ function AlertCard({ alert, rows, timeZone, canReassign }: { alert: BottleneckAl
       </div>
       {row ? (
         <BottleneckJobActions
-          job={{ id: row.id, jobNumber: row.jobNumber, name: row.name, version: row.version, editor: row.editor }}
+          job={{ id: row.id, jobNumber: row.jobNumber, name: row.name, version: row.version, editor: row.editor, statusCategory: row.statusCategory }}
           canReassign={canReassign}
           timeZone={timeZone}
         />

@@ -21,6 +21,7 @@ import { assertCan } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { InvalidTransitionError, NotFoundError, ValidationError } from "@/server/errors";
 import { assertVersion, loadRevisionInOrg, loadUserInOrg, parseInput } from "./_shared";
+import { assignEditorToJob } from "./assignments";
 import { notify } from "./notifications";
 import {
   applyMove,
@@ -66,10 +67,19 @@ export interface UpdateRevisionResult {
   changed: string[];
 }
 
-/** `PATCH /api/revisions/:id` — while open only; audited `revision.updated` with the changed fields. */
+/**
+ * `PATCH /api/revisions/:id` — while open only; audited `revision.updated` with the changed fields.
+ *
+ * The open revision's assignee IS the job's editor (§4.4, db:verify
+ * `open_revision_assignee_is_editor`): naming another editor reassigns the
+ * job through `assignEditorToJob` in the same transaction (permission
+ * `job.assign_editor`, like the revision-request path), which re-attributes
+ * the stage, re-points this revision and sends the new editor the mandatory
+ * `revision_requested` notice. Nobody is ever told about a job they cannot open.
+ */
 export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): UpdateRevisionResult {
   const p = parseInput(UpdateRevisionInput, input);
-  const revision = loadRevisionInOrg(tx, ctx, p.revisionId);
+  let revision = loadRevisionInOrg(tx, ctx, p.revisionId);
   const { job, ref } = loadVisibleJob(tx, ctx, revision.jobId);
   assertCan(ctx, "revision.request", ref);
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is closed and can no longer be edited");
@@ -77,13 +87,22 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
   const patch: Partial<Pick<JobRevision, "assigneeUserId" | "instructions" | "priority" | "dueDate">> = {};
   const prev: Record<string, unknown> = {};
   const next: Record<string, unknown> = {};
+  const changed: string[] = [];
   if (p.assigneeUserId !== undefined && p.assigneeUserId !== revision.assigneeUserId) {
     if (p.assigneeUserId) {
       const user = loadUserInOrg(tx, ctx, p.assigneeUserId);
       if (!user.isActive) throw new ValidationError(`${user.name} is deactivated`);
       if (user.role !== "editor") throw new ValidationError(`${user.name} is not an editor`);
     }
-    patch.assigneeUserId = p.assigneeUserId;
+    if (p.assigneeUserId && p.assigneeUserId !== job.editorId) {
+      // Hand the JOB over (stage re-attribution + revision re-point + notices).
+      assertCan(ctx, "job.assign_editor", ref);
+      assignEditorToJob(tx, ctx, job, p.assigneeUserId, { reason: "Revision assignee changed" });
+      revision = loadRevision(tx, revision.id);
+      changed.push("assigneeUserId");
+    } else {
+      patch.assigneeUserId = p.assigneeUserId;
+    }
   }
   if (p.instructions !== undefined) {
     const value = p.instructions === "" ? null : p.instructions;
@@ -95,7 +114,7 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
     if (value !== revision.dueDate) patch.dueDate = value;
   }
   const keys = Object.keys(patch) as (keyof typeof patch)[];
-  if (keys.length === 0) return { revision, changed: [] };
+  if (keys.length === 0) return { revision, changed };
   for (const k of keys) {
     prev[k] = revision[k];
     next[k] = patch[k];
@@ -129,7 +148,7 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
       linkPath: jobLinkPath(job.id, `revision-${revision.revisionNumber}`),
     });
   }
-  return { revision: updated, changed: keys };
+  return { revision: updated, changed: [...changed, ...keys] };
 }
 
 /** `POST /api/revisions/:id/resolve` — the editor resubmits (revision → resubmitted). */

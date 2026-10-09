@@ -111,7 +111,7 @@ describe("startTimer", () => {
   });
 
   it("applies timer.use scope: editors only on assigned jobs in EDITOR_WORKING; no terminal or paused jobs", () => {
-    expect(() => run(ids.users.editor2, (tx, ctx) => startTimer(tx, ctx, { jobId }))).toThrow(ForbiddenError);
+    expect(() => run(ids.users.editor2, (tx, ctx) => startTimer(tx, ctx, { jobId }))).toThrow(NotFoundError); // invisible job → 404
     const assigned = insertJobFixture(db, ids, { statusKey: "assigned" }).job.id;
     expect(() => run(ids.users.editor1, (tx, ctx) => startTimer(tx, ctx, { jobId: assigned }))).toThrow(ForbiddenError);
     const completed = insertJobFixture(db, ids, { statusKey: "completed" }).job.id;
@@ -213,7 +213,7 @@ describe("reads", () => {
 
     const forEditor = listSessions(db, contextFor(db, ids.users.editor1), jobId);
     expect(forEditor.map((s) => s.user.id)).toEqual([ids.users.editor1]);
-    expect(() => listSessions(db, contextFor(db, ids.users.editor2), jobId)).toThrow(ForbiddenError);
+    expect(() => listSessions(db, contextFor(db, ids.users.editor2), jobId)).toThrow(NotFoundError); // invisible job → 404
 
     const totals = sessionTotals(db, contextFor(db, ids.users.manager), jobId);
     expect(totals).toMatchObject({ totalSeconds: 2400, runningCount: 1, byCategory: { in_progress: 2400 } });

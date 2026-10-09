@@ -247,7 +247,11 @@ export function CalendarView({ events, view, date, today, range, weekStartsOn, t
               <ul aria-label={`Colours: ${COLOUR_MODE_LABELS[colourMode]}`} className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 {legend.slice(0, 12).map((item) => (
                   <li key={item.key} className="inline-flex items-center gap-1.5">
-                    <span aria-hidden="true" className="size-2 rounded-full" style={{ backgroundColor: item.colour }} />
+                    <span aria-hidden="true" className="inline-flex items-center -space-x-0.5">
+                      {item.colours.map((c) => (
+                        <span key={c} className="size-2 rounded-full ring-1 ring-canvas" style={{ backgroundColor: c }} />
+                      ))}
+                    </span>
                     {item.label}
                   </li>
                 ))}
@@ -355,7 +359,7 @@ function EventChip({ event, day, variant = "compact" }: { event: CalendarEvent; 
       ) : (
         <Icon aria-hidden="true" className="size-3 shrink-0" />
       )}
-      <span className="numeric shrink-0 opacity-80">{event.job.jobNumber.replace(/^[A-Z]+-0*/, "#")}</span>
+      <span className="numeric shrink-0 opacity-80">{event.job.jobNumber}</span>
       <span className={cn("truncate", done && "line-through")}>{event.job.name}</span>
     </button>
   );

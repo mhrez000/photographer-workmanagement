@@ -2,7 +2,7 @@ import "server-only";
 import type { DbLike } from "@/db";
 import type { AuthContext } from "@/lib/types";
 import { NotFoundError, ValidationError } from "@/server/errors";
-import { listJobs, type JobListResult } from "@/server/queries/jobs";
+import { JOB_LIST_API_KEYS, JobListApiQuerySchema, listJobs, type JobListResult } from "@/server/queries/jobs";
 
 export interface SafeJobList {
   result: JobListResult;
@@ -18,10 +18,27 @@ export interface SafeJobList {
  * a 404 / error page. Permission errors still propagate.
  */
 export function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string, string>): SafeJobList {
-  let current = input;
+  // Keys listJobs would strip anyway (e.g. utm params) are dropped here so the
+  // returned `input` — reused as the "Load more" query — passes the strict GET /api/jobs.
+  const known = new Set(JOB_LIST_API_KEYS);
+  let current: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input)) if (known.has(k)) current[k] = v;
   let staleView = false;
   let unknownBad = false;
   const ignored = new Set<string>();
+  // Values the strict API would reject (e.g. `filter=foo` — page parsing ignores an
+  // unknown alias, GET /api/jobs 400s on it) are dropped up front with a notice, so the
+  // list shown and its "Load more" query always agree.
+  const strict = JobListApiQuerySchema.safeParse(current);
+  if (!strict.success) {
+    for (const issue of strict.error.issues) {
+      const key = String(issue.path[0] ?? "");
+      if (key in current) {
+        delete current[key];
+        ignored.add(key);
+      }
+    }
+  }
   const noticeOf = (): string | null => {
     const parts: string[] = [];
     if (staleView) parts.push("That saved view is no longer available, so its filters were not applied.");

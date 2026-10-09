@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clients, projects } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { clients, organisationSettings, projects } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { buildCsv, csvFileName, escapeCsvCell } from "@/lib/csv";
 import { ForbiddenError, NotFoundError, ValidationError } from "@/server/errors";
@@ -66,6 +67,15 @@ describe("ranges", () => {
     expect(resolveRangeInput(ctx, undefined).preset).toBe("last_30_days");
   });
 
+  it("this_week honours organisation_settings.week_starts_on", () => {
+    const ctx = contextFor(db, ids.users.manager);
+    db.update(organisationSettings).set({ weekStartsOn: 0 }).where(eq(organisationSettings.organisationId, ids.organisationId)).run();
+    const sunday = resolveRangeInput(ctx, { range: "this_week" }, undefined, { db });
+    expect(sunday.from).toBe("2026-10-03T14:00:00.000Z"); // Sun 4 Oct 00:00 AEST (DST starts 02:00 that day)
+    expect(sunday.to).toBe("2026-10-10T13:00:00.000Z"); // Sun 11 Oct 00:00 AEDT
+    expect(resolveRangeInput(ctx, { range: "this_week" }, undefined, { weekStartsOn: 1 }).from).toBe("2026-10-04T13:00:00.000Z");
+  });
+
   it("rejects malformed ranges with a 400", () => {
     const ctx = contextFor(db, ids.users.manager);
     expect(() => resolveRangeInput(ctx, { range: "forever" })).toThrow(ValidationError);
@@ -113,7 +123,47 @@ describe("getReport", () => {
     expect(lines).toHaveLength(r.rows.length + 3); // header + rows + totals + trailing ""
     expect(lines[lines.length - 2].startsWith("Total,2 jobs")).toBe(true);
     expect(csv).toContain(`${s.fresh.jobNumber},"'=cmd(""calc""), evil"`);
-    expect(reportFileName(r)).toBe(`production-report-${r.range.from.slice(0, 10)}-${r.range.to.slice(0, 10)}.csv`);
+    // civil first / last day of the range in the org timezone (not the UTC slice of the bounds)
+    expect(reportFileName(r, "Australia/Sydney")).toBe("production-report-2026-09-01-2026-09-30.csv");
+  });
+
+  it("csv: file name for this_month in October is the civil month", () => {
+    const r = getReport(db, contextFor(db, ids.users.manager), "editors", { range: "this_month" });
+    expect(r.range.from).toBe("2026-09-30T14:00:00.000Z"); // 1 Oct 00:00 AEST
+    expect(reportFileName(r, "Australia/Sydney")).toBe("editors-report-2026-10-01-2026-10-31.csv");
+  });
+
+  it("csv: date cells are org-local 'YYYY-MM-DD HH:mm'; deadline columns are civil dates", () => {
+    const s = scenario();
+    const r = getReport(db, contextFor(db, ids.users.manager), "production", SEPT);
+    const lines = toCsv(r, "Australia/Sydney").split("\r\n");
+    const header = lines[0].split(",");
+    const row = lines.find((l) => l.startsWith(`${s.old.jobNumber},`))?.split(",") ?? [];
+    const cell = (label: string) => row[header.indexOf(label)];
+    expect(cell("Created")).toBe("2026-08-20 10:00"); // 2026-08-20T00:00Z in AEST
+    expect(cell("Approved")).toBe("2026-09-11 10:00");
+    expect(cell("Completed")).toBe("2026-09-12 10:00");
+    expect(cell("Due")).toBe("2026-09-21"); // stored 2026-09-20T14:00Z = 21 Sep 00:00 AEST
+    expect(lines.join("\n")).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/);
+  });
+
+  it("production turnaround total = business average for the same range (approved in range, unrounded)", () => {
+    scenario();
+    // touched in range but approved BEFORE it: must not move the total
+    const early = insertJobFixture(db, ids, { statusKey: "in_progress", at: "2026-08-01T00:00:00.000Z" }).job;
+    moveJob(db, ids, early.id, "submitted", "2026-08-05T00:00:00.000Z");
+    moveJob(db, ids, early.id, "approved", "2026-08-07T00:00:00.000Z");
+    moveJob(db, ids, early.id, "completed", "2026-09-03T00:00:00.000Z");
+    // a second in-range approval with a non-round turnaround
+    const odd = insertJobFixture(db, ids, { statusKey: "in_progress", at: "2026-09-02T00:00:00.000Z" }).job;
+    moveJob(db, ids, odd.id, "submitted", "2026-09-02T05:00:00.000Z");
+    moveJob(db, ids, odd.id, "approved", "2026-09-02T07:20:33.000Z");
+    const ctx = contextFor(db, ids.users.owner);
+    const prod = getReport(db, ctx, "production", SEPT);
+    const biz = getReport(db, ctx, "business", SEPT);
+    expect(prod.rows.map((x) => x.jobNumber)).toContain(early.jobNumber);
+    expect(prod.totals?.turnaroundHours).toBe(biz.totals?.avgTurnaroundHours);
+    expect(prod.totals?.turnaroundHours).not.toBeNull();
   });
 
   it("editors / photographers / business reports aggregate per person and client", () => {

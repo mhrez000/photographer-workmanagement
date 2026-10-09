@@ -9,7 +9,7 @@ Call it from client islands with `api` from `src/lib/api-client.ts` (`api.get/po
 | Topic | Rule |
 |---|---|
 | Envelope | Success `{ data: T }` (200). Failure `{ error: { code, message, details?, current? } }`. `api` unwraps `data` and throws `ApiError` on failure. |
-| Error codes | `validation` 400 (`details.fieldErrors` = `ApiError.fieldErrors`) · `unauthorized` 401 (api-client redirects to `/login?expired=1`) · `forbidden` 403 · `not_found` 404 · `conflict` 409 (`current` = the row now; show ConflictDialog) · `invalid_transition` / `ambiguous_target` (`details.candidates`) / `editor_required` 422 · `rate_limited` 429 · `internal` 500 (`requestId`). |
+| Error codes | `validation` 400 (`details.fieldErrors` = `ApiError.fieldErrors`) · `unauthorized` 401 (api-client redirects to `/login?expired=1`) · `forbidden` 403 · `not_found` 404 (also any unknown `/api` path, including bare `/api`) · `method_not_allowed` 405 (a method the route does not implement; `Allow` header lists the supported ones) · `conflict` 409 (`current` = the row now; show ConflictDialog) · `invalid_transition` / `ambiguous_target` (`details.candidates`) / `editor_required` 422 · `rate_limited` 429 · `internal` 500 (`requestId`). |
 | 404 vs 403 | Ids outside your organisation, and jobs you cannot see, are **404**. Collaboration routes (comments/notes/links/timer/sessions) return **403** for an in-org job you may not act on. |
 | CSRF | Every non-GET request must send an `Origin` matching the host (browser `fetch` does). Missing/foreign Origin → 403. |
 | `expectedVersion` | Required on job field/status mutations (the job's `version`); optional on admin rows and assignments (checked only when sent). Always send it. A stale value → 409. |
@@ -162,7 +162,7 @@ Roles: **O** owner · **M** manager · **P** photographer · **E** editor. "own"
 | GET | `/api/bottlenecks` | — | `BottleneckAlert[]` | bottlenecks.view |
 | GET | `/api/reports/:kind` | `range \| from,to`, `format=json\|csv` | `Report`; `format=csv` → `text/csv` attachment (`Content-Disposition` filename from `reportFileName`). Unknown kind → 404 | reports.view / export.csv |
 
-Kinds: `production | editors | photographers | business`. Link a CSV download with a plain `<a href="/api/reports/editors?range=last_30_days&format=csv">`.
+Kinds: `production | editors | photographers | business`. The query-string form `GET /api/reports?type=<kind>&range=…[&format=csv]` is equivalent (missing/unknown `type` → 404). Link a CSV download with a plain `<a href="/api/reports/editors?range=last_30_days&format=csv">`.
 
 ## Dashboard · Boards
 
@@ -175,7 +175,7 @@ Kinds: `production | editors | photographers | business`. Link a CSV download wi
 | GET | `/api/kanban` | job filters (as `/api/jobs`), board options | `KanbanBoard` | all, row-scoped |
 | POST | `/api/kanban/drop` | `{ jobId, column: KanbanColumn, expectedVersion, toStatusId?, reason?, revision?, startTimer? }` | `KanbanDropResponse` — see below | per edge |
 | GET | `/api/calendar` | `CalendarQuerySchema` (`from, to`, filters) | `CalendarEvent[]` | all, row-scoped |
-| GET | `/api/timeline` | `TimelineQuerySchema` | `TimelineRow[]` | row-scoped |
+| GET | `/api/timeline` | `TimelineQuerySchema` (`from, to, groupBy, editorId` = bars held by, `jobId`, plus `q, currentEditorId[], photographerId[], priority[]` applied in SQL before the 500-row cap) | `TimelineRow[]` | row-scoped |
 | GET | `/api/team-work` | `TeamWorkQuerySchema` | `TeamWorkGroup[]` | O M; P/E with team-jobs visibility |
 
 **Kanban drop** (ARCHITECTURE §4.6). Send the drop; act on `data.kind`:

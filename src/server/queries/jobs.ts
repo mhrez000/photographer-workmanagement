@@ -9,6 +9,17 @@
  * Cancelled jobs are hidden unless asked for (`includeCancelled`, a
  * `statusCategory` filter containing "cancelled", or `quick=cancelled`).
  * Cursors are opaque offsets (stable for a fixed filter + sort).
+ *
+ * Drill-down params (so a KPI / bottleneck count reproduces as a list):
+ *   - `completedFrom` / `completedTo` — §8 completedInRange: open stage is
+ *     `completed` and `completed_at ∈ [from, to)` (civil `to` = inclusive day)
+ *   - `revisedFrom` / `revisedTo`     — a revision was REQUESTED in [from, to)
+ *   - `statusEnteredBefore`           — `status_entered_at < value`
+ * Aliases: `filter=mine` ≡ `quick=my_jobs`.
+ *
+ * Page-level parsing (`listJobs`) strips unknown keys so a hand-edited link
+ * still renders; the REST endpoint (`listJobsApi`) is strict: an unknown
+ * query key is a 400.
  */
 import { and, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
@@ -24,7 +35,7 @@ import {
   type JobTableColumn,
   type QuickFilter,
 } from "@/lib/constants";
-import { endOfCivilDayIso, startOfCivilDayIso } from "@/lib/dates";
+import { addCivilDays, endOfCivilDayIso, startOfCivilDayIso } from "@/lib/dates";
 import type { AuthContext, JobRow, SavedViewConfig } from "@/lib/types";
 import { NotFoundError } from "@/server/errors";
 import { parseInput } from "@/server/services/_shared";
@@ -77,6 +88,9 @@ const single = <T extends z.ZodType>(item: T) => z.preprocess((v) => (Array.isAr
 /** Civil date (YYYY-MM-DD, org tz) or full ISO instant. */
 const dateBound = single(z.string().regex(/^\d{4}-\d{2}-\d{2}(T.*)?$/, "Expected YYYY-MM-DD or an ISO timestamp").optional());
 
+/** Strict variant for the drill-down bounds: a real civil date or a real ISO instant (with offset). */
+const instantBound = single(z.union([z.iso.date(), z.iso.datetime({ offset: true })]).optional());
+
 export interface SortSpec {
   column: JobTableColumn;
   dir: "asc" | "desc";
@@ -112,6 +126,16 @@ export const JobListFiltersSchema = z.object({
   priority: list(z.enum(PRIORITIES)),
   dueFrom: dateBound,
   dueTo: dateBound,
+  /** completedInRange (§8): open stage completed and completed_at ≥ completedFrom … */
+  completedFrom: instantBound,
+  /** … and completed_at < completedTo (a civil date includes that whole day). */
+  completedTo: instantBound,
+  /** A revision was requested on/after this instant (civil date = start of that day). */
+  revisedFrom: instantBound,
+  /** … and before this instant (civil date includes that whole day). */
+  revisedTo: instantBound,
+  /** Current status entered strictly before this instant (review bottleneck drill-down). */
+  statusEnteredBefore: instantBound,
   isPaused: boolish,
   includeCancelled: boolish,
   sort: list(sortItem),
@@ -235,6 +259,27 @@ function quickFilterSql(ctx: AuthContext, quick: QuickFilter, b: OrgDayBounds): 
   }
 }
 
+const CIVIL_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Instant bound for the drill-down params. `from`: civil date → start of that
+ * day; `to` (exclusive): civil date → start of the NEXT day (the day is
+ * included). ISO instants are normalised to the stored `…Z` form so string
+ * comparison in SQLite is chronological.
+ */
+function instantOf(value: string, side: "from" | "to", tz: string): string {
+  if (CIVIL_RE.test(value)) return startOfCivilDayIso(side === "from" ? value : addCivilDays(value, 1), tz);
+  return new Date(value).toISOString();
+}
+
+/** EXISTS a revision requested in [from, to) on the outer job (alias-safe: works with or without joins). */
+function revisedInSql(from: string | null, to: string | null): SQL {
+  const parts: SQL[] = [sql`r.job_id = "jobs"."id"`];
+  if (from !== null) parts.push(sql`r.requested_at >= ${from}`);
+  if (to !== null) parts.push(sql`r.requested_at < ${to}`);
+  return sql`exists (select 1 from job_revisions r where ${sql.join(parts, sql` and `)})`;
+}
+
 function dueBound(value: string, side: "from" | "to", tz: string): SQL {
   const civil = /^\d{4}-\d{2}-\d{2}$/.test(value);
   if (side === "from") {
@@ -274,6 +319,15 @@ export function jobFiltersWhere(ctx: AuthContext, f: JobListFilters, bounds: Org
   if (f.priority?.length) parts.push(inArray(jobs.priority, f.priority));
   if (f.dueFrom) parts.push(dueBound(f.dueFrom, "from", tz));
   if (f.dueTo) parts.push(dueBound(f.dueTo, "to", tz));
+  if (f.completedFrom || f.completedTo) {
+    parts.push(eq(jobs.statusCategory, "completed"));
+    if (f.completedFrom) parts.push(gte(jobs.completedAt, instantOf(f.completedFrom, "from", tz)));
+    if (f.completedTo) parts.push(lt(jobs.completedAt, instantOf(f.completedTo, "to", tz)));
+  }
+  if (f.revisedFrom || f.revisedTo) {
+    parts.push(revisedInSql(f.revisedFrom ? instantOf(f.revisedFrom, "from", tz) : null, f.revisedTo ? instantOf(f.revisedTo, "to", tz) : null));
+  }
+  if (f.statusEnteredBefore) parts.push(lt(jobs.statusEnteredAt, instantOf(f.statusEnteredBefore, "from", tz)));
   if (f.isPaused !== undefined) parts.push(eq(jobs.isPaused, f.isPaused));
 
   const wantsCancelled =
@@ -404,8 +458,74 @@ function groupLabel(groupBy: JobGroupBy, key: string, rawLabel: string): string 
 /*  listJobs                                                           */
 /* ------------------------------------------------------------------ */
 
+/** Accepted spellings of `filter=` and the quick filter each one means. */
+export const JOB_LIST_FILTER_ALIASES = { mine: "my_jobs" } as const satisfies Record<string, QuickFilter>;
+type FilterAlias = keyof typeof JOB_LIST_FILTER_ALIASES;
+const isAlias = (v: string): v is FilterAlias => Object.prototype.hasOwnProperty.call(JOB_LIST_FILTER_ALIASES, v);
+
+/**
+ * Folds alias keys into the canonical vocabulary: `filter=mine` → `quick`
+ * gains `my_jobs`. Unknown `filter` values are left in place (the strict API
+ * schema rejects them; page parsing drops them).
+ */
+function applyAliases(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const input = raw as Record<string, unknown>;
+  if (input.filter === undefined) return raw;
+  const values = (Array.isArray(input.filter) ? input.filter : [input.filter])
+    .flatMap((v) => (typeof v === "string" ? v.split(",") : []))
+    .map((v) => v.trim())
+    .filter((v) => v !== "");
+  const known = values.filter(isAlias);
+  const unknown = values.filter((v) => !isAlias(v));
+  const out: Record<string, unknown> = { ...input };
+  if (unknown.length) out.filter = unknown.join(",");
+  else delete out.filter;
+  if (known.length) {
+    const quick = input.quick === undefined || input.quick === "" ? [] : Array.isArray(input.quick) ? input.quick : [input.quick];
+    out.quick = [...quick, ...known.map((k) => JOB_LIST_FILTER_ALIASES[k])];
+  }
+  return out;
+}
+
 export function parseJobListFilters(db: DbLike, ctx: AuthContext, input: unknown): JobListFilters {
-  return parseInput(JobListFiltersSchema, mergeView(db, ctx, input ?? {}));
+  return parseInput(JobListFiltersSchema, mergeView(db, ctx, applyAliases(input ?? {})));
+}
+
+/** UI-only keys the work table may forward to GET /api/jobs (accepted and ignored). */
+const API_IGNORED_KEYS = ["tab", "columns", "dir"] as const;
+
+/**
+ * `GET /api/jobs` query: the filter vocabulary + `filter` (alias) + the
+ * ignored UI keys, STRICT — a misspelt or unsupported key is a 400 instead
+ * of silently returning every job.
+ */
+export const JobListApiQuerySchema = JobListFiltersSchema.extend({
+  filter: list(z.enum(Object.keys(JOB_LIST_FILTER_ALIASES) as [FilterAlias, ...FilterAlias[]])),
+  tab: z.unknown().optional(),
+  columns: z.unknown().optional(),
+  dir: z.unknown().optional(),
+}).strict();
+
+/** Every query key GET /api/jobs accepts (pages forward only these to "Load more"). */
+export const JOB_LIST_API_KEYS: readonly string[] = Object.keys(JobListApiQuerySchema.shape);
+
+/** Strict check of the REST query (unknown key / alias value → ValidationError); returns the input minus the ignored UI keys. */
+function checkApiQuery(input: unknown): Record<string, unknown> {
+  parseInput(JobListApiQuerySchema, input ?? {});
+  const rest: Record<string, unknown> = { ...((input ?? {}) as Record<string, unknown>) };
+  for (const k of API_IGNORED_KEYS) delete rest[k];
+  return rest;
+}
+
+/** The filters GET /api/jobs applies for `input` (strict; aliases folded; saved view merged). */
+export function parseJobListApiQuery(db: DbLike, ctx: AuthContext, input: unknown): JobListFilters {
+  return parseJobListFilters(db, ctx, checkApiQuery(input));
+}
+
+/** `GET /api/jobs` — `listJobs` behind the strict query schema. */
+export function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}): JobListResult {
+  return listJobs(db, ctx, checkApiQuery(input));
 }
 
 /**

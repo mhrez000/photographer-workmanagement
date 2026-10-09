@@ -1,6 +1,6 @@
 /** GET /api/users?role&active&q -> (UserProfile | UserRef)[]; POST (invite) -> { user, tempPassword } */
 import { getDb } from "@/db/index";
-import { read } from "@/app/api/_lib/route";
+import { read, methodNotAllowed } from "@/app/api/_lib/route";
 import { requireContext } from "@/server/auth/session";
 import { bodyOrNull, handle } from "@/server/http";
 import { listUsers } from "@/server/queries/users";
@@ -14,3 +14,8 @@ export const POST = handle(async (req) => {
   runAutomationsAfterCommit(getDb(), ctx.organisationId);
   return result;
 });
+
+/** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
+export const PUT = methodNotAllowed(["GET", "POST"]);
+export const PATCH = methodNotAllowed(["GET", "POST"]);
+export const DELETE = methodNotAllowed(["GET", "POST"]);

@@ -141,9 +141,10 @@ describe("link permissions", () => {
     expect(() => run(ids.users.editor1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://example.com" }))).toThrow(
       ForbiddenError,
     );
+    // editor2 cannot see the job → 404 (no existence oracle)
     expect(() =>
       run(ids.users.editor2, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "finished_files", url: "https://example.com" })),
-    ).toThrow(ForbiddenError);
+    ).toThrow(NotFoundError);
     const own = run(ids.users.editor1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "finished_files", url: "https://f.io/1" }));
     const photographers = run(ids.users.photographer1, (tx, ctx) =>
       addLink(tx, ctx, { jobId, kind: "reference", url: "https://example.com/ref" }),

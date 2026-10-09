@@ -7,6 +7,8 @@ Tick `[x]` only with evidence (page visited, API call made, test name, or file:l
 Line format: `- [ ] **Rxx.y** — requirement — _Verify:_ page/API/test`.
 Verification legend: **UI** = manual page check · **API** = route handler call · **DB** = schema/query inspection · **Unit** = vitest · **E2E** = Playwright · **Code** = static code review.
 
+**Canonical routes** (ARCHITECTURE §10): the spec's `/workspace/my-work`, `/workspace/all-work`, `/workspace/team-work` and `/team/editors/[id]` (also `/team/photographers/[id]`) are served at `/workspace/my`, `/workspace/all`, `/workspace/team` and `/team/users/[id]`. The legacy paths 307-redirect to them (`redirects()` in `next.config.ts`), so either form can be used to verify.
+
 ---
 
 ## R00 — Preamble / Core positioning
@@ -19,7 +21,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 
 ## R01 — Core product concept (visibility & accountability)
 
-- [ ] **R01.1** — Owner can see all active jobs at a glance — _Verify:_ UI: `/dashboard` Active Jobs KPI + `/workspace/all-work`
+- [ ] **R01.1** — Owner can see all active jobs at a glance — _Verify:_ UI: `/dashboard` Active Jobs KPI + `/workspace/all`
 - [ ] **R01.2** — Responsible photographer visible per job — _Verify:_ UI: All Work table Photographer column; `/jobs/[id]` header
 - [ ] **R01.3** — Assigned editor visible per job — _Verify:_ UI: All Work table Editor column; `/jobs/[id]` header
 - [ ] **R01.4** — Current stage/status visible per job — _Verify:_ UI: Status badge on all job lists and detail
@@ -31,7 +33,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 - [ ] **R01.10** — Each editor's workload visible — _Verify:_ UI: `/team/workloads`
 - [ ] **R01.11** — Editor completion speed (turnaround) visible — _Verify:_ UI: `/team/performance` average turnaround column
 - [ ] **R01.12** — Revision counts visible per job and per editor — _Verify:_ UI: job table Revision Count column; performance revision rate
-- [ ] **R01.13** — What an editor worked on last week/month is answerable — _Verify:_ UI: `/team/editors/[id]` completed-this-week/month + history list
+- [ ] **R01.13** — What an editor worked on last week/month is answerable — _Verify:_ UI: `/team/users/[id]` completed-this-week/month + history list
 - [ ] **R01.14** — Who changed a job, when, and what changed is visible — _Verify:_ UI: `/jobs/[id]` Activity tab shows actor, timestamp, before/after
 - [ ] **R01.15** — Submission timestamp visible per job — _Verify:_ UI: job History shows "submitted" event with time
 - [ ] **R01.16** — Approval timestamp visible per job — _Verify:_ UI: job History shows "approved" event with time
@@ -58,7 +60,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 - [ ] **R02.16** — Owner/Admin can manage org settings — _Verify:_ UI: `/settings/organisation`
 - [ ] **R02.17** — Owner/Admin can view analytics — _Verify:_ UI: `/insights/analytics`
 - [ ] **R02.18** — Photographer can create jobs — _Verify:_ API: POST `/api/jobs` as photographer → 201
-- [ ] **R02.19** — Photographer sees own jobs (created or assigned as photographer) — _Verify:_ UI: `/workspace/my-work` as photographer
+- [ ] **R02.19** — Photographer sees own jobs (created or assigned as photographer) — _Verify:_ UI: `/workspace/my` as photographer
 - [ ] **R02.20** — Photographer can view assigned editors on their jobs — _Verify:_ UI: job detail as photographer shows editor
 - [ ] **R02.21** — Photographer can add job details — _Verify:_ API: PATCH own job → 200
 - [ ] **R02.22** — Photographer can add external media links — _Verify:_ API: POST `/api/jobs/[id]/links` on own job → 201
@@ -70,7 +72,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 - [ ] **R02.28** — Photographer sees job history — _Verify:_ UI: Activity/History tab visible to photographer
 - [ ] **R02.29** — Photographer team-wide workload visibility is permission-gated — _Verify:_ Code: `permissions.ts` `canViewTeamWorkloads`; UI: hidden when not granted
 - [ ] **R02.30** — Photographer cannot see jobs they are not on (unless permitted) — _Verify:_ API: GET `/api/jobs/[otherId]` as photographer → 403/404
-- [ ] **R02.31** — Editor has a focused "My Work" workspace — _Verify:_ UI: `/workspace/my-work` as editor
+- [ ] **R02.31** — Editor has a focused "My Work" workspace — _Verify:_ UI: `/workspace/my` as editor
 - [ ] **R02.32** — Editor My Work shows assigned jobs only — _Verify:_ API: GET `/api/jobs?mine=1` as editor returns only assigned
 - [ ] **R02.33** — Editor card shows priority, due date, client/project, photographer — _Verify:_ UI: My Work card fields
 - [ ] **R02.34** — Editor card shows job type, current status, estimated workload — _Verify:_ UI: My Work card fields
@@ -205,7 +207,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 
 ## R07 — Editor workspace (My Queue)
 
-- [ ] **R07.1** — My Work page for editors at `/workspace/my-work` — _Verify:_ UI
+- [ ] **R07.1** — My Work page for editors at `/workspace/my` — _Verify:_ UI
 - [ ] **R07.2** — Section: Due Today — _Verify:_ UI + Unit grouping function
 - [ ] **R07.3** — Section: Due Tomorrow — _Verify:_ UI + Unit
 - [ ] **R07.4** — Section: Upcoming — _Verify:_ UI + Unit
@@ -231,7 +233,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 
 ## R08 — Photographer / Owner workspace (All Work)
 
-- [ ] **R08.1** — All Work table at `/workspace/all-work` — _Verify:_ UI
+- [ ] **R08.1** — All Work table at `/workspace/all` — _Verify:_ UI
 - [ ] **R08.2** — Column: Job (name + jobNumber) — _Verify:_ UI
 - [ ] **R08.3** — Column: Client — _Verify:_ UI
 - [ ] **R08.4** — Column: Photographer — _Verify:_ UI
@@ -254,7 +256,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 - [ ] **R08.21** — Saved views (persisted per user) — _Verify:_ DB: `saved_views`; UI: save/load
 - [ ] **R08.22** — Row click → job detail (progressive disclosure) — _Verify:_ UI
 - [ ] **R08.23** — Pagination or virtualisation for 150+ jobs — _Verify:_ UI/API `?page=`
-- [ ] **R08.24** — Team Work view (`/workspace/team-work`) scoped by permission — _Verify:_ UI
+- [ ] **R08.24** — Team Work view (`/workspace/team`) scoped by permission — _Verify:_ UI
 
 ## R09 — Kanban view
 
@@ -297,7 +299,7 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 
 - [ ] **R12.1** — Workloads page `/team/workloads` — _Verify:_ UI
 - [ ] **R12.2** — Columns: Editor, Active, Due Today, Overdue, Completed, Revision Rate — _Verify:_ UI + DB
-- [ ] **R12.3** — Click editor → detail page `/team/editors/[id]` — _Verify:_ UI
+- [ ] **R12.3** — Click editor → detail page `/team/users/[id]` — _Verify:_ UI
 - [ ] **R12.4** — Detail: current jobs list — _Verify:_ UI
 - [ ] **R12.5** — Detail: completed jobs list — _Verify:_ UI
 - [ ] **R12.6** — Detail: overdue jobs list — _Verify:_ UI
@@ -826,3 +828,53 @@ Verification legend: **UI** = manual page check · **API** = route handler call 
 R00: 5 · R01: 18 · R02: 48 · R03: 22 · R04: 38 · R05: 18 · R06: 24 · R07: 23 · R08: 24 · R09: 9 · R10: 14 · R11: 5 · R12: 12 · R13: 12 · R14: 8 · R15: 11 · R16: 10 · R17: 14 · R18: 5 · R19: 12 · R20: 18 · R21: 18 · R22: 15 · R23: 11 · R24: 6 · R25: 14 · R26: 16 · R27: 28 · R28: 8 · R29: 18 · R30: 23 · R31: 15 · R32: 14 · R33: 4 · R34: 12 · R35: 9 · R36: 19 · R37: 9 · R38: 10 · R39: 18 · R40: 30 · R41: 19 · R42: 16
 
 **Total: 682 items** (R00–R40 spec sections = 647; R41 success criteria = 19; R42 CLAUDE.md rules = 16).
+---
+
+## Audit results (final integration pass, 9 Oct 2026)
+
+**Method.** The individual lines above are not ticked one by one. Each one was classified using: the Vitest suite (`npx vitest run`: 60 files, 951 tests passing), the Playwright suite against the shared seeded server (`E2E_BASE_URL=http://localhost:3130 npx playwright test`: 71 tests in 22 files, desktop + mobile, 71 passed, none skipped or `fixme`), the six audit-remediation batches (A–F) and the skeptic re-check of their fixes, and code inspection during this pass. Integrity: `npm run db:verify` and `GET /api/system/integrity` both report 0 drift and 0 structural issues (677 jobs checked by `db:verify`, 674 by the endpoint at the time of the check).
+
+| Result | Items | Notes |
+|---|---:|---|
+| **Met** | 680 | Includes 11 met with a documented deviation in wording or mechanism (listed below) |
+| **Partial** | 2 | R26.15, R32.11 |
+| **Missing** | 0 | — |
+| **Total** | 682 | R00–R42 (counts per section in "Item count" above) |
+
+**Met with a documented deviation** (the requirement holds, but not exactly as the checklist line words it):
+
+- R06.18: system, sweep and automation events have no user actor (`actor_user_id` is null). Feeds render them as "System" or the automation name, and the cause is in `metadata` (ARCHITECTURE §5).
+- R08.23: lists page with an opaque cursor and "Load more" (≤ 200 rows per page), not `?page=`.
+- R15.2–R15.4: time tracking is `POST /api/jobs/:id/timer { action }`, not `/work-sessions`.
+- R16.6: authors and managers can soft-delete a comment. A placeholder stays in the thread, and the body is kept in the `comment.deleted` event (`previousValue`).
+- R20.17: saved-view CRUD is `/api/views`.
+- R21.12: mark-read is `POST /api/notifications/:id/read`.
+- R22.11: automations are queued by `recordEvent()` and run right after the commit (`withTxThenAutomations`), not inside `transitionJobStatus()` (ARCHITECTURE §7). They still fire for every status change.
+- R29.10: the error shape is `{ error: { code, message, details?, current? } }`. Every `/api` response is JSON, including unknown paths (404), unsupported methods (405) and missing sessions (401).
+- R32.14 / R02.30: in-org jobs you cannot see are also 404, not 403 (no existence leak). Collaboration routes return 403 for an in-org job you cannot act on (ARCHITECTURE §14).
+- R36.18: reports are served at `/api/reports/:kind` and at `/api/reports?type=<kind>&range=…` (alias added in this pass).
+- R39.1: `db:seed` refuses to run on a non-empty database. `db:reset` is the idempotent path.
+
+**Partial (known gaps):**
+
+- **R26.15 — contrast:** light and dark themes come from tokens. No automated WCAG AA contrast audit (for example axe) has been run, so AA compliance is not verified.
+- **R28.8 — touch targets ≥ 40 px (now met):** on touch devices (`pointer: coarse`) the shared `Button`/`Input`/`Select` md size is 40 px and icon buttons are 32–40 px; desktop density is unchanged.
+- **R32.11 — per-role permission overrides:** `/settings/roles` is a read-only matrix generated from `POLICY`. The only stored customisation is the per-user visibility flags (`canViewTeamWorkloads`, `canViewAnalytics`). There are no editable per-role overrides (ARCHITECTURE §10).
+
+**Fixed in this pass:**
+
+- Unsupported methods now return a JSON 405 on every route, and bare `/api` returns a JSON 404.
+- Drill-down filters (completed week, revision window, time in status, include cancelled) now show as chips and "Clear all" removes them.
+- A `filter=` value the API rejects no longer breaks "Load more".
+- Day bounds are now correct when local midnight does not exist (America/Santiago, America/Havana).
+- The assign and revision-assignee dialogs used to hide every editor not already on the job. They now list all active editors.
+- "Reload latest" in the conflict dialog no longer leads to a second 409.
+- An exact job-number match in Ctrl+K is now highlighted, so Enter opens it.
+- Timeline search and filters used to apply after a 500-row cap. They now apply before it.
+- The Links tab no longer overflows at 1024 px (tooltip alignment).
+- Two legacy jobs had an open-revision assignee that did not match the job's editor. They were repaired through `PATCH /api/revisions/:id`.
+
+**Open (not product gaps):**
+
+- External schedulers can now run the sweep for every organisation via `GET|POST /api/system/cron/sweep` with `Authorization: Bearer $CRON_SECRET` (ARCHITECTURE §14).
+- The e2e suite runs on one worker against `next dev`, and a full run takes about 10 minutes.

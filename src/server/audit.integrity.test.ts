@@ -317,3 +317,15 @@ describe("recordEvent", () => {
     expect(event?.summary).toBe("flagged the job as overdue");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  The audit module's surface: one insert path, nothing that rewrites */
+/* ------------------------------------------------------------------ */
+
+describe("audit module exports", () => {
+  it("exposes only recordEvent / recordEvents / redact / isManagementEvent (no update or delete helper can sneak in)", async () => {
+    const mod = await import("./audit");
+    const allowed = ["recordEvent", "recordEvents", "redact", "isManagementEvent"];
+    expect(Object.keys(mod).filter((k) => !allowed.includes(k))).toEqual([]);
+  });
+});

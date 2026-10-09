@@ -17,6 +17,7 @@ export * from "./form-field";
 export * from "./icon-button";
 export * from "./input";
 export * from "./kbd";
+export * from "./mod-kbd";
 export * from "./kpi-card";
 export * from "./label";
 export * from "./page-header";

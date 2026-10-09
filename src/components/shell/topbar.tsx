@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { Bell, ChevronRight, Menu, Plus, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { NavMatch, QuickAction } from "@/config/nav";
+import type { NavMatch, QuickAction, RouteTitle } from "@/config/nav";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Kbd } from "@/components/ui/kbd";
@@ -15,7 +15,10 @@ import type { ShellUser } from "./types";
 export interface TopbarProps {
   user: ShellUser;
   unreadCount: number;
-  match: NavMatch | null;
+  /** Nav match for the current route (legacy input; `heading` wins when given). */
+  match?: NavMatch | null;
+  /** Resolved title + eyebrow for the current route (see `resolveRouteTitle`). */
+  heading?: RouteTitle | null;
   /** Overrides the derived page title. */
   title?: React.ReactNode;
   isMac: boolean;
@@ -34,7 +37,8 @@ function formatCount(count: number): string {
 export function Topbar({
   user,
   unreadCount,
-  match,
+  match = null,
+  heading,
   title,
   isMac,
   onOpenMenu,
@@ -42,8 +46,9 @@ export function Topbar({
   primaryAction,
   logoutAction,
 }: TopbarProps) {
-  const eyebrow = match?.group.label;
-  const pageTitle = title ?? match?.item.label ?? "Proofline";
+  const resolved = heading ?? (match ? { title: match.item.label, eyebrow: match.group.label } : null);
+  const eyebrow = resolved?.eyebrow;
+  const pageTitle = title ?? resolved?.title ?? "Proofline";
   const PrimaryIcon = primaryAction?.icon ?? Plus;
 
   return (
@@ -64,7 +69,10 @@ export function Topbar({
             <ChevronRight aria-hidden="true" className="hidden size-3.5 text-ink-subtle sm:inline" />
           </>
         ) : null}
-        <h1 className="truncate text-base font-semibold tracking-tight text-ink">{pageTitle}</h1>
+        {/* Not a heading: every page owns its <h1> (PageHeader); this is a location label. */}
+        <p data-topbar-title="" className="truncate text-base font-semibold tracking-tight text-ink">
+          {pageTitle}
+        </p>
       </div>
 
       <div className="flex items-center gap-1 sm:gap-1.5">

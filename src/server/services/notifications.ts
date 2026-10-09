@@ -14,17 +14,119 @@
  *
  * `notifications.read_at` is the only mutable column and is not audited
  * (explicit exemption, §5).
+ *
+ * Delivery channels (§6): the inserted row IS the in-app delivery. Other
+ * channels (email, push, …) implement `NotificationChannel` and are added
+ * with `registerNotificationChannel()`; `notify()` queues the inserted ids
+ * and `dispatchPendingNotifications()` hands them to every external channel
+ * AFTER the transaction committed (scheduled with setImmediate — transactions
+ * are synchronous, so by then the tx has committed or rolled back; rows that
+ * were rolled back no longer exist and are dropped). With only the in-app
+ * channel registered (the default) nothing is queued: the hook is a no-op.
  */
 import { and, count, eq, inArray, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, type DbLike, type Tx } from "@/db/index";
 import { jobComments, jobs, notifications, userNotificationPrefs, users } from "@/db/schema";
 import { MANAGEMENT_ROLES, NOTIFICATION_TYPE_META, type NotificationType } from "@/lib/constants";
-import type { AuthContext } from "@/lib/types";
+import type { AuthContext, Notification, User } from "@/lib/types";
 import { assertCan } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { NotFoundError } from "@/server/errors";
 import { parseInput } from "./_shared";
+
+/* ------------------------------------------------------------------ */
+/*  Channels                                                           */
+/* ------------------------------------------------------------------ */
+
+/** The recipient as a channel sees it (never the password hash). */
+export type NotificationRecipient = Pick<User, "id" | "name" | "email" | "role" | "organisationId">;
+
+/** A delivery channel. `deliver` runs post-commit; a rejection is logged, never rethrown. */
+export interface NotificationChannel {
+  id: string;
+  deliver(notification: Notification, user: NotificationRecipient): Promise<void>;
+}
+
+/** The in-app channel: the `notifications` row is the delivery, so there is nothing left to do. */
+export const IN_APP_CHANNEL: NotificationChannel = {
+  id: "in_app",
+  deliver: () => Promise.resolve(),
+};
+
+const channels = new Map<string, NotificationChannel>([[IN_APP_CHANNEL.id, IN_APP_CHANNEL]]);
+/** Notification ids inserted by notify() and not yet handed to the external channels. */
+const pendingDeliveries: string[] = [];
+let dispatchScheduled = false;
+
+/** Adds (or replaces, by id) a delivery channel. Returns an unregister function. */
+export function registerNotificationChannel(channel: NotificationChannel): () => void {
+  channels.set(channel.id, channel);
+  return () => {
+    if (channels.get(channel.id) === channel) channels.delete(channel.id);
+  };
+}
+
+/** Registered channels, in-app first. */
+export function notificationChannels(): NotificationChannel[] {
+  return Array.from(channels.values());
+}
+
+function externalChannels(): NotificationChannel[] {
+  return notificationChannels().filter((c) => c.id !== IN_APP_CHANNEL.id);
+}
+
+function queueDeliveries(ids: readonly string[]): void {
+  if (ids.length === 0 || externalChannels().length === 0) return;
+  pendingDeliveries.push(...ids);
+  if (dispatchScheduled) return;
+  dispatchScheduled = true;
+  setImmediate(() => {
+    dispatchScheduled = false;
+    dispatchPendingNotifications().catch((err: unknown) => {
+      console.warn("[notifications] post-commit dispatch failed", err instanceof Error ? err.message : err);
+    });
+  });
+}
+
+/**
+ * Post-commit dispatch: hands every queued notification that was committed
+ * to each external channel. Returns the number of (notification, channel)
+ * deliveries attempted. Safe to call any time (it drains the queue).
+ */
+export async function dispatchPendingNotifications(db: DbLike = getDb()): Promise<number> {
+  const ids = pendingDeliveries.splice(0, pendingDeliveries.length);
+  const targets = externalChannels();
+  if (ids.length === 0 || targets.length === 0) return 0;
+  const rows = db.select().from(notifications).where(inArray(notifications.id, ids)).all();
+  if (rows.length === 0) return 0;
+  const recipients = new Map(
+    db
+      .select({ id: users.id, name: users.name, email: users.email, role: users.role, organisationId: users.organisationId })
+      .from(users)
+      .where(inArray(users.id, Array.from(new Set(rows.map((r) => r.userId)))))
+      .all()
+      .map((u) => [u.id, u]),
+  );
+  let attempted = 0;
+  for (const row of rows) {
+    const user = recipients.get(row.userId);
+    if (!user) continue;
+    for (const channel of targets) {
+      attempted += 1;
+      try {
+        await channel.deliver(row, user);
+      } catch (err) {
+        console.warn(`[notifications] channel ${channel.id} failed for ${row.id}`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
+  return attempted;
+}
+
+/* ------------------------------------------------------------------ */
+/*  notify()                                                           */
+/* ------------------------------------------------------------------ */
 
 export interface NotifyInput {
   /** Candidate recipients; null/undefined/duplicates are ignored. */
@@ -139,6 +241,7 @@ export function notify(tx: Tx, ctx: AuthContext, input: NotifyInput): NotifyResu
     }
   }
 
+  queueDeliveries(inserted.map((r) => r.id));
   return { notificationIds: inserted.map((r) => r.id), recipientIds: inserted.map((r) => r.userId) };
 }
 

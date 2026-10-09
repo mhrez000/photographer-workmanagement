@@ -86,7 +86,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
       </PageHeader>
 
       <div className="flex flex-col gap-3">
-        <FilterBar quickFilters={[]} facets={["editor", "client", "priority"]} searchPlaceholder="Search jobs, clients, PJ-numbers…" />
+        <FilterBar quickFilters={[]} facets={["editor", "client", "priority"]} timeZone={ctx.settings.timezone} searchPlaceholder="Search jobs, clients, PJ-numbers…" />
         {notice ? (
           <p role="status" className="flex items-center gap-2 rounded-md border border-info/25 bg-info-soft/60 px-3 py-2 text-sm text-info-fg">
             <Info aria-hidden="true" className="size-4 shrink-0" />

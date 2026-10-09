@@ -7,7 +7,8 @@ import { getClientDetail, listClients } from "./clients";
 import { getProjectDetail, listProjects } from "./projects";
 import { getNotificationPrefs, getPermissionMatrix, getSettingsView } from "./settings";
 import { getTeamDetail, listTeams } from "./teams";
-import { getDirectory, getUserDetail, listUsers } from "./users";
+import { directoryStats, getDirectory, getUserDetail, listUsers } from "./users";
+import { computeWorkloads, getWorkloads } from "./workloads";
 import { getSavedView, listSavedViews } from "./views";
 import { getWorkflowGraph, listJobTypes, listWorkflows } from "./workflows";
 
@@ -144,5 +145,31 @@ describe("settings / workflows / automations / views", () => {
     ]);
     expect(getSavedView(db, ctx, "v2").config.filters.quick).toBe("overdue");
     expect(() => getSavedView(db, ctx, "v3")).toThrow(NotFoundError);
+  });
+});
+
+describe("editor directory stats = workload rows", () => {
+  it("active / dueToday / overdue match computeWorkloads even when the editor holds approved or delivered jobs", () => {
+    const e1 = ids.users.editor1;
+    insertJobFixture(db, ids, { statusKey: "submitted", editorId: e1 });
+    insertJobFixture(db, ids, { statusKey: "approved", editorId: e1 });
+    insertJobFixture(db, ids, { statusKey: "delivered", editorId: e1 });
+    insertJobFixture(db, ids, { statusKey: "accepted", editorId: ids.users.editor2, dueDate: "2026-10-08T12:59:59.999Z" });
+    const ctx = contextFor(db, ids.users.manager);
+    const editorIds = [e1, ids.users.editor2];
+    const stats = directoryStats(db, ctx, "editor", editorIds);
+    const rows = new Map(computeWorkloads(db, ctx).rows.map((r) => [r.editor.id, r]));
+    for (const id of editorIds) {
+      const row = rows.get(id);
+      expect(stats.get(id)?.active).toBe(row?.active);
+      expect(stats.get(id)?.dueToday).toBe(row?.dueToday);
+      expect(stats.get(id)?.overdue).toBe(row?.overdue);
+    }
+    expect(stats.get(e1)?.active).toBe(2); // in_progress + submitted; approved / delivered are not held
+    // the /team/editors directory and /api/workloads agree
+    const dir = new Map(getDirectory(db, ctx, "editor").map((d) => [d.user.id, d.stats]));
+    for (const w of getWorkloads(db, ctx)) if (dir.has(w.editor.id)) expect(dir.get(w.editor.id)?.active).toBe(w.active);
+    // and /team/users/[id] (WorkloadDetail) shows the same Active
+    expect(getUserDetail(db, ctx, e1).workload?.active).toBe(2);
   });
 });

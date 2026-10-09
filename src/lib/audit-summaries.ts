@@ -355,6 +355,12 @@ export function summarise(
       return `added ${article(linkKindLabel(firstStr("kind", next, meta)))} link`;
     case "link.replaced":
       return `replaced the ${linkKindLabel(firstStr("kind", meta, next, prev))} link`;
+    case "link.updated": {
+      const before = firstStr("kind", prev);
+      const after = firstStr("kind", next, meta);
+      if (before && after && before !== after) return `moved a link from ${linkKindLabel(before)} to ${linkKindLabel(after)}`;
+      return `relabelled the ${linkKindLabel(after ?? before)} link`;
+    }
     case "link.removed": {
       const reason = str(meta, "reason");
       const base = `removed the ${linkKindLabel(firstStr("kind", prev, meta))} link`;

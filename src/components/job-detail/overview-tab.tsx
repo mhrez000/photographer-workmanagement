@@ -10,58 +10,67 @@ import { formatDateTime } from "@/lib/dates";
 import type { JobDetail, NoteView, RevisionView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FinishedWorkPanel } from "./finished-work";
-import { formatSeconds, STAGE_LABELS, stageOf, type Stage } from "./format";
+import { formatSeconds, slotKind, STAGE_LABELS, STAGES, stageOf, stageTotalsFromCategories } from "./format";
 
 /* ------------------------------------------------------------------ */
 /*  Stage stepper                                                      */
 /* ------------------------------------------------------------------ */
 
-const LINEAR: readonly Stage[] = ["assignment", "editing", "review", "approval", "delivery"];
-
-function linearIndex(category: StatusCategory): number {
-  if (category === "new") return -1;
-  if (category === "completed") return LINEAR.length;
+/** Index of the job's current stage in STAGES (-1 = none, e.g. cancelled; STAGES.length = completed). */
+function currentStageIndex(category: StatusCategory): number {
+  if (category === "completed") return STAGES.length;
   const stage = stageOf(category);
-  if (stage === null) return -1;
-  return LINEAR.indexOf(stage === "revision" ? "editing" : stage);
+  return stage === null ? -1 : STAGES.indexOf(stage);
 }
 
+/**
+ * One step per production stage (Assignment → Editing → Review → Revision →
+ * Approval → Delivery), with the same per-stage totals as the Timeline tab
+ * (`stageTotalsFromCategories`). Revision is its own step and is shown as
+ * skipped when the job never had one. Three columns on narrow containers so
+ * labels never collide.
+ */
 function StageStepper({ detail }: { detail: JobDetail }) {
   const { job, metrics } = detail;
   const cancelled = job.statusCategory === "cancelled";
-  const current = linearIndex(job.statusCategory);
-  const seconds = (stage: Stage) =>
-    Object.entries(metrics.secondsPerCategory).reduce((sum, [cat, secs]) => {
-      const s = stageOf(cat as StatusCategory);
-      const mapped = s === "revision" ? "editing" : s;
-      return mapped === stage ? sum + (secs ?? 0) : sum;
-    }, 0);
+  const current = currentStageIndex(job.statusCategory);
+  const totals = stageTotalsFromCategories(metrics.secondsPerCategory);
+  const hadRevision = detail.revisions.length > 0 || totals.revision > 0;
 
   return (
-    <ol aria-label="Production stages" className={cn("grid grid-cols-5 gap-1.5", cancelled && "opacity-60")}>
-      {LINEAR.map((stage, i) => {
-        const done = i < current;
-        const active = i === current && !cancelled;
-        const spent = seconds(stage);
-        const label = stage === "editing" && job.statusCategory === "revision" ? "Revision" : STAGE_LABELS[stage];
-        return (
-          <li key={stage} aria-current={active ? "step" : undefined} className="flex min-w-0 flex-col gap-1.5">
-            <span
-              className={cn(
-                "h-1.5 rounded-full transition-colors",
-                done ? "bg-accent" : active ? "bg-accent/60 animate-pulse" : "bg-surface-muted ring-1 ring-inset ring-border",
-                active && job.statusCategory === "revision" && "bg-status-revision/70",
-              )}
-            />
-            <span className={cn("flex items-center gap-1 truncate text-xs", active ? "font-medium text-ink" : done ? "text-ink-secondary" : "text-ink-subtle")}>
-              {done ? <Check aria-hidden="true" className="size-3 shrink-0 text-accent-ink" /> : null}
-              {label}
-            </span>
-            <span className="hidden truncate text-2xs text-ink-subtle numeric sm:block">{spent > 0 ? formatSeconds(spent) : " "}</span>
-          </li>
-        );
-      })}
-    </ol>
+    <div className="@container">
+      <ol aria-label="Production stages" className={cn("grid grid-cols-3 gap-x-1.5 gap-y-3 @xl:grid-cols-6", cancelled && "opacity-60")}>
+        {STAGES.map((stage, i) => {
+          const skipped = stage === "revision" && !hadRevision && i !== current;
+          const done = i < current && !skipped;
+          const active = i === current && !cancelled;
+          const spent = totals[stage];
+          const label = STAGE_LABELS[stage];
+          const time = spent > 0 ? formatSeconds(spent) : skipped && i < current ? "None" : null;
+          return (
+            <li
+              key={stage}
+              aria-current={active ? "step" : undefined}
+              title={time ? `${label} · ${time}` : label}
+              className="flex min-w-0 flex-col gap-1.5"
+            >
+              <span
+                className={cn(
+                  "h-1.5 rounded-full transition-colors",
+                  done ? "bg-accent" : active ? "bg-accent/60 animate-pulse" : "bg-surface-muted ring-1 ring-inset ring-border",
+                  active && stage === "revision" && "bg-status-revision/70",
+                )}
+              />
+              <span className={cn("flex min-w-0 items-center gap-1 text-xs", active ? "font-medium text-ink" : done ? "text-ink-secondary" : "text-ink-subtle")}>
+                {done ? <Check aria-hidden="true" className="size-3 shrink-0 text-accent-ink" /> : null}
+                <span className="min-w-0 truncate">{label}</span>
+              </span>
+              <span className="truncate text-2xs text-ink-subtle numeric">{time ?? "\u00a0"}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -183,7 +192,7 @@ export function OverviewTab({ detail, timeZone, readableNoteKinds }: OverviewTab
   const done = CATEGORY_GROUPS.DONE.includes(job.statusCategory);
   const canAddFinished = actions.canAddLinkKinds.some((k) => LINK_KIND_META[k].finishedWork);
   const addHref = `/jobs/${job.id}?tab=links`;
-  const otherLinks = links.filter((s) => s.current && !LINK_KIND_META[s.kind].finishedWork);
+  const otherLinks = links.filter((s) => s.current && !LINK_KIND_META[slotKind(s)].finishedWork);
   const finished = (
     <FinishedWorkPanel links={finishedWork} slots={links} timeZone={timeZone} prominent={done} canAdd={canAddFinished} addHref={addHref} />
   );
@@ -235,7 +244,7 @@ export function OverviewTab({ detail, timeZone, readableNoteKinds }: OverviewTab
             {otherLinks.map((slot) =>
               slot.current ? (
                 <li key={slot.current.id} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-                  <span className="text-xs text-ink-muted sm:w-36 sm:shrink-0">{LINK_KIND_META[slot.kind].label}</span>
+                  <span className="text-xs text-ink-muted sm:w-36 sm:shrink-0">{LINK_KIND_META[slotKind(slot)].label}</span>
                   <ExternalLinkButton url={slot.current.url} label={slot.current.label} provider={slot.current.provider} variant="ghost" className="sm:flex-1" />
                 </li>
               ) : null,

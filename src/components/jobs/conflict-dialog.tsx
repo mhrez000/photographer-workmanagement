@@ -68,10 +68,16 @@ export function ConflictDialog({ open, onOpenChange, error, entity = "job", time
   const router = useRouter();
   const summary = error instanceof ApiError ? summarise(error.current) : null;
 
+  // Close in the SAME transition as the refresh, so the dialog disappears exactly when the
+  // refreshed server data renders: closing first let a quick retry reuse the stale version
+  // and hit the same 409 again.
+  const [refreshing, startRefresh] = React.useTransition();
   const reload = () => {
-    router.refresh();
-    onOpenChange(false);
-    onReload?.();
+    startRefresh(() => {
+      router.refresh();
+      onOpenChange(false);
+      onReload?.();
+    });
   };
 
   const rows: [string, string][] = [];
@@ -108,7 +114,7 @@ export function ConflictDialog({ open, onOpenChange, error, entity = "job", time
         <Button variant="ghost" onClick={() => onOpenChange(false)}>
           Close
         </Button>
-        <Button variant="primary" leadingIcon={<RefreshCw />} onClick={reload} autoFocus>
+        <Button variant="primary" leadingIcon={<RefreshCw />} onClick={reload} loading={refreshing} disabled={refreshing} autoFocus>
           Reload latest
         </Button>
       </DialogFooter>

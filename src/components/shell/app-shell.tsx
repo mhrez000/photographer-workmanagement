@@ -5,10 +5,10 @@ import { usePathname } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  findNavMatch,
   mobileTabsForRole,
   navigationForRole,
   quickActionsForRole,
+  resolveRouteTitle,
   type NavGrants,
 } from "@/config/nav";
 import { Avatar } from "@/components/ui/avatar";
@@ -74,7 +74,7 @@ export function AppShell({
     () => quickActionsForRole(user.role).find((action) => action.primary),
     [user.role],
   );
-  const match = React.useMemo(() => findNavMatch(pathname, groups), [pathname, groups]);
+  const heading = React.useMemo(() => resolveRouteTitle(pathname, groups), [pathname, groups]);
 
   const openSearch = React.useCallback(() => {
     if (onOpenSearch) {
@@ -134,7 +134,7 @@ export function AppShell({
         <Topbar
           user={user}
           unreadCount={unreadCount}
-          match={match}
+          heading={heading}
           title={title}
           isMac={isMac}
           onOpenMenu={() => setMobileNavOpen(true)}

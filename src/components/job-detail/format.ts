@@ -3,8 +3,8 @@
  * browser APIs). Durations arrive in seconds from the queries.
  */
 import { formatDuration } from "@/lib/dates";
-import type { EventType, StatusCategory } from "@/lib/constants";
-import type { UserRef } from "@/lib/types";
+import type { EventType, LinkKind, StatusCategory } from "@/lib/constants";
+import type { LinkSlot, UserRef } from "@/lib/types";
 import { humanise } from "@/lib/utils";
 
 /** "2d 4h", "35m" — for a duration in seconds (null → "—"). */
@@ -39,6 +39,38 @@ export const JOB_TAB_LABELS: Record<JobTab, string> = {
 };
 
 /**
+ * Priority+ split of a tab bar: which tabs (by index) stay in the bar and which
+ * move into a trailing "More" menu. All tabs stay when they fit; otherwise the
+ * leading tabs that fit beside the More button stay, and the active tab is
+ * always kept visible (trailing visible tabs make room for it).
+ */
+export function fitTabs(
+  widths: readonly number[],
+  available: number,
+  moreWidth: number,
+  activeIndex: number,
+): { visible: number[]; overflow: number[] } {
+  const all = widths.map((_, i) => i);
+  const total = widths.reduce((sum, w) => sum + w, 0);
+  if (total <= available) return { visible: all, overflow: [] };
+  const budget = available - moreWidth;
+  const visible: number[] = [];
+  let used = 0;
+  for (const i of all) {
+    if (used + widths[i] > budget) break;
+    visible.push(i);
+    used += widths[i];
+  }
+  if (activeIndex >= 0 && activeIndex < widths.length && !visible.includes(activeIndex)) {
+    while (visible.length > 0 && used + widths[activeIndex] > budget) used -= widths[visible.pop() as number];
+    visible.push(activeIndex);
+    visible.sort((a, b) => a - b);
+  }
+  const kept = new Set(visible);
+  return { visible, overflow: all.filter((i) => !kept.has(i)) };
+}
+
+/**
  * Production stages for the Timeline tab and the overview stepper
  * (spec §11: Assignment → Editing → Review → Revision → Approval → Delivery).
  */
@@ -54,9 +86,15 @@ export const STAGE_LABELS: Record<Stage, string> = {
   delivery: "Delivery",
 };
 
-/** Which production stage a status category belongs to (null = not a stage: new/cancelled). */
+/**
+ * Which production stage a status category belongs to (null = not a stage:
+ * cancelled). "new" counts toward Assignment — the job is waiting for an editor.
+ * The single grouping for every stage figure on the job page (Overview stepper,
+ * Timeline lanes, facts rail): Editing and Revision are always separate stages.
+ */
 export function stageOf(category: StatusCategory): Stage | null {
   switch (category) {
+    case "new":
     case "ready":
     case "assigned":
     case "accepted":
@@ -77,6 +115,39 @@ export function stageOf(category: StatusCategory): Stage | null {
     default:
       return null;
   }
+}
+
+/**
+ * Σ seconds per production stage from `[category, seconds]` pairs — either
+ * `metrics.secondsPerCategory` entries or one pair per StageView row. Both
+ * come from the same transitions ledger, so both views agree.
+ */
+export function stageTotals(entries: Iterable<readonly [StatusCategory, number | null | undefined]>): Record<Stage, number> {
+  const out = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
+  for (const [category, seconds] of entries) {
+    const stage = stageOf(category);
+    if (stage !== null && seconds != null && Number.isFinite(seconds)) out[stage] += seconds;
+  }
+  return out;
+}
+
+/** `stageTotals` over `metrics.secondsPerCategory`. */
+export function stageTotalsFromCategories(secondsPerCategory: Partial<Record<StatusCategory, number>>): Record<Stage, number> {
+  return stageTotals(Object.entries(secondsPerCategory) as [StatusCategory, number][]);
+}
+
+/** `stageTotals` over Timeline rows (one per transition). */
+export function stageTotalsFromStages(stages: readonly { toCategory: StatusCategory; durationSeconds: number }[]): Record<Stage, number> {
+  return stageTotals(stages.map((s) => [s.toCategory, s.durationSeconds] as const));
+}
+
+/**
+ * The header's "N days left" text only adds information when the due chip
+ * shows a plain date (tone "later"); overdue / today / soon chips already say
+ * it, so a second indicator would duplicate it.
+ */
+export function showsDaysRemaining(tone: "overdue" | "today" | "soon" | "later" | "none"): boolean {
+  return tone === "later";
 }
 
 /** Activity tab filter groups (`?events=status,people`). */
@@ -185,4 +256,45 @@ export function valueChanges(previous: unknown, next: unknown, formatInstant: (i
 export function clip(text: string | null, max = 160): string | null {
   if (text === null) return null;
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * Host + path of a link for display, split for middle truncation: `head` may
+ * be ellipsised by CSS while `tail` (the last path segment, ≤ 20 chars) always
+ * shows — "dropbox.com/sh/" + "uxqa-raw-2". Query and hash are left out (the
+ * full URL goes in a title attribute). Null for unparseable URLs.
+ */
+export function displayUrlParts(url: string, maxTail = 20): { head: string; tail: string } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.replace(/^www\./, "");
+  let path = parsed.pathname.replace(/\/+$/, "");
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // keep the encoded path
+  }
+  const text = `${host}${path}`;
+  const cut = text.lastIndexOf("/");
+  if (cut < host.length) return { head: text, tail: "" };
+  let head = text.slice(0, cut + 1);
+  let tail = text.slice(cut + 1);
+  if (tail.length > maxTail) {
+    head += tail.slice(0, tail.length - maxTail);
+    tail = tail.slice(-maxTail);
+  }
+  return { head, tail };
+}
+
+/**
+ * The kind a link slot is filed under: its latest row's kind. A chain can be
+ * re-filed ("Move to…", PATCH /api/links/:id), so the chain root's kind is
+ * not authoritative.
+ */
+export function slotKind(slot: Pick<LinkSlot, "kind" | "current" | "history">): LinkKind {
+  return slot.current?.kind ?? slot.history[slot.history.length - 1]?.kind ?? slot.kind;
 }

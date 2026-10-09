@@ -10,6 +10,7 @@ import { ReportTable } from "@/components/insights/report-table";
 import { bucketKind } from "@/components/insights/trend-utils";
 import { rangeFromParams } from "@/components/insights/range-params";
 import { PageContainer } from "@/components/shell";
+import { ScrollFade } from "@/components/work-table/scroll-fade";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { REPORT_KINDS, type ReportKind } from "@/lib/constants";
@@ -110,30 +111,33 @@ export default async function ReportsPage({ searchParams }: PageProps<"/insights
         }
       />
 
-      <nav aria-label="Report type" className="-mb-2 overflow-x-auto scrollbar-none border-b border-border" data-print="hide">
-        <ul className="flex min-w-max gap-1">
-          {REPORT_KINDS.map((k) => {
-            const Icon = TABS[k].icon;
-            const active = k === kind;
-            return (
-              <li key={k}>
-                <Link
-                  href={tabHref(k)}
-                  aria-current={active ? "page" : undefined}
-                  scroll={false}
-                  className={cn(
-                    "relative inline-flex h-10 items-center gap-2 rounded-t-sm px-3 text-sm font-medium focus-ring-inset transition-colors duration-(--motion-fast)",
-                    active ? "text-ink after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-full after:bg-accent" : "text-ink-muted hover:text-ink",
-                  )}
-                >
-                  <Icon aria-hidden="true" className={cn("size-4", active ? "text-accent" : "text-ink-subtle")} />
-                  {TABS[k].label}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
+      {/* Scrolls sideways on a phone; the fade shows there are more tabs (icons drop below sm so all four usually fit). */}
+      <ScrollFade className="-mb-2" fadeClassName="from-canvas">
+        <nav aria-label="Report type" className="overflow-x-auto scrollbar-none border-b border-border" data-print="hide">
+          <ul className="flex min-w-max gap-0.5 sm:gap-1">
+            {REPORT_KINDS.map((k) => {
+              const Icon = TABS[k].icon;
+              const active = k === kind;
+              return (
+                <li key={k}>
+                  <Link
+                    href={tabHref(k)}
+                    aria-current={active ? "page" : undefined}
+                    scroll={false}
+                    className={cn(
+                      "relative inline-flex h-10 items-center gap-2 rounded-t-sm px-2.5 text-sm font-medium focus-ring-inset transition-colors duration-(--motion-fast) sm:px-3",
+                      active ? "text-ink after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-full after:bg-accent" : "text-ink-muted hover:text-ink",
+                    )}
+                  >
+                    <Icon aria-hidden="true" className={cn("hidden size-4 sm:block", active ? "text-accent" : "text-ink-subtle")} />
+                    {TABS[k].label}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+      </ScrollFade>
 
       <section aria-label="Summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {tiles.map((t) => (
@@ -177,6 +181,7 @@ export default async function ReportsPage({ searchParams }: PageProps<"/insights
           totals={report.totals}
           timeZone={tz}
           mobileKeys={TABS[kind].mobileKeys}
+          leadKeys={TABS[kind].mobileKeys}
           emptyTitle="Nothing in this range"
           emptyDescription="No jobs were created, approved or completed between these dates. Try a wider range."
         />

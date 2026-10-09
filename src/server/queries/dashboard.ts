@@ -13,14 +13,14 @@
  */
 import { and, asc, desc, eq, gte, lt, lte, sql } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
-import { dashboardLayouts, jobs } from "@/db/schema";
-import { CATEGORY_GROUPS, DASHBOARD_WIDGET_TYPES, type DashboardWidgetType } from "@/lib/constants";
+import { jobs } from "@/db/schema";
+import { CATEGORY_GROUPS } from "@/lib/constants";
 import { onTimeRate, revisionRate } from "@/lib/metrics";
 import type { AuthContext, DashboardData, DashboardLayout, DashboardPersonal, JobRow, KpiSummary } from "@/lib/types";
-import { DashboardLayoutSchema, parseJsonColumn } from "@/lib/validation/json";
 import { can, isManagement } from "@/server/auth/permissions";
+import { allowedWidgetTypes, defaultLayoutFor, getDashboardLayout } from "@/server/services/dashboards";
 import { listActivity } from "./activity";
-import { computeBottlenecks } from "./bottlenecks";
+import { computeBottlenecksForViewer } from "./bottlenecks";
 import { approvedJobsInRange, completedJobsInRange, kpisFor, lastDaysRange, loadOrgSettings, monthRangeAt, toPercent, type MetricScope } from "./metrics";
 import { computeEditorPerformance, computePhotographerPerformance } from "./performance";
 import { categoryIn, orgDayBounds, selectJobRows } from "./scope";
@@ -35,50 +35,18 @@ export const QUEUE_PREVIEW_LIMIT = 8;
 /*  Layout                                                             */
 /* ------------------------------------------------------------------ */
 
-type WidgetSpec = [DashboardWidgetType, number, number, number, number];
-
-const MANAGEMENT_LAYOUT: readonly WidgetSpec[] = [
-  ["kpis", 0, 0, 12, 2],
-  ["bottlenecks", 0, 2, 12, 2],
-  ["team_workload", 0, 4, 8, 5],
-  ["due_today", 8, 4, 4, 5],
-  ["overdue", 0, 9, 6, 4],
-  ["recent_activity", 6, 9, 6, 4],
-  ["editor_performance", 0, 13, 6, 4],
-  ["recent_completed", 6, 13, 6, 4],
-  ["completion_rate", 0, 17, 6, 3],
-  ["revision_rate", 6, 17, 6, 3],
-];
-
-const PERSONAL_LAYOUT: readonly WidgetSpec[] = [
-  ["kpis", 0, 0, 12, 2],
-  ["my_workload", 0, 2, 6, 4],
-  ["my_performance", 6, 2, 6, 4],
-  ["due_today", 0, 6, 6, 4],
-  ["overdue", 6, 6, 6, 4],
-  ["recent_activity", 0, 10, 6, 4],
-  ["recent_completed", 6, 10, 6, 4],
-];
-
-/** Default widget layout per role (management vs personal). */
-export function defaultDashboardLayout(ctx: Pick<AuthContext, "role">): DashboardLayout {
-  const spec = isManagement(ctx) ? MANAGEMENT_LAYOUT : PERSONAL_LAYOUT;
-  return { widgets: spec.map(([type, x, y, w, h]) => ({ id: type, type, x, y, w, h })) };
-}
-
-/** The viewer's saved layout (dashboard_layouts), else the role default. Unknown widget types are dropped. */
-export function getDashboardLayout(db: DbLike, ctx: AuthContext): DashboardLayout {
-  const fallback = defaultDashboardLayout(ctx);
-  if (ctx.userId === null) return fallback;
-  const row = db
-    .select({ layout: dashboardLayouts.layout })
-    .from(dashboardLayouts)
-    .where(and(eq(dashboardLayouts.userId, ctx.userId), eq(dashboardLayouts.organisationId, ctx.organisationId)))
-    .get();
-  if (!row) return fallback;
-  const layout = parseJsonColumn(DashboardLayoutSchema, row.layout, fallback);
-  const known = new Set<string>(DASHBOARD_WIDGET_TYPES);
-  return { widgets: layout.widgets.filter((w) => known.has(w.type)) };
+/**
+ * The viewer's layout — the SAME one `/dashboard` renders and
+ * `GET /api/dashboard/layout` returns (services/dashboards.ts: saved row or
+ * the role default, filtered to the widgets this viewer may see). A context
+ * without a user (system) gets the filtered role default.
+ */
+export function dashboardLayoutFor(db: DbLike, ctx: AuthContext): DashboardLayout {
+  if (ctx.userId === null || ctx.isSystem) {
+    const allowed = allowedWidgetTypes(ctx);
+    return { widgets: defaultLayoutFor(ctx.role).widgets.filter((w) => allowed.has(w.type)) };
+  }
+  return getDashboardLayout(db, ctx).layout;
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,7 +121,7 @@ export function getDashboard(db: DbLike, ctx: AuthContext): DashboardData {
   const workloadComputation = computeWorkloads(db, ctx, { now });
   const seeTeam = management || can(ctx, "workloads.view_team");
   const workloads = seeTeam ? workloadComputation.rows : null;
-  const bottlenecks = can(ctx, "bottlenecks.view") ? computeBottlenecks(db, ctx, { now, workloads: workloadComputation }) : [];
+  const bottlenecks = can(ctx, "bottlenecks.view") ? computeBottlenecksForViewer(db, ctx, { now, workloads: workloadComputation }) : [];
 
   const month = monthRangeAt(ctx, now);
   const approvedMonth = approvedJobsInRange(db, ctx, month, { scope });
@@ -187,7 +155,7 @@ export function getDashboard(db: DbLike, ctx: AuthContext): DashboardData {
     rates,
     editorPerformance: can(ctx, "performance.view") ? computeEditorPerformance(db, ctx, month, { now }) : null,
     personal,
-    layout: getDashboardLayout(db, ctx),
+    layout: dashboardLayoutFor(db, ctx),
     asOf: now,
   };
 }

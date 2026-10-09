@@ -89,6 +89,20 @@ export const ReplaceLinkInput = z.object({
 });
 export type ReplaceLinkInput = z.input<typeof ReplaceLinkInput>;
 
+/**
+ * `PATCH /api/links/:id { kind?, label? }` — re-file a current link under
+ * another kind and/or relabel it (same URL). At least one field required.
+ */
+export const UpdateLinkInput = z
+  .object({
+    linkId: Id,
+    kind: z.enum(LINK_KINDS).optional(),
+    /** Omitted → keep the old label; null or "" → clear it. */
+    label: LabelSchema.nullish(),
+  })
+  .refine((v) => v.kind !== undefined || v.label !== undefined, { message: "Choose a new kind or label", path: ["kind"] });
+export type UpdateLinkInput = z.input<typeof UpdateLinkInput>;
+
 export const RemoveLinkInput = z.object({
   linkId: Id,
   reason: z

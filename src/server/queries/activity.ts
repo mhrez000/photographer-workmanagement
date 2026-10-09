@@ -8,7 +8,10 @@
  *  - photographers / editors see job events only for jobs passing
  *    `visibleJobsWhere(ctx)`, plus non-job events they performed themselves.
  *
- * Cursor = keyset over (created_at DESC, id DESC).
+ * Order = (created_at, rowid): events written in the same millisecond keep
+ * their insertion order (ids are random nanoids, so `id` is no tie-breaker).
+ * Cursor = keyset over (created_at DESC, rowid DESC); the encoded cursor
+ * still carries `(createdAt, id)` and the id is resolved to its rowid.
  */
 import { and, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
@@ -94,6 +97,9 @@ export function activityScopeWhere(db: DbLike, ctx: AuthContext): SQL {
 /* ------------------------------------------------------------------ */
 /*  Mapping                                                            */
 /* ------------------------------------------------------------------ */
+
+/** `activity_events.rowid` — the insertion order (qualified: the feed joins users / jobs). */
+const EVENT_ROWID = sql<number>`"activity_events"."rowid"`;
 
 const FEED_FIELDS = {
   event: activityEvents,
@@ -191,13 +197,19 @@ export function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}):
   const cursor = decodeKeysetCursor(f.cursor);
   if (cursor) {
     parts.push(
-      or(lt(activityEvents.createdAt, cursor.createdAt), and(eq(activityEvents.createdAt, cursor.createdAt), lt(activityEvents.id, cursor.id))),
+      or(
+        lt(activityEvents.createdAt, cursor.createdAt),
+        and(
+          eq(activityEvents.createdAt, cursor.createdAt),
+          sql`${EVENT_ROWID} < (SELECT c.rowid FROM activity_events c WHERE c.id = ${cursor.id} AND c.organisation_id = ${ctx.organisationId})`,
+        ),
+      ),
     );
   }
 
   const rows = feedQuery(db)
     .where(and(...parts))
-    .orderBy(desc(activityEvents.createdAt), desc(activityEvents.id))
+    .orderBy(desc(activityEvents.createdAt), desc(EVENT_ROWID))
     .limit(limit + 1)
     .all() as RawFeedRow[];
   const hasMore = rows.length > limit;
@@ -219,7 +231,7 @@ export function jobEvents(db: DbLike, ctx: AuthContext, jobId: string, eventType
         eventTypes && eventTypes.length ? inArray(activityEvents.eventType, [...eventTypes]) : undefined,
       ),
     )
-    .orderBy(activityEvents.createdAt, activityEvents.id)
+    .orderBy(activityEvents.createdAt, EVENT_ROWID)
     .all() as RawFeedRow[];
   return rows.map(toFeedItem);
 }

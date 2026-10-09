@@ -503,9 +503,10 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
     .from(jobRevisions)
     .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
     .get();
+  let repointedEventId: string | null = null;
   if (openRevision && openRevision.assigneeUserId !== newEditorId) {
     tx.update(jobRevisions).set({ assigneeUserId: newEditorId }).where(and(eq(jobRevisions.id, openRevision.id), isNull(jobRevisions.resolvedAt))).run();
-    recordEvent(tx, ctx, {
+    repointedEventId = recordEvent(tx, ctx, {
       entityType: "revision",
       entityId: openRevision.id,
       jobId: job.id,
@@ -523,7 +524,21 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
   });
 
   if (newEditorId) {
-    sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was assigned to you`, createdEventId);
+    if (openRevision && repointedEventId) {
+      // The new editor inherits an open revision: tell them what to fix (mandatory
+      // revision_requested, §6) instead of a generic job_assigned.
+      notify(tx, ctx, {
+        userIds: [newEditorId],
+        type: "revision_requested",
+        title: `Revision #${openRevision.revisionNumber} on ${job.jobNumber} is now assigned to you`,
+        body: [openRevision.reason, openRevision.instructions].filter((s): s is string => typeof s === "string" && s.trim() !== "").join(" — ") || job.name,
+        jobId: job.id,
+        activityEventId: repointedEventId,
+        linkPath: jobLinkPath(job.id, `revision-${openRevision.revisionNumber}`),
+      });
+    } else {
+      sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was assigned to you`, createdEventId);
+    }
     if (createdEventId) emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
   }
   if (oldEditorId && opts.notifyOld !== false) {
@@ -851,12 +866,39 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   }
 
   // Restore into an editor stage whose editor is gone → back to ready instead.
+  let releasedInactiveEditorId: string | null = null;
   if (isRestore && EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !isUserActive(tx, job.editorId)) {
     if (job.editorId) {
+      releasedInactiveEditorId = job.editorId;
       job = swapEditor(tx, ctx, job, null, { unassignReason: "user_deactivated", reason: "Editor unavailable on restore", batchId: opts.batchId }).job;
     }
     target = unassignedTargetOf(graph);
     lateral = false;
+  }
+
+  // Restore / reopen into an active stage that does not need a working editor
+  // (submitted, review, approved, delivered, …) while the job's editor is
+  // deactivated: the job would come back "held by an inactive editor" without
+  // the deactivation's `kept` flag (that flag lives on the append-only
+  // `user.deactivated` event and cannot be granted later), so the editor is
+  // released exactly like a deactivation hand-off (`unassign_reason =
+  // user_deactivated`); `previous_editor_id` keeps who did the work. Same
+  // rule for restore and reopen. (Reopen into an editor-required stage is
+  // still a 422 EditorRequired below.)
+  if (
+    (isRestore || isReopen) &&
+    job.editorId &&
+    !CATEGORY_GROUPS.TERMINAL.includes(target.category) &&
+    !CATEGORY_GROUPS.UNASSIGNED.includes(target.category) &&
+    !EDITOR_REQUIRED_CATEGORIES.includes(target.category) &&
+    !isUserActive(tx, job.editorId)
+  ) {
+    releasedInactiveEditorId = job.editorId;
+    job = swapEditor(tx, ctx, job, null, {
+      unassignReason: "user_deactivated",
+      reason: isRestore ? "Editor unavailable on restore" : "Editor unavailable on reopen",
+      batchId: opts.batchId,
+    }).job;
   }
 
   if (EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !isUserActive(tx, job.editorId)) {
@@ -1050,6 +1092,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       withdrawal: withdraw,
       engineInternal: opts.mode === "internal",
       ...(onBehalfOf ? { onBehalfOf } : {}),
+      ...(releasedInactiveEditorId ? { releasedInactiveEditorId, releaseReason: "editor_deactivated" } : {}),
       durationInPreviousSeconds: durationInPrevious,
     }),
   });
@@ -1137,27 +1180,28 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   }
 
   if (sideEffects) {
+    const released = releasedInactiveEditorId ? { releasedInactiveEditorId, releaseReason: "editor_deactivated" } : {};
     if (isRestore) {
-      const evt = milestone("job.restored", "restored", { reason }, { cancelledAt: before.cancelledAt }, { statusId: target.id, category: target.category });
+      const evt = milestone("job.restored", "restored", { reason, ...released }, { cancelledAt: before.cancelledAt }, { statusId: target.id, category: target.category });
       sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId], `${job.jobNumber} was restored`, evt);
     } else if (isReopen) {
-      const evt = milestone("job.reopened", "restored", { reason }, { completedAt: before.completedAt }, { statusId: target.id, category: target.category });
+      const evt = milestone("job.reopened", "reopened", { reason, ...released }, { completedAt: before.completedAt }, { statusId: target.id, category: target.category });
       const extra = ctx.role === "photographer" ? managersOf(tx, ctx.organisationId) : [];
       sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId, ...extra], `${job.jobNumber} was reopened`, evt);
     }
     if (declined) {
-      const evt = milestone("job.declined", "unassigned", { reason, previousEditorId: before.editorId });
+      const evt = milestone("job.declined", "declined", { reason, previousEditorId: before.editorId });
       sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...managersOf(tx, ctx.organisationId)], `${job.jobNumber} was declined by the editor`, evt);
     }
     switch (target.category) {
       case "accepted":
-        milestone("job.accepted", "updated", onBehalfOf ? { onBehalfOf } : {});
+        milestone("job.accepted", "accepted", onBehalfOf ? { onBehalfOf } : {});
         break;
       case "in_progress":
         if (firstStart) milestone("job.work_started", "started", onBehalfOf ? { onBehalfOf } : {});
         break;
       case "submitted": {
-        const evt = milestone("job.submitted", "updated", { resubmission: false, ...(onBehalfOf ? { onBehalfOf } : {}) });
+        const evt = milestone("job.submitted", "submitted", { resubmission: false, ...(onBehalfOf ? { onBehalfOf } : {}) });
         sendJobNotification(tx, ctx, job, "work_submitted", photographerAndCreator, `${job.jobNumber} was submitted for review`, evt);
         if (currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"]).length === 0) {
           warnings.push("No finished-files or editing-workspace link is attached yet");
@@ -1165,7 +1209,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
         break;
       }
       case "resubmitted": {
-        const evt = milestone("job.submitted", "updated", {
+        const evt = milestone("job.submitted", "submitted", {
           resubmission: true,
           revisionNumber: resolved?.revisionNumber ?? null,
           ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -1188,7 +1232,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
         milestone("job.review_started", "started", { reviewerUserId: ctx.userId });
         break;
       case "approved": {
-        const evt = milestone("job.approved", "updated", {
+        const evt = milestone("job.approved", "approved", {
           onTime: job.wasOnTime,
           dueDateAtApproval: job.dueDateAtApproval,
           revisionCount: job.revisionCount,
@@ -1198,17 +1242,17 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       }
       case "delivered": {
         const deliveryLinkIds = currentLinkIds(tx, job.id, ["client_delivery", "gallery"]);
-        milestone("job.delivered", "updated", { deliveryLinkIds });
+        milestone("job.delivered", "delivered", { deliveryLinkIds });
         if (deliveryLinkIds.length === 0) warnings.push("No client-delivery or gallery link is attached yet");
         break;
       }
       case "completed": {
-        const evt = milestone("job.completed", "updated");
+        const evt = milestone("job.completed", "completed");
         sendJobNotification(tx, ctx, job, "job_completed", [job.photographerId, job.editorId], `${job.jobNumber} was completed`, evt);
         break;
       }
       case "cancelled": {
-        const evt = milestone("job.cancelled", "updated", { reason });
+        const evt = milestone("job.cancelled", "cancelled", { reason });
         sendJobNotification(tx, ctx, job, "job_cancelled", [job.editorId, job.photographerId], `${job.jobNumber} was cancelled`, evt);
         break;
       }

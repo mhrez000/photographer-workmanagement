@@ -1,22 +1,25 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight, History, Link2, Plus, Replace, Trash2 } from "lucide-react";
+import { ArrowRightLeft, ChevronDown, ChevronRight, History, Link2, PencilLine, Plus, Replace, Trash2 } from "lucide-react";
 import { ExternalLinkButton, LinkProviderIcon, ReasonDialog, linkHost, toDialogResult, useMutationRunner, firstFieldErrors, type FieldErrors } from "@/components/jobs";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FormField } from "@/components/ui/form-field";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { toast } from "@/components/ui/toast";
 import { Tooltip } from "@/components/ui/tooltip";
 import { api } from "@/lib/api-client";
 import { LINK_KIND_META, LINK_KINDS, type LinkKind } from "@/lib/constants";
 import { formatDate, formatDateTime } from "@/lib/dates";
 import type { LinkSlot, LinkView } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { displayUrlParts, slotKind } from "./format";
 
 export interface LinkPermissions {
   canReplace: boolean;
@@ -37,6 +40,7 @@ type DialogState =
   | { kind: "none" }
   | { kind: "add"; linkKind: LinkKind | null }
   | { kind: "replace"; link: LinkView }
+  | { kind: "rename"; link: LinkView }
   | { kind: "remove"; link: LinkView };
 
 /* ------------------------------------------------------------------ */
@@ -152,17 +156,36 @@ function HistoryChain({ entries, timeZone }: { entries: LinkView[]; timeZone: st
   );
 }
 
+/** Host + path with the middle ellipsised ("dropbox.com/sh/…uxqa-raw-2"); the full URL is in the title. */
+function UrlLine({ url }: { url: string }) {
+  const parts = displayUrlParts(url);
+  if (!parts) return null;
+  return (
+    <p title={url} data-link-url="" className="flex min-w-0 font-mono text-2xs text-ink-muted">
+      <span className="truncate">{parts.head}</span>
+      {parts.tail ? <span className="shrink-0">{parts.tail}</span> : null}
+    </p>
+  );
+}
+
 function SlotCard({
   slot,
   perms,
+  moveKinds,
   timeZone,
   onReplace,
+  onRename,
+  onMove,
   onRemove,
 }: {
   slot: LinkSlot;
   perms: LinkPermissions | undefined;
+  /** Kinds this link may move to: the viewer's add-link kinds minus its own. */
+  moveKinds: LinkKind[];
   timeZone: string;
   onReplace: (link: LinkView) => void;
+  onRename: (link: LinkView) => void;
+  onMove: (link: LinkView, kind: LinkKind) => void;
   onRemove: (link: LinkView) => void;
 }) {
   const current = slot.current;
@@ -189,35 +212,116 @@ function SlotCard({
   }
   if (!current) return null;
 
+  // Rename / move follow the same actor rule as replace (owners, managers, own photographer, the editor who added it).
+  const canEdit = Boolean(perms?.canReplace);
+  const hasActions = canEdit || Boolean(perms?.canRemove);
+
   return (
-    <li className="rounded-md border border-border bg-surface p-3 transition-colors hover:border-border-hover">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="min-w-0 flex-1">
-          <ExternalLinkButton url={current.url} label={current.label} provider={current.provider} variant="ghost" className="-ml-2.5 max-w-full" />
-          <p className="mt-0.5 text-xs text-ink-muted numeric">
-            Added by {current.addedBy.name} · <time dateTime={current.createdAt}>{formatDateTime(current.createdAt, timeZone)}</time>
-            {current.supersedesLinkId ? " · replaced an earlier link" : ""}
-          </p>
-        </div>
-        {perms?.canReplace || perms?.canRemove ? (
-          <div className="flex shrink-0 items-center gap-1">
-            {perms.canReplace ? (
+    <li className="min-w-0 rounded-md border border-border bg-surface p-3 transition-colors hover:border-border-hover">
+      <div className="min-w-0">
+        <ExternalLinkButton url={current.url} label={current.label} provider={current.provider} variant="ghost" hideHost className="-ml-2.5 max-w-full" />
+        <UrlLine url={current.url} />
+        <p className="mt-1 text-xs text-ink-muted numeric">
+          Added by {current.addedBy.name} · <time dateTime={current.createdAt}>{formatDateTime(current.createdAt, timeZone)}</time>
+          {current.supersedesLinkId ? " · replaced an earlier link" : ""}
+        </p>
+      </div>
+      {/* Actions stack under the link so a narrow card never squeezes the link text. */}
+      {hasActions ? (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1 border-t border-border pt-2.5">
+          {canEdit ? (
+            <>
               <Button variant="outline" size="sm" leadingIcon={<Replace aria-hidden="true" />} onClick={() => onReplace(current)}>
                 Replace
               </Button>
-            ) : null}
-            {perms.canRemove ? (
-              <Tooltip content="Remove link (kept in history)">
+              <Button variant="ghost" size="sm" leadingIcon={<PencilLine aria-hidden="true" />} onClick={() => onRename(current)}>
+                Rename
+              </Button>
+              {moveKinds.length > 0 ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger variant="ghost" size="sm" leadingIcon={<ArrowRightLeft aria-hidden="true" />} trailingIcon={<ChevronDown aria-hidden="true" />}>
+                    Move to…
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent aria-label="Move link to" width="13rem">
+                    <DropdownMenuLabel>Move to</DropdownMenuLabel>
+                    {moveKinds.map((k) => (
+                      <DropdownMenuItem key={k} onSelect={() => onMove(current, k)}>
+                        {LINK_KIND_META[k].label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+            </>
+          ) : null}
+          {perms?.canRemove ? (
+            <span className="ml-auto">
+              <Tooltip content="Remove link (kept in history)" align="end">
                 <IconButton label="Remove link" size="sm" variant="ghost" onClick={() => onRemove(current)}>
                   <Trash2 />
                 </IconButton>
               </Tooltip>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       <HistoryChain entries={earlier} timeZone={timeZone} />
     </li>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Rename                                                              */
+/* ------------------------------------------------------------------ */
+
+function RenameForm({
+  link,
+  onCancel,
+  onSubmit,
+}: {
+  link: LinkView;
+  onCancel: () => void;
+  onSubmit: (label: string | null) => Promise<true | FieldErrors | false>;
+}) {
+  const [label, setLabel] = React.useState(link.label ?? "");
+  const [error, setError] = React.useState<string | undefined>();
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const result = await onSubmit(label.trim() || null);
+      if (result !== true && result !== false) {
+        const errors = firstFieldErrors(result);
+        setError(errors.label ?? Object.values(errors)[0]);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} noValidate className="contents">
+      <DialogHeader>
+        <DialogTitle>Rename link</DialogTitle>
+        <DialogDescription>Only the label changes — the link and its history stay as they are.</DialogDescription>
+      </DialogHeader>
+      <DialogBody className="space-y-4 pb-5">
+        <FormField label="Label" optional error={error} description="Leave empty to show the provider name.">
+          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Final gallery, Client selects" maxLength={200} autoFocus />
+        </FormField>
+      </DialogBody>
+      <DialogFooter>
+        <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+          Cancel
+        </Button>
+        <Button type="submit" loading={submitting}>
+          Save label
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }
 
@@ -231,7 +335,7 @@ export function LinksTab({ jobId, slots, canAddKinds, permissions, timeZone }: L
   const [dialog, setDialog] = React.useState<DialogState>({ kind: "none" });
   const close = () => setDialog({ kind: "none" });
 
-  const kindsShown = LINK_KINDS.filter((k) => slots.some((s) => s.kind === k) || canAddKinds.includes(k));
+  const kindsShown = LINK_KINDS.filter((k) => slots.some((s) => slotKind(s) === k) || canAddKinds.includes(k));
   const hasAny = slots.length > 0;
 
   const addLink = async (values: { kind: LinkKind; url: string; label: string }) => {
@@ -253,8 +357,33 @@ export function LinksTab({ jobId, slots, canAddKinds, permissions, timeZone }: L
     return r === true ? true : typeof r === "object" ? r.fieldErrors : false;
   };
 
+  /** PATCH /api/links/:id — rename (label) or move to another kind, in place (no new version in the chain). */
+  const updateLink = async (link: LinkView, body: { kind?: LinkKind; label?: string | null }, success: string) => {
+    const result = await run(() => api.patch(`/api/links/${link.id}`, body), { success });
+    // A 422 with field errors is not toasted by the runner; the move menu has no form to show it on.
+    if (!result.ok && result.fieldErrors && body.kind !== undefined) {
+      toast.error("Could not move the link", Object.values(firstFieldErrors(result.fieldErrors))[0]);
+    }
+    return result;
+  };
+
+  const renameLink = (link: LinkView) => async (label: string | null) => {
+    if (label === (link.label ?? null)) {
+      close();
+      return true as const;
+    }
+    const result = await updateLink(link, { label }, "Link renamed");
+    if (result.ok) close();
+    const r = toDialogResult(result);
+    return r === true ? true : typeof r === "object" ? r.fieldErrors : false;
+  };
+
+  const moveLink = (link: LinkView, kind: LinkKind) => {
+    void updateLink(link, { kind }, `Moved to ${LINK_KIND_META[kind].label}`);
+  };
+
   return (
-    <div className="flex flex-col gap-5">
+    <div className="@container flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-xl text-sm text-ink-muted">
           Files stay in Drive, Dropbox, Frame.io and friends — this is where everyone finds them. Replacing or removing a link keeps the old one in history.
@@ -286,9 +415,10 @@ export function LinksTab({ jobId, slots, canAddKinds, permissions, timeZone }: L
           />
         </Card>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        // Container query: two columns only when the tab column itself is wide enough (not the viewport).
+        <div className="grid gap-4 @3xl:grid-cols-2">
           {kindsShown.map((kind) => {
-            const ofKind = slots.filter((s) => s.kind === kind);
+            const ofKind = slots.filter((s) => slotKind(s) === kind);
             const meta = LINK_KIND_META[kind];
             const canAdd = canAddKinds.includes(kind);
             return (
@@ -313,8 +443,11 @@ export function LinksTab({ jobId, slots, canAddKinds, permissions, timeZone }: L
                         key={slot.history[0]?.id ?? slot.kind}
                         slot={slot}
                         perms={slot.current ? permissions[slot.current.id] : undefined}
+                        moveKinds={canAddKinds.filter((k) => k !== kind)}
                         timeZone={timeZone}
                         onReplace={(link) => setDialog({ kind: "replace", link })}
+                        onRename={(link) => setDialog({ kind: "rename", link })}
+                        onMove={moveLink}
                         onRemove={(link) => setDialog({ kind: "remove", link })}
                       />
                     ))}
@@ -325,6 +458,10 @@ export function LinksTab({ jobId, slots, canAddKinds, permissions, timeZone }: L
           })}
         </div>
       )}
+
+      <Dialog open={dialog.kind === "rename"} onOpenChange={(open) => (!open ? close() : undefined)} size="sm">
+        {dialog.kind === "rename" ? <RenameForm key={dialog.link.id} link={dialog.link} onCancel={close} onSubmit={renameLink(dialog.link)} /> : null}
+      </Dialog>
 
       <Dialog open={dialog.kind === "add" || dialog.kind === "replace"} onOpenChange={(open) => (!open ? close() : undefined)} size="md">
         {dialog.kind === "add" ? (

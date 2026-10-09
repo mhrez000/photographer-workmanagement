@@ -77,7 +77,8 @@ function RevisionForm({
   onDone,
 }: RevisionRequestDialogProps) {
   const run = useMutationRunner();
-  const people = useUserOptions("editor", { jobId });
+  // Any active editor may take the revision (not only those who can already view the job).
+  const people = useUserOptions("editor");
   const [form, setForm] = React.useState<FormState>({
     reason: "",
     description: "",
@@ -195,6 +196,7 @@ function RevisionForm({
                 value={form.reason}
                 onChange={(e) => set("reason", e.target.value)}
                 placeholder="Or type your own reason"
+                data-autofocus
                 maxLength={200}
                 invalid={Boolean(pick(errors, "reason", "revision.reason"))}
               />

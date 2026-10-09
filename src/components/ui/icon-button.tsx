@@ -22,9 +22,9 @@ export const iconButtonVariants = cva(
         danger: "text-danger hover:bg-danger-soft",
       },
       size: {
-        xs: "size-6 rounded-xs [&_svg]:size-3.5",
-        sm: "size-7 rounded-sm [&_svg]:size-4",
-        md: "size-9 rounded-md [&_svg]:size-4",
+        xs: "size-6 pointer-coarse:size-8 rounded-xs [&_svg]:size-3.5",
+        sm: "size-7 pointer-coarse:size-9 rounded-sm [&_svg]:size-4",
+        md: "size-9 pointer-coarse:size-10 rounded-md [&_svg]:size-4",
         lg: "size-10 rounded-md [&_svg]:size-5",
       },
     },

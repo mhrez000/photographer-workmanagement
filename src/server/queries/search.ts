@@ -1,8 +1,9 @@
 /**
  * Global search (ARCHITECTURE.md §10 `/search`, ⌘K palette).
  *
- * Jobs are matched on number, name, description, note bodies and comment
- * bodies — always through `visibleJobsWhere(ctx)`. An exact job number
+ * Jobs are matched on number, name, description, the name of their CURRENT
+ * workflow status (`matchedIn: "status"`, e.g. "Revision Required"), note
+ * bodies and comment bodies — always through `visibleJobsWhere(ctx)`. An exact job number
  * (`PJ-0142`, case-insensitive, or just `142`) ranks first and is returned as
  * `exactJob` for deep-linking. Notes: photographers / editors never match on
  * internal notes; archived notes and soft-deleted comments never match.
@@ -12,7 +13,7 @@
  */
 import { and, asc, desc, eq, exists, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
-import { clients, jobComments, jobNotes, jobs, projects, users } from "@/db/schema";
+import { clients, jobComments, jobNotes, jobs, projects, users, workflowStatuses } from "@/db/schema";
 import { JOB_NUMBER_PAD } from "@/lib/constants";
 import type { AuthContext, SearchResults } from "@/lib/types";
 import { assertCan, can, isManagement } from "@/server/auth/permissions";
@@ -87,6 +88,10 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
         : "description",
   );
 
+  if (hits.size < limit) {
+    // Current status name (case-insensitive LIKE; the row query already joins workflow_statuses).
+    add(selectRawJobs(db, ctx, { where: likeSql(sql`${workflowStatuses.name}`, term), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "status");
+  }
   if (hits.size < limit) {
     const noteKinds = isManagement(ctx) ? undefined : ne(jobNotes.kind, "internal");
     const noteMatch = db

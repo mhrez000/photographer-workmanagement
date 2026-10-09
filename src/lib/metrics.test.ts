@@ -129,10 +129,24 @@ describe("turnaroundSeconds", () => {
 });
 
 describe("photographerProcessingSeconds", () => {
-  it("first submission − shoot date and completion − creation", () => {
+  // shoot_date is stored like a deadline: the last ms of the civil day (1 Oct, AEST +10).
+  const SHOOT = "2026-10-01T13:59:59.999Z";
+  it("first submission − start of the shoot day (org tz), and completion − creation", () => {
     expect(
-      photographerProcessingSeconds({ shootDate: "2026-10-01T00:00:00.000Z", firstSubmittedAt: "2026-10-02T00:00:00.000Z", createdAt: "2026-10-01T00:00:00.000Z", completedAt: "2026-10-03T00:00:00.000Z" }),
-    ).toEqual({ processing: 86_400, endToEnd: 2 * 86_400 });
+      photographerProcessingSeconds(
+        { shootDate: SHOOT, firstSubmittedAt: "2026-10-02T00:00:00.000Z", createdAt: "2026-10-01T00:00:00.000Z", completedAt: "2026-10-03T00:00:00.000Z" },
+        "Australia/Sydney",
+      ),
+    ).toEqual({ processing: 34 * 3600, endToEnd: 2 * 86_400 }); // 1 Oct 00:00 AEST = 30 Sep 14:00Z
+  });
+  it("a submission on the shoot day is never negative", () => {
+    const sameDay = photographerProcessingSeconds({ shootDate: SHOOT, firstSubmittedAt: "2026-10-01T05:00:00.000Z", createdAt: SHOOT, completedAt: null }, "Australia/Sydney");
+    expect(sameDay.processing).toBe(15 * 3600);
+    expect(sameDay.processing).toBeGreaterThanOrEqual(0);
+    // clock skew / bad data: clamped at 0
+    expect(photographerProcessingSeconds({ shootDate: SHOOT, firstSubmittedAt: "2026-09-29T00:00:00.000Z", createdAt: SHOOT, completedAt: null }, "Australia/Sydney").processing).toBe(0);
+  });
+  it("returns nulls when the dates are missing", () => {
     expect(photographerProcessingSeconds({ shootDate: null, firstSubmittedAt: null, createdAt: NOW, completedAt: null })).toEqual({ processing: null, endToEnd: null });
   });
 });
@@ -252,10 +266,15 @@ describe("kpiSummary", () => {
       paused: 1,
       reviewOverdue: 1,
       asOf: NOW,
+      // Mon 5 Oct – Mon 12 Oct (AEDT), exposed for the KPI drill-down link
+      completedWeek: { from: "2026-10-04T13:00:00.000Z", to: "2026-10-11T13:00:00.000Z" },
     });
   });
-  it("accepts an explicit week range", () => {
-    expect(kpiSummary(jobs, { now: NOW, tz: TZ, weekRange: { from: "2026-09-27T14:00:00.000Z", to: "2026-10-04T13:00:00.000Z" } }).completedThisWeek).toBe(1);
+  it("accepts an explicit week range (and reports it for the drill-down)", () => {
+    const week = { from: "2026-09-27T14:00:00.000Z", to: "2026-10-04T13:00:00.000Z" };
+    const k = kpiSummary(jobs, { now: NOW, tz: TZ, weekRange: week });
+    expect(k.completedThisWeek).toBe(1);
+    expect(k.completedWeek).toEqual(week);
   });
 });
 
@@ -407,7 +426,8 @@ describe("evaluateBottlenecks", () => {
     expect(kinds(input({ editors: [ed({ active: 11, dueSoon: 5 })] }))).toEqual([]);
     expect(kinds(input({ editors: [ed({ band: "overloaded", user: user("e1", false) })] }))).toEqual([]);
     const [a] = evaluateBottlenecks(input({ editors: [ed({ band: "overloaded", active: 14, dueSoon: 5 })], jobs: [bj({ editorId: "e1" }), bj({ editorId: "e2" })] }));
-    expect(a).toMatchObject({ severity: "critical", message: "Editing bottleneck — Editor e1 has 14 active jobs, 5 due within 48h", href: "/team/users/e1" });
+    expect(a).toMatchObject({ severity: "critical", message: "Editing bottleneck — Editor e1 has 14 active jobs, 5 due within 48h" });
+    expect(a.href).toBe("/workspace/all?editorId=e1&statusCategory=assigned,accepted,in_progress,submitted,review,revision,resubmitted");
     expect(a.user?.id).toBe("e1");
     expect(a.jobs).toHaveLength(1);
   });
@@ -420,7 +440,37 @@ describe("evaluateBottlenecks", () => {
     expect(kinds(input({ revisions: { thisWeek: 5, previousWeeks: [0, 0, 0, 0] } }))).toEqual(["revision_spike"]);
     // only the most recent 4 weeks form the baseline
     expect(kinds(input({ revisions: { thisWeek: 6, previousWeeks: [4, 4, 4, 4, 100] } }))).toEqual(["revision_spike"]);
-    expect(evaluateBottlenecks(input({ revisions: { thisWeek: 14, previousWeeks: [5, 5, 5, 5] } }))[0].message).toBe("Revision bottleneck — 14 jobs required revisions this week");
+    expect(evaluateBottlenecks(input({ revisions: { thisWeek: 14, previousWeeks: [5, 5, 5, 5] } }))[0].message).toBe("Revision bottleneck — 14 revision requests in the last 7 days");
+  });
+
+  it("revision_spike: counts requests for the rule, but reports and lists distinct jobs", () => {
+    const j1 = { id: "a", jobNumber: "PJ-0001", name: "A" };
+    const j2 = { id: "b", jobNumber: "PJ-0002", name: "B" };
+    // 3 requests on 2 jobs (min count lowered to 3)
+    const [a] = evaluateBottlenecks(input({ settings: { revisionSpikeMinCount: 3 }, revisions: { thisWeek: 3, previousWeeks: [], jobs: [j1, j2] } }));
+    expect(a.kind).toBe("revision_spike");
+    expect(a.message).toContain("3 revision requests on 2 jobs");
+    expect(a.message).toBe("Revision bottleneck — 3 revision requests on 2 jobs in the last 7 days");
+    expect(a.count).toBe(2);
+    expect(a.count).toBe(a.jobs.length);
+    expect(a.href).toBe(`/workspace/all?revisedFrom=${encodeURIComponent(plus(NOW, -7 * 24 * H))}&includeCancelled=1`);
+  });
+
+  it("editor_overloaded lists only WORKLOAD-held jobs, so jobs.length === count", () => {
+    const held = [bj({ statusCategory: "in_progress" }), bj({ statusCategory: "submitted" }), bj({ statusCategory: "revision" })];
+    const done = [bj({ statusCategory: "approved" }), bj({ statusCategory: "delivered" })];
+    const [a] = evaluateBottlenecks(
+      input({ editors: [{ user: user("e1"), band: "overloaded", active: held.length, dueSoon: 0 }], jobs: [...held, ...done] }),
+    );
+    expect(a.kind).toBe("editor_overloaded");
+    expect(a.count).toBe(3);
+    expect(a.jobs.map((j) => j.id)).toEqual(held.map((j) => j.id));
+  });
+
+  it("review links to the exact waiting set (statusEnteredBefore = now − h)", () => {
+    const old = plus(NOW, -25 * H);
+    const [a] = evaluateBottlenecks(input({ jobs: [1, 2, 3].map(() => bj({ statusCategory: "submitted", statusEnteredAt: old })) }));
+    expect(a.href).toBe(`/workspace/all?quick=awaiting_review&statusEnteredBefore=${encodeURIComponent(plus(NOW, -24 * H))}`);
   });
 
   it("unassigned_backlog: ≥ 10 unassigned, or any due within 48h", () => {

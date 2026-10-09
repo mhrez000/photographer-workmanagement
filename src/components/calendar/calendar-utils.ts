@@ -181,31 +181,42 @@ export function eventColour(event: CalendarEvent, mode: ColourMode, day: string,
 export interface LegendItem {
   key: string;
   label: string;
+  /** First swatch colour. */
   colour: string;
+  /**
+   * Every distinct colour behind this label. Different workflows can each
+   * have a status with the same name (e.g. "In Progress") in their own
+   * colour; the legend shows the name once with one swatch per colour.
+   */
+  colours: string[];
 }
 
-/** Legend entries for the events on screen (status / editor lists are data-driven). */
+/**
+ * Legend entries for the events on screen (status / editor lists are
+ * data-driven). Labels are unique: statuses from different workflows that
+ * share a name collapse into one entry carrying each of their colours.
+ */
 export function legendFor(events: readonly CalendarEvent[], mode: ColourMode, dayOf: (e: CalendarEvent) => string, today: string): LegendItem[] {
   if (mode === "priority") {
-    return (["urgent", "high", "normal", "low"] as const).map((p) => ({ key: p, label: PRIORITY_META[p].label, colour: PRIORITY_META[p].hex }));
+    return (["urgent", "high", "normal", "low"] as const).map((p) => ({ key: p, label: PRIORITY_META[p].label, colour: PRIORITY_META[p].hex, colours: [PRIORITY_META[p].hex] }));
   }
   if (mode === "overdue") {
-    return (["overdue", "today", "upcoming", "done"] as const).map((u) => ({ key: u, label: URGENCY_META[u].label, colour: URGENCY_META[u].colour }));
+    return (["overdue", "today", "upcoming", "done"] as const).map((u) => ({ key: u, label: URGENCY_META[u].label, colour: URGENCY_META[u].colour, colours: [URGENCY_META[u].colour] }));
   }
   const seen = new Map<string, LegendItem>();
+  const order = new Map<string, number>();
   for (const e of events) {
-    if (mode === "editor") {
-      const id = e.job.editor?.id ?? "none";
-      if (!seen.has(id)) seen.set(id, { key: id, label: e.job.editor?.name ?? "Unassigned", colour: eventColour(e, mode, dayOf(e), today) });
-    } else {
-      const id = e.job.status.id;
-      if (!seen.has(id)) seen.set(id, { key: id, label: e.job.status.name, colour: eventColour(e, mode, dayOf(e), today) });
-    }
+    const colour = eventColour(e, mode, dayOf(e), today);
+    const id = mode === "editor" ? (e.job.editor?.id ?? "none") : `status:${e.job.status.name.trim().toLowerCase()}`;
+    const label = mode === "editor" ? (e.job.editor?.name ?? "Unassigned") : e.job.status.name.trim();
+    const item = seen.get(id);
+    if (!item) seen.set(id, { key: id, label, colour, colours: [colour] });
+    else if (!item.colours.includes(colour)) item.colours.push(colour);
+    if (mode === "status") order.set(id, Math.min(order.get(id) ?? Infinity, e.job.status.sortOrder));
   }
   const items = [...seen.values()];
   if (mode === "status") {
-    const order = new Map(events.map((e) => [e.job.status.id, e.job.status.sortOrder]));
-    items.sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0));
+    items.sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0) || a.label.localeCompare(b.label));
   } else {
     items.sort((a, b) => (a.key === "none" ? 1 : b.key === "none" ? -1 : a.label.localeCompare(b.label)));
   }

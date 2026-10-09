@@ -23,6 +23,7 @@ export function Textarea({ className, invalid, fixed, rows = 3, ...props }: Text
         fixed ? "resize-none" : "resize-y",
         className,
       )}
+      data-autofocus={props.autoFocus ? "" : undefined}
       {...props}
     />
   );

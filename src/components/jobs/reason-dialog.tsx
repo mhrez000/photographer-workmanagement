@@ -111,7 +111,7 @@ function ReasonForm({
             placeholder={placeholder}
             rows={3}
             maxLength={2000}
-            autoFocus
+            data-autofocus
           />
         </FormField>
       </DialogBody>

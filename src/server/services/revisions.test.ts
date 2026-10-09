@@ -144,16 +144,20 @@ describe("updateRevision", () => {
     );
     expect(res.changed.sort()).toEqual(["assigneeUserId", "dueDate", "instructions", "priority"]);
     expect(res.revision).toMatchObject({ assigneeUserId: ids.users.editor2, priority: "urgent", instructions: null, dueDate: "2026-10-11T12:59:59.999Z" });
-    const evt = db
+    // A new assignee takes over the JOB (§4.4): the re-point is audited by the
+    // assignment hand-over, the other fields by this update.
+    expect(jobRow(job.id)).toMatchObject({ editorId: ids.users.editor2, previousEditorId: ids.users.editor1 });
+    const evts = db
       .select()
       .from(activityEvents)
       .where(and(eq(activityEvents.eventType, "revision.updated"), eq(activityEvents.entityId, r1.revision.id)))
-      .all()
-      .at(-1);
-    expect(evt?.previousValue).toMatchObject({ assigneeUserId: ids.users.editor1, priority: "high" });
+      .all();
+    expect(evts.find((e) => (e.metadata as Record<string, unknown>).reassigned === true)?.previousValue).toEqual({ assigneeUserId: ids.users.editor1 });
+    expect(evts.at(-1)?.previousValue).toMatchObject({ priority: "high" });
     expect(catchErr(() => run((tx) => updateRevision(tx, ctxOf("editor1"), { revisionId: r1.revision.id, priority: "low" }))).status).toBe(403);
+    expectClean();
 
-    run((tx) => resolveRevision(tx, ctxOf("editor1"), { revisionId: r1.revision.id, expectedVersion: jobRow(job.id).version }));
+    run((tx) => resolveRevision(tx, ctxOf("editor2"), { revisionId: r1.revision.id, expectedVersion: jobRow(job.id).version }));
     expect(catchErr(() => run((tx) => updateRevision(tx, ctxOf("photographer1"), { revisionId: r1.revision.id, priority: "low" }))).status).toBe(400);
   });
 });

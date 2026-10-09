@@ -25,6 +25,31 @@ function unlockScroll() {
   }
 }
 
+/**
+ * Elements that should receive focus when a modal opens. React's `autoFocus`
+ * prop does not survive here: React focuses the element during commit, while
+ * the `<dialog>` is still closed, and `showModal()` (run afterwards in an
+ * effect) then moves focus to the dialog's first focusable element (the
+ * header Close button, the cmdk root…). Mark the intended field with
+ * `data-autofocus` (or a real `autofocus` attribute) instead.
+ */
+export const AUTOFOCUS_SELECTOR = "[data-autofocus], [autofocus]";
+
+type FocusTarget = { focus: (options?: FocusOptions) => void; matches?: (selector: string) => boolean };
+
+/**
+ * Focuses the first enabled `[data-autofocus]` / `[autofocus]` element inside
+ * `root`. Returns false (leaving the platform's default focus untouched) when
+ * there is none.
+ */
+export function focusInitialElement(root: { querySelectorAll: (selector: string) => ArrayLike<FocusTarget> }): boolean {
+  const candidates = Array.from(root.querySelectorAll(AUTOFOCUS_SELECTOR));
+  const target = candidates.find((el) => !el.matches?.(":disabled"));
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  return true;
+}
+
 export interface UseModalDialogOptions {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -45,7 +70,11 @@ export function useModalDialog({ open, onOpenChange, dismissible = true }: UseMo
     const el = ref.current;
     if (!el) return;
     if (open) {
-      if (!el.open) el.showModal();
+      if (!el.open) {
+        el.showModal();
+        // Content mounts in the same commit as `open`, so it is in the DOM now.
+        focusInitialElement(el);
+      }
       lockScroll();
       return () => {
         unlockScroll();

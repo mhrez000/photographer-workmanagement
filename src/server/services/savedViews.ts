@@ -15,7 +15,7 @@ import type { AuthContext, SavedView } from "@/lib/types";
 import { CreateSavedViewInput, DeleteSavedViewInput, UpdateSavedViewInput } from "@/lib/validation/views";
 import { recordEvent } from "@/server/audit";
 import { assertCan, can } from "@/server/auth/permissions";
-import { ForbiddenError } from "@/server/errors";
+import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { loadSavedViewInOrg, parseInput, type DbLike, type Tx } from "./_shared";
 import { checkVersion, ruleViolation } from "./_admin";
 
@@ -24,8 +24,22 @@ function actorOf(ctx: AuthContext): string {
   return ctx.userId;
 }
 
-/** The actor may change this view: their own, or a shared one when they hold saved_view.share. */
+/**
+ * Someone else's private view does not exist as far as the actor is concerned:
+ * 404, exactly like GET /api/views/:id (a 403 would confirm the id exists).
+ * Runs before any other check (archived, permission, version).
+ */
+function assertVisible(ctx: AuthContext, view: SavedView): void {
+  if (view.ownerUserId !== ctx.userId && !view.isShared) throw new NotFoundError("Saved view");
+}
+
+/**
+ * The actor may change this view: their own, or a shared one when they hold
+ * saved_view.share. Someone else's private view → 404 (`assertVisible`); a
+ * shared view the actor may not change → 403.
+ */
 function assertCanModify(ctx: AuthContext, view: SavedView): void {
+  assertVisible(ctx, view);
   if (view.ownerUserId === ctx.userId && can(ctx, "saved_view.manage", { userId: view.ownerUserId, organisationId: view.organisationId })) return;
   if (view.isShared && can(ctx, "saved_view.share")) return;
   throw new ForbiddenError("saved_view.manage");
@@ -111,6 +125,7 @@ export function updateSavedView(tx: Tx, ctx: AuthContext, input: unknown): Saved
   actorOf(ctx);
   const data = parseInput(UpdateSavedViewInput, input);
   const view = loadSavedViewInOrg(tx, ctx, data.viewId);
+  assertVisible(ctx, view);
   if (view.archivedAt) throw ruleViolation("This view was deleted");
   assertCanModify(ctx, view);
   checkVersion(view, data.expectedVersion, view);
@@ -150,6 +165,7 @@ export function deleteSavedView(tx: Tx, ctx: AuthContext, input: unknown): Saved
   actorOf(ctx);
   const data = parseInput(DeleteSavedViewInput, input);
   const view = loadSavedViewInOrg(tx, ctx, data.viewId);
+  assertVisible(ctx, view);
   if (view.archivedAt) throw ruleViolation("This view was already deleted");
   assertCanModify(ctx, view);
   checkVersion(view, data.expectedVersion, view);

@@ -5,8 +5,12 @@
  * Links form supersession chains: `replaceLink` inserts a NEW row
  * (`supersedes_link_id = old.id`) and fills the OLD row's fill-once
  * `superseded_at` + `superseded_by_link_id`; nothing is ever overwritten, so
- * a slot's history is the chain walked from its root. `removeLink` fills
- * `removed_at/by/reason` once. Current = not superseded and not removed.
+ * a slot's history is the chain walked from its root. `updateLink` changes a
+ * link's kind / label the same way (new row, same URL, event `link.updated`):
+ * the jl_fill_once trigger keeps link content immutable, so a re-filed link
+ * keeps its full history. `removeLink` fills `removed_at/by/reason` once.
+ * Current = not superseded and not removed; a slot's kind is its current
+ * (latest) row's kind.
  *
  * URLs: http/https only, no embedded credentials; `provider` is derived from
  * the hostname at write time (`deriveLinkProvider`).
@@ -19,7 +23,7 @@ import type { DbLike, Tx } from "@/db/index";
 import { jobLinks } from "@/db/schema";
 import { LINK_KINDS, LINK_KIND_META, type LinkKind, type StatusCategory } from "@/lib/constants";
 import type { AuthContext, JobLink, JobPermissionRef, LinkSlot, LinkView } from "@/lib/types";
-import { AddLinkInput, RemoveLinkInput, ReplaceLinkInput, deriveLinkProvider } from "@/lib/validation/links";
+import { AddLinkInput, RemoveLinkInput, ReplaceLinkInput, UpdateLinkInput, deriveLinkProvider } from "@/lib/validation/links";
 import { assertCan } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { ConflictError, ValidationError } from "@/server/errors";
@@ -143,6 +147,64 @@ export function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): { link: J
   return { link: { ...link, activityEventId: eventId }, previous };
 }
 
+/**
+ * Changes a current link's kind and/or label (`PATCH /api/links/:id`). Same
+ * URL; implemented as a supersession (new row `supersedes_link_id = old.id`,
+ * old row's fill-once `superseded_*`) because link rows are immutable
+ * (jl_fill_once). Permission `link.replace` on the old row, plus — when the
+ * kind changes — `link.add` for the NEW kind (editors: EDITOR_LINK_KINDS
+ * only). Stale link → 409. Event `link.updated` with before/after `{kind,label}`.
+ */
+export function updateLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
+  const data = parseInput(UpdateLinkInput, input);
+  const old = loadLinkInOrg(tx, ctx, data.linkId);
+  const { job, ref } = loadJobWithRef(tx, ctx, old.jobId);
+  assertCan(ctx, "link.replace", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
+  const kind = data.kind ?? old.kind;
+  if (kind !== old.kind) assertCan(ctx, "link.add", { job: ref, kind });
+  assertCurrent(tx, ctx, old);
+  const label = data.label === undefined ? old.label : data.label;
+  if (kind === old.kind && label === old.label) return old;
+  const addedByUserId = requireActor(ctx);
+
+  const at = ctx.now();
+  const link = tx
+    .insert(jobLinks)
+    .values({
+      organisationId: ctx.organisationId,
+      jobId: job.id,
+      kind,
+      url: old.url,
+      label,
+      provider: old.provider ?? deriveLinkProvider(old.url),
+      addedByUserId,
+      createdAt: at,
+      supersedesLinkId: old.id,
+    })
+    .returning()
+    .get();
+  const previous = tx
+    .update(jobLinks)
+    .set({ supersededAt: at, supersededByLinkId: link.id })
+    .where(and(eq(jobLinks.id, old.id), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
+    .returning()
+    .get();
+  if (!previous) throw new ConflictError("This link was changed by someone else. Reload and try again.", loadLinkInOrg(tx, ctx, old.id));
+
+  const eventId = recordEvent(tx, ctx, {
+    entityType: "link",
+    entityId: link.id,
+    jobId: job.id,
+    eventType: "link.updated",
+    action: "updated",
+    previousValue: { linkId: old.id, kind: old.kind, label: old.label },
+    newValue: { linkId: link.id, kind: link.kind, label: link.label },
+    metadata: { kind: link.kind, previousKind: old.kind, supersedesLinkId: old.id, url: link.url, ...jobMeta(job) },
+  });
+  setActivityEventId(tx, link.id, eventId);
+  return { ...link, activityEventId: eventId };
+}
+
 /** Removes a current link without replacement (fill-once `removed_*`). Permission `link.remove`. */
 export function removeLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
   const data = parseInput(RemoveLinkInput, input);
@@ -248,7 +310,8 @@ export function buildLinkSlots(views: ReadonlyMap<string, LinkView>, withHistory
     const last = chain[chain.length - 1];
     const current = last.isCurrent ? last : null;
     if (!withHistory && !current) continue;
-    slots.push({ kind: root.kind, current, history: withHistory ? chain : current ? [current] : [] });
+    // The slot is filed under its latest row's kind (`updateLink` may re-file it).
+    slots.push({ kind: last.kind, current, history: withHistory ? chain : current ? [current] : [] });
   }
   return slots.sort(
     (a, b) =>

@@ -8,7 +8,8 @@
  *
  * Audit: `auth.logged_in`, `auth.login_failed` (only when the email matches
  * an account — events need an organisation; never the password),
- * `auth.logged_out`, `user.password_changed`; all management-visibility.
+ * `auth.logged_out` (logout also bumps `session_version`: all devices are
+ * signed out), `user.password_changed`; all management-visibility.
  * `users.last_login_at` is an audit exemption (§5).
  */
 import { and, eq, sql } from "drizzle-orm";
@@ -18,12 +19,7 @@ import type { AuthContext, User } from "@/lib/types";
 import { ChangePasswordInput, LoginInput } from "@/lib/validation/auth";
 import { recordEvent } from "@/server/audit";
 import { hashPassword, verifyAgainstDummy, verifyPassword } from "@/server/auth/password";
-import {
-  checkLoginRateLimit,
-  loginRateLimitKey,
-  recordLoginFailure,
-  resetLoginRateLimit,
-} from "@/server/auth/rate-limit";
+import { checkLoginAttempt, recordLoginAttemptFailure, resetLoginAttempts } from "@/server/auth/rate-limit";
 import { buildContextFromDb, clearSession, createSession, systemContext } from "@/server/auth/session";
 import { ConflictError, RateLimitedError, UnauthorizedError, ValidationError } from "@/server/errors";
 import { parseInput, withTx } from "./_shared";
@@ -58,20 +54,19 @@ function auditFailure(db: Db, user: User, input: { email: string; ip?: string | 
 }
 
 /**
- * Verifies credentials (rate-limited per email+IP), records the outcome and
+ * Verifies credentials (rate-limited per email+IP AND per email alone), records the outcome and
  * returns the user. Throws RateLimitedError (429) or UnauthorizedError (401,
  * one generic message for unknown email / wrong password / inactive account).
  */
 export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedUser> {
   const input = parseInput(LoginInput, raw);
-  const key = loginRateLimitKey(input.email, input.ip);
-  const limit = checkLoginRateLimit(key);
+  const limit = checkLoginAttempt(input.email, input.ip);
   if (!limit.allowed) throw new RateLimitedError(limit.retryAfterSeconds);
 
   const user = db.select().from(users).where(eq(users.email, input.email)).get();
   if (!user) {
     await verifyAgainstDummy(input.password);
-    const after = recordLoginFailure(key);
+    const after = recordLoginAttemptFailure(input.email, input.ip);
     if (!after.allowed) throw new RateLimitedError(after.retryAfterSeconds);
     throw new UnauthorizedError(INVALID_CREDENTIALS);
   }
@@ -80,12 +75,12 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
   const inactive = !user.isActive || user.anonymisedAt !== null;
   if (!passwordOk || inactive) {
     auditFailure(db, user, input, inactive ? "inactive" : "bad_password");
-    const after = recordLoginFailure(key);
+    const after = recordLoginAttemptFailure(input.email, input.ip);
     if (!after.allowed) throw new RateLimitedError(after.retryAfterSeconds);
     throw new UnauthorizedError(INVALID_CREDENTIALS);
   }
 
-  resetLoginRateLimit(key);
+  resetLoginAttempts(input.email, input.ip);
   const ctx = buildContextFromDb(db, user.id, { sessionVersion: user.sessionVersion });
   if (!ctx) throw new UnauthorizedError(INVALID_CREDENTIALS);
   withTx(
@@ -122,25 +117,46 @@ export async function login(raw: unknown, db: Db = getDb()): Promise<Authenticat
   return user;
 }
 
-/** Audits `auth.logged_out` for a signed-in context (no-op for system contexts). */
-export function recordLogout(tx: Tx, ctx: AuthContext, meta: { ip?: string | null; userAgent?: string | null } = {}): void {
-  if (!ctx.userId) return;
+/**
+ * Server-side sign-out for a signed-in context: bumps `users.session_version`
+ * (so every cookie issued before — this browser's AND any copied or other-device
+ * token — stops resolving) and audits `auth.logged_out` with the before/after
+ * version, in the caller's transaction. No-op for system contexts. Returns the
+ * new session version (null when nothing was revoked).
+ *
+ * Trade-off: signing out signs the user out on ALL devices (the session is a
+ * stateless `{ sub, sv }` cookie; per-device revocation would need a session table).
+ */
+export function recordLogout(tx: Tx, ctx: AuthContext, meta: { ip?: string | null; userAgent?: string | null } = {}): number | null {
+  if (!ctx.userId || ctx.isSystem) return null;
+  const updated = tx
+    .update(users)
+    .set({ sessionVersion: sql`${users.sessionVersion} + 1` })
+    .where(and(eq(users.id, ctx.userId), eq(users.organisationId, ctx.organisationId)))
+    .returning({ sessionVersion: users.sessionVersion })
+    .get();
+  if (!updated) return null;
   recordEvent(tx, ctx, {
     entityType: "auth",
     entityId: ctx.userId,
     eventType: "auth.logged_out",
     action: "logged_out",
-    previousValue: null,
-    newValue: null,
-    metadata: { ip: meta.ip ?? null, userAgent: meta.userAgent ?? null },
+    previousValue: { sessionVersion: updated.sessionVersion - 1 },
+    newValue: { sessionVersion: updated.sessionVersion },
+    metadata: { ip: meta.ip ?? null, userAgent: meta.userAgent ?? null, allSessionsRevoked: true },
     visibility: "management",
   });
+  return updated.sessionVersion;
 }
 
-/** Logout: audit (when signed in) + expire the cookie. Always succeeds. */
-export async function logout(ctx: AuthContext | null, meta: { ip?: string | null; userAgent?: string | null } = {}): Promise<void> {
+/** Logout: revoke every session + audit (when signed in), then expire the cookie. Always succeeds. */
+export async function logout(
+  ctx: AuthContext | null,
+  meta: { ip?: string | null; userAgent?: string | null } = {},
+  db: Db = getDb(),
+): Promise<void> {
   if (ctx?.userId) {
-    withTx((tx) => recordLogout(tx, ctx, meta));
+    withTx((tx) => recordLogout(tx, ctx, meta), { db });
   }
   await clearSession();
 }

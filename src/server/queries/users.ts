@@ -21,7 +21,7 @@ import { loadUserInOrg, parseInput, safeUser, userRef } from "@/server/services/
 import { approvedJobsInRange, groupBy, jobCountsBy, lastDaysRange, loadOrgSettings } from "./metrics";
 import { likeSql } from "./scope";
 import { teamsByUser } from "./teams";
-import { canViewTeamWorkloads, getWorkloadDetail, openJobCountFor } from "./workloads";
+import { canViewTeamWorkloads, computeWorkloads, getWorkloadDetail, openJobCountFor } from "./workloads";
 
 const one = <T extends z.ZodType>(item: T) => z.preprocess((v) => (Array.isArray(v) ? v[0] : v === "" ? undefined : v), item);
 
@@ -93,7 +93,13 @@ export function getDirectory(db: DbLike, ctx: AuthContext, role: "photographer" 
   });
 }
 
-/** Aggregate stats per person (by editor_id for editors, photographer_id for photographers). */
+/**
+ * Aggregate stats per person (by editor_id for editors, photographer_id for
+ * photographers). For editors active / dueToday / overdue are the
+ * WorkloadRow numbers (held = WORKLOAD categories, `computeWorkloads`), so
+ * `/team/editors`, `/team/workloads`, `/api/workloads` and `/team/users/[id]`
+ * all show one "Active" figure. Photographers keep the ACTIVE job counts.
+ */
 export function directoryStats(db: DbLike, ctx: AuthContext, role: "photographer" | "editor", userIds: readonly string[]): Map<string, DirectoryStats> {
   const out = new Map<string, DirectoryStats>();
   if (userIds.length === 0) return out;
@@ -101,15 +107,17 @@ export function directoryStats(db: DbLike, ctx: AuthContext, role: "photographer
   const key = role === "editor" ? "editorId" : "photographerId";
   const column = role === "editor" ? jobs.editorId : jobs.photographerId;
   const counts = jobCountsBy(db, ctx, key, { scope: "org", now, where: inArray(column, [...userIds]) });
+  const workloads = role === "editor" ? new Map(computeWorkloads(db, ctx, { now, editorIds: userIds }).rows.map((r) => [r.editor.id, r])) : null;
   const approved = approvedJobsInRange(db, ctx, lastDaysRange(ctx, now, 30), { scope: "org", where: role === "photographer" ? isNotNull(jobs.photographerId) : undefined });
   const approvedBy = groupBy(approved, (j) => (role === "editor" ? j.approvingEditorId : j.photographerId));
   for (const id of userIds) {
     const c = counts.get(id);
+    const w = workloads?.get(id);
     out.set(id, {
-      active: c?.open ?? 0,
-      dueToday: c?.dueToday ?? 0,
-      overdue: c?.overdue ?? 0,
-      completedThisMonth: c?.completedThisMonth ?? 0,
+      active: workloads ? (w?.active ?? 0) : (c?.open ?? 0),
+      dueToday: workloads ? (w?.dueToday ?? 0) : (c?.dueToday ?? 0),
+      overdue: workloads ? (w?.overdue ?? 0) : (c?.overdue ?? 0),
+      completedThisMonth: workloads ? (w?.completedThisMonth ?? 0) : (c?.completedThisMonth ?? 0),
       revisionRate: revisionRate(approvedBy.get(id) ?? []).rate,
     });
   }

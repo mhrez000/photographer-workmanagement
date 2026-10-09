@@ -96,10 +96,17 @@ export function loadStageViews(db: DbLike, ctx: AuthContext, job: Pick<Job, "id"
   return toStageViews(db, ctx, loadTransitions(db, ctx, job.id), now);
 }
 
-/** Stages + milestone events merged oldest → newest (stage first on equal timestamps). */
+/**
+ * Stages + milestone events merged oldest → newest (stage first on equal
+ * timestamps). Ties inside each kind fall back to an insertion key — the
+ * transition `sequence` for stages, the input position for events (which
+ * `jobEvents` returns in rowid = insertion order) — never to the random id,
+ * so e.g. `assignment.ended` always precedes the `assignment.created` written
+ * in the same millisecond.
+ */
 export function mergeHistory(stages: readonly StageView[], events: readonly ActivityFeedItem[]): HistoryEntry[] {
   const entries: (HistoryEntry & { order: number; seq: number })[] = [
-    ...stages.map((stage, i) => ({ at: stage.enteredAt, kind: "stage" as const, stage, order: 0, seq: i })),
+    ...stages.map((stage) => ({ at: stage.enteredAt, kind: "stage" as const, stage, order: 0, seq: stage.sequence })),
     ...events.map((event, i) => ({ at: event.createdAt, kind: "event" as const, event, order: 1, seq: i })),
   ];
   entries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.order - b.order || a.seq - b.seq));

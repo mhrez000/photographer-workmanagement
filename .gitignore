@@ -46,10 +46,14 @@ next-env.d.ts
 /data/*.db-wal
 /data/*.db-shm
 
-# playwright
-/test-results/
-/playwright-report/
+# playwright (E2E_OUTPUT_DIR / E2E_REPORT_DIR variants too)
+/test-results*/
+/playwright-report*/
 
 # keep the example env committed
 !.env.example
 /data/*.log
+
+# playwright e2e auth state
+/e2e/.auth/
+test-results/

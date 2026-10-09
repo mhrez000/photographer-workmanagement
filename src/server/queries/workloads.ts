@@ -358,7 +358,7 @@ export function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: strin
   const target = loadUserInOrg(db, ctx, userId);
   if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
   else assertCan(ctx, "performance.view");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   const holder = target.role === "photographer" ? jobs.photographerId : jobs.editorId;
   const within = (col: typeof jobs.completedAt | typeof jobs.approvedAt, from: string, to: string) => and(gte(col, from), lt(col, to));
 

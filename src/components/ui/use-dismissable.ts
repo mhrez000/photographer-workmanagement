@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { horizontalClampShift } from "./floating";
 
 export interface UseDismissableOptions {
   /** Whether the layer is currently open. */
@@ -109,6 +110,40 @@ export function useAutoFlip(ref: React.RefObject<HTMLElement | null>, preferred:
       el.dataset.side = "bottom";
     }
   }, [ref, preferred]);
+}
+
+/**
+ * On mount, keeps an absolutely positioned floating element inside the
+ * viewport horizontally (16px gutter). The element is anchored with CSS
+ * (`left-0` for start/center, `right-0` for end); when it would overflow, the
+ * anchored side is nudged by the overflow so the panel stays next to its
+ * trigger but never widens the page (e.g. filter popovers on a 390px phone).
+ * Runs as a layout effect, before the panel's focus effect, so focusing an
+ * input inside never scrolls the page sideways.
+ */
+export function useViewportClamp(
+  ref: React.RefObject<HTMLElement | null>,
+  align: "start" | "end" | "center" = "start",
+): void {
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const shift = horizontalClampShift(rect.left, rect.width, viewportWidth);
+    if (shift === 0) return;
+    const style = window.getComputedStyle(el);
+    if (align === "end") {
+      el.style.right = `${parseFloat(style.right) - shift}px`;
+    } else {
+      el.style.left = `${parseFloat(style.left) + shift}px`;
+    }
+    // Moving the anchor can shrink an auto-width panel (less room in its
+    // containing block) — keep the width it measured before the move.
+    if (el.getBoundingClientRect().width < rect.width - 0.5) {
+      el.style.width = `${rect.width}px`;
+    }
+  }, [ref, align]);
 }
 
 /** Roving focus for menus/lists: moves focus between focusable items. */

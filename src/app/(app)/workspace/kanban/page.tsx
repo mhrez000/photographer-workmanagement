@@ -76,6 +76,8 @@ export default async function KanbanPage({ searchParams }: PageProps<"/workspace
           facets={["editor", "photographer", "client", "priority"]}
           searchPlaceholder="Filter the board…"
           trailing={<ShowCancelledToggle />}
+          ownKeys={["includeCancelled"]}
+          timeZone={ctx.settings.timezone}
         />
       </PageHeader>
 

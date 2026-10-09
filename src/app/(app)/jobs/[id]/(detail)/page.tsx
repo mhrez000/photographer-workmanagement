@@ -218,13 +218,14 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
         viewerId={ctx.userId}
         timeTrackingEnabled={ctx.settings.timeTrackingEnabled}
       />
-      <div className="mt-5 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] xl:grid-cols-[minmax(0,1fr)_360px]">
+      {/* Facts sit beside the tabs only at xl (≥1280); narrower, the tab column keeps the full width and the facts follow below. */}
+      <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0">
           <JobTabs active={active} tabs={tabs} editHref={actions.canEditFields ? `/jobs/${job.id}/edit` : null}>
             {panel}
           </JobTabs>
         </div>
-        <aside aria-label="Job facts" className="min-w-0 lg:pt-1">
+        <aside aria-label="Job facts" className="min-w-0 xl:pt-1">
           <FactsRail detail={detail} timeZone={tz} viewerId={ctx.userId} timeTrackingEnabled={ctx.settings.timeTrackingEnabled} />
         </aside>
       </div>

@@ -18,6 +18,21 @@ const ctxOf = (key: keyof SeedIds["users"]) => contextFor(db, ids.users[key]);
 const job = (opts: JobFixtureOptions) => insertJobFixture(db, ids, opts).job;
 
 describe("globalSearch", () => {
+  it("matches the current workflow status name (case-insensitive), within visibility", () => {
+    const visible = job({ statusKey: "revision", editorId: ids.users.editor1, name: "Bondi apartment" });
+    const hidden = job({ statusKey: "revision", editorId: ids.users.editor2, name: "Manly house" });
+    job({ statusKey: "in_progress", editorId: ids.users.editor1, name: "Coogee villa" });
+
+    const owner = globalSearch(db, ctxOf("owner"), "Revision Required");
+    expect(owner.jobs.map((j) => j.id).sort()).toEqual([visible.id, hidden.id].sort());
+    expect(owner.jobs.every((j) => j.matchedIn === "status" && j.status.category === "revision")).toBe(true);
+    expect(globalSearch(db, ctxOf("owner"), "revision required").jobs).toHaveLength(2);
+
+    const editor = globalSearch(db, ctxOf("editor1"), "Revision Required");
+    expect(editor.jobs.map((j) => j.id)).toEqual([visible.id]);
+    expect(editor.jobs.map((j) => j.id)).not.toContain(hidden.id);
+  });
+
   it("ranks an exact job number first and exposes it as exactJob", () => {
     const decoys = Array.from({ length: 12 }, (_, i) => job({ name: `Decoy ${i}` }));
     const target = decoys[2]; // PJ-0003

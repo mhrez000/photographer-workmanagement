@@ -11,8 +11,8 @@
  *     (identical to the WorkloadRow numbers)
  * Photographers (jobs.photographer_id = P):
  *   - created (created_at ∈ range), submitted (first_submitted_at ∈ range),
- *     completed (completedInRange), processing = firstSubmittedAt − shootDate
- *     over submitted, end-to-end = completedAt − createdAt over completed,
+ *     completed (completedInRange), processing = firstSubmittedAt − start of
+ *     the shoot's civil day (org tz, clamped ≥ 0) over submitted, end-to-end = completedAt − createdAt over completed,
  *     review response = Σ reviewer-held stage time over jobs approved in range
  */
 import { and, asc, eq, gte, inArray, isNotNull, lt, or } from "drizzle-orm";
@@ -124,6 +124,7 @@ function editorRow(
 /** Per-photographer performance (no permission check). */
 export function computePhotographerPerformance(db: DbLike, ctx: AuthContext, range: Range, opts: PerformanceOptions = {}): PhotographerPerformanceRow[] {
   const now = opts.now ?? ctx.now();
+  const tz = ctx.settings.timezone;
   const hasPhotographer = isNotNull(jobs.photographerId);
   const created = groupBy(
     loadMetricJobs(db, ctx, { scope: "org", where: and(hasPhotographer, gte(jobs.createdAt, range.from), lt(jobs.createdAt, range.to)) }),
@@ -157,8 +158,8 @@ export function computePhotographerPerformance(db: DbLike, ctx: AuthContext, ran
       created: created.get(user.id)?.length ?? 0,
       submitted: submitted.get(user.id)?.length ?? 0,
       completed: completed.get(user.id)?.length ?? 0,
-      avgProcessingSeconds: mean((submitted.get(user.id) ?? []).map((j) => photographerProcessingSeconds(j).processing)),
-      avgEndToEndSeconds: mean((completed.get(user.id) ?? []).map((j) => photographerProcessingSeconds(j).endToEnd)),
+      avgProcessingSeconds: mean((submitted.get(user.id) ?? []).map((j) => photographerProcessingSeconds(j, tz).processing)),
+      avgEndToEndSeconds: mean((completed.get(user.id) ?? []).map((j) => photographerProcessingSeconds(j, tz).endToEnd)),
       avgReviewResponseSeconds: mean((approved.get(user.id) ?? []).map((j) => reviewSeconds(transitions.get(j.id) ?? [], now))),
       active: act.length,
       overdue: act.filter((j) => isDeadlineBound(j.statusCategory) && isPastDue(j.dueDate, now)).length,
@@ -169,7 +170,7 @@ export function computePhotographerPerformance(db: DbLike, ctx: AuthContext, ran
 /** `/team/performance` (performance.view = O/M). `rawRange` = query params or a ResolvedRange. */
 export function getPerformance(db: DbLike, ctx: AuthContext, rawRange?: unknown): PerformanceReport {
   assertCan(ctx, "performance.view");
-  const range: ResolvedRange = resolveRangeInput(ctx, rawRange);
+  const range: ResolvedRange = resolveRangeInput(ctx, rawRange, undefined, { db });
   return {
     range,
     editors: computeEditorPerformance(db, ctx, range),

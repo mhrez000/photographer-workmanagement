@@ -10,6 +10,9 @@
  * with `action: "kept"` — the deliberate "deactivate without hand-over"
  * case behind the editor-unavailable bottleneck (the "flagged" exception
  * of §2.8; the demo seed's editor11 relies on it).
+ *
+ * The open revision's `assignee_user_id` must equal `jobs.editor_id` when
+ * both are set (`open_revision_assignee_is_editor`).
  */
 import type Database from "better-sqlite3";
 import type { IntegrityReport } from "@/lib/types";
@@ -37,7 +40,16 @@ interface JobRow {
   status_actual_category: string;
 }
 
+/**
+ * Recompute every derived job column from the ledgers and compare. All reads
+ * run in ONE read transaction (a single WAL snapshot): without it a job
+ * written between two of the queries showed up as drift on a busy server.
+ */
 export function verifyDerived(sqlite: Database.Database, organisationId?: string): IntegrityReport {
+  return sqlite.transaction(() => collectReport(sqlite, organisationId)).deferred();
+}
+
+function collectReport(sqlite: Database.Database, organisationId?: string): IntegrityReport {
   const drift: IntegrityReport["drift"] = [];
   const structural: IntegrityReport["structural"] = [];
   const orgFilter = organisationId ? "WHERE j.organisation_id = ?" : "";
@@ -67,7 +79,7 @@ export function verifyDerived(sqlite: Database.Database, organisationId?: string
     `SELECT user_id FROM job_assignments WHERE job_id = ? AND role = ? AND unassigned_at IS NULL`,
   );
   const maxRevision = sqlite.prepare(`SELECT MAX(revision_number) AS n FROM job_revisions WHERE job_id = ?`);
-  const openRevision = sqlite.prepare(`SELECT id FROM job_revisions WHERE job_id = ? AND resolved_at IS NULL`);
+  const openRevision = sqlite.prepare(`SELECT id, assignee_user_id FROM job_revisions WHERE job_id = ? AND resolved_at IS NULL`);
   const maxEvent = sqlite.prepare(`SELECT MAX(created_at) AS at FROM activity_events WHERE job_id = ?`);
   const reopenCount = sqlite.prepare(`SELECT COUNT(*) AS n FROM job_status_transitions WHERE job_id = ? AND is_reopen = 1`);
   const openSessions = sqlite.prepare(`SELECT COUNT(*) AS n FROM work_sessions WHERE job_id = ? AND ended_at IS NULL`);
@@ -150,6 +162,14 @@ export function verifyDerived(sqlite: Database.Database, organisationId?: string
     const orv = openRevision.all(j.id) as Row[];
     if (orv.length > 1) structural.push({ check: "at_most_one_open_revision", jobId: j.id, detail: `${orv.length}` });
     push(j.id, "open_revision_id", j.open_revision_id, (orv[0]?.id as string | undefined) ?? null);
+    // The open revision is worked by the job's editor: an assignee who does not hold the
+    // job could neither see it nor resolve it (§4.4: a different assignee reassigns the job).
+    for (const r of orv) {
+      const assignee = r.assignee_user_id as string | null;
+      if (assignee && j.editor_id && assignee !== j.editor_id) {
+        structural.push({ check: "open_revision_assignee_is_editor", jobId: j.id, detail: `revision ${String(r.id)} assignee ${assignee} != jobs.editor_id ${j.editor_id}` });
+      }
+    }
     for (const r of revisionEvents.all(j.id) as Row[]) {
       structural.push({ check: "revision_has_event", jobId: j.id, detail: `revision ${r.id} has no revision.requested event` });
     }

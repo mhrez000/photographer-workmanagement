@@ -11,8 +11,12 @@
  * - ZodError (should not escape services, but just in case) → 400 validation
  * - unknown → 500 `{ error: { code: "internal", message, requestId } }`; logged
  *   server-side, never a stack in the body
- * - CSRF: every non-GET/HEAD/OPTIONS request must carry an `Origin` whose host
- *   equals the request host, else 403
+ * - CSRF: every non-GET/HEAD/OPTIONS request must carry an `Origin` that
+ *   matches `APP_ORIGIN` (when set) or the `Host` header, else 403.
+ *   `X-Forwarded-Host` is honoured only behind trusted proxies
+ *   (`TRUSTED_PROXY_COUNT` > 0) — a client can send any header it likes
+ * - client IP (`clientIp`): `X-Forwarded-For` / `X-Real-IP` are ignored
+ *   unless `TRUSTED_PROXY_COUNT` > 0 (see there)
  * - every response carries `x-request-id`; the same id is in event metadata
  */
 import { ZodError } from "zod";
@@ -45,13 +49,64 @@ function hostOf(value: string | null): string | null {
   }
 }
 
-/** True when the request passes the Origin == Host CSRF rule (safe methods always pass). */
-export function isSameOrigin(req: Request): boolean {
+function originOf(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const origin = new URL(value).origin;
+    return origin === "null" ? null : origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Number of reverse proxies in front of the app that each append to
+ * `X-Forwarded-For` (env `TRUSTED_PROXY_COUNT`, default 0). With 0 every
+ * forwarding header is client-controlled and therefore ignored.
+ */
+export function trustedProxyCount(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env.TRUSTED_PROXY_COUNT?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return 0;
+  return Math.min(Number(raw), 32);
+}
+
+/**
+ * The hop a chain of `trusted` proxies vouches for in a comma-separated
+ * forwarding header: index `len - trusted` (the value the outermost trusted
+ * proxy appended). Anything left of it was supplied by the client.
+ */
+function trustedHop(value: string | null | undefined, trusted: number): string | null {
+  if (trusted <= 0 || !value) return null;
+  const hops = value
+    .split(",")
+    .map((h) => h.trim())
+    .filter((h) => h.length > 0);
+  if (hops.length === 0) return null;
+  return hops[Math.max(0, hops.length - trusted)] ?? null;
+}
+
+export interface OriginCheckOptions {
+  /** Defaults to `trustedProxyCount()`. */
+  trustedProxies?: number;
+  /** Canonical app origin (env `APP_ORIGIN`); when set, Origin must equal it. */
+  appOrigin?: string | null;
+}
+
+/**
+ * True when the request passes the CSRF Origin rule (safe methods always pass):
+ * Origin must equal `APP_ORIGIN` when configured, else its host must equal the
+ * `Host` header (or, behind trusted proxies only, `X-Forwarded-Host`).
+ */
+export function isSameOrigin(req: Request, opts: OriginCheckOptions = {}): boolean {
   if (SAFE_METHODS.has(req.method.toUpperCase())) return true;
-  const origin = hostOf(req.headers.get("origin"));
+  const rawOrigin = req.headers.get("origin");
+  const origin = hostOf(rawOrigin);
   if (!origin) return false;
-  const forwarded = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim().toLowerCase();
-  const host = forwarded || req.headers.get("host")?.toLowerCase() || hostOf(req.url);
+  const appOrigin = originOf(opts.appOrigin === undefined ? process.env.APP_ORIGIN?.trim() : opts.appOrigin);
+  if (appOrigin) return originOf(rawOrigin) === appOrigin;
+  const trusted = opts.trustedProxies ?? trustedProxyCount();
+  const forwarded = trustedHop(req.headers.get("x-forwarded-host"), trusted)?.toLowerCase();
+  const host = forwarded || req.headers.get("host")?.trim().toLowerCase() || hostOf(req.url);
   return origin === host;
 }
 
@@ -94,7 +149,7 @@ export function handle<C = unknown>(
         if (!isSameOrigin(req)) {
           return errorJson(
             403,
-            { code: "forbidden", message: "Cross-site request blocked (Origin does not match Host)" },
+            { code: "forbidden", message: "Cross-site request blocked (Origin does not match this site)" },
             { headers: { "x-request-id": requestId } },
           );
         }
@@ -162,10 +217,17 @@ export function searchParamsToObject(input: URL | URLSearchParams | string): Rec
   return out;
 }
 
-/** Best-effort client IP (first X-Forwarded-For hop, else X-Real-IP). */
-export function clientIp(headers: Headers): string | null {
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || headers.get("x-real-ip")?.trim() || null;
+/**
+ * Client IP for rate limiting and audit metadata. `X-Forwarded-For` /
+ * `X-Real-IP` are client-controlled, so they are ignored unless
+ * `TRUSTED_PROXY_COUNT` (> 0) says how many proxies append to XFF; then the
+ * hop at index `len - TRUSTED_PROXY_COUNT` is used. Otherwise null (route
+ * handlers get no socket peer), which the login limiter buckets as one
+ * stable "unknown" address — the per-email limiter still applies.
+ */
+export function clientIp(headers: Headers, trustedProxies: number = trustedProxyCount()): string | null {
+  if (trustedProxies <= 0) return null;
+  return trustedHop(headers.get("x-forwarded-for"), trustedProxies) || headers.get("x-real-ip")?.trim() || null;
 }
 
 /** True when the request comes from a plain HTML form navigation (not fetch/XHR). */

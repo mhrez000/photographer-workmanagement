@@ -4,7 +4,10 @@ import { jobs, users } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { CATEGORY_GROUPS } from "@/lib/constants";
 import type { Job } from "@/lib/types";
-import { getDashboard, getDashboardLayout, getKpis } from "./dashboard";
+import { getDashboardLayout } from "@/server/services/dashboards";
+import { KPI_DEFS } from "@/components/dashboard/kpi-strip";
+import { getDashboard, getKpis } from "./dashboard";
+import { listJobs } from "./jobs";
 import { moveJob } from "./test-history";
 
 // Thu 8 Oct 2026, 11:00 in Sydney (AEDT, +11). Week = Mon 5 Oct – Sun 11 Oct.
@@ -87,8 +90,9 @@ describe("getDashboard / KPIs", () => {
     const all = db.select().from(jobs).all();
     const expected = bruteForce(all);
     const kpis = getKpis(db, ctx);
-    expect({ ...kpis, asOf: undefined }).toEqual({ ...expected, asOf: undefined });
+    expect({ ...kpis, asOf: undefined, completedWeek: undefined }).toEqual({ ...expected, asOf: undefined });
     expect(kpis.asOf).toBe(NOW);
+    expect(kpis.completedWeek).toEqual({ from: WEEK_START, to: WEEK_END });
     // sanity on the fixture design
     expect(expected.completedThisWeek).toBe(2);
     expect(expected.overdue).toBe(3);
@@ -104,6 +108,29 @@ describe("getDashboard / KPIs", () => {
     expect(completedIds).toContain(completedLastWeekId);
     expect(completedIds).not.toContain(reopenedOpenId);
     expect(d.kpis.revisionRequired).toBe(2);
+  });
+
+  it("the Completed-this-week drill-down (completedFrom/completedTo) lists exactly the KPI's jobs", () => {
+    for (const key of ["owner", "editor1"] as const) {
+      const ctx = contextFor(db, ids.users[key]);
+      const kpis = getKpis(db, ctx);
+      const week = kpis.completedWeek;
+      expect(week).toBeDefined();
+      const list = listJobs(db, ctx, { quick: "completed", completedFrom: week?.from, completedTo: week?.to, limit: "200" });
+      expect(list.total).toBe(kpis.completedThisWeek);
+    }
+    const owner = contextFor(db, ids.users.owner);
+    const list = listJobs(db, owner, { quick: "completed", completedFrom: WEEK_START, completedTo: WEEK_END });
+    expect(list.total).toBe(2);
+    expect(list.rows.map((r) => r.id)).toContain(reopenedRecompletedId);
+    expect(list.rows.map((r) => r.id)).not.toContain(completedLastWeekId);
+    // civil bounds: completedTo is an inclusive day (Mon 5 – Sun 11 Oct)
+    expect(listJobs(db, owner, { completedFrom: "2026-10-05", completedTo: "2026-10-11" }).total).toBe(2);
+    // the KPI link carries the same bounds
+    const href = KPI_DEFS.find((d) => d.key === "completedThisWeek")?.href;
+    const k = getKpis(db, owner);
+    const url = new URL(typeof href === "function" ? href(k) : String(href), "http://x");
+    expect(listJobs(db, owner, Object.fromEntries(url.searchParams)).total).toBe(k.completedThisWeek);
   });
 
   it("due-today and overdue lists agree with the KPI counts and flags", () => {
@@ -125,7 +152,7 @@ describe("getDashboard / KPIs", () => {
     const mine = db.select().from(jobs).where(eq(jobs.editorId, ids.users.editor2)).all();
     const d = getDashboard(db, ctx);
     expect(d.variant).toBe("personal");
-    expect({ ...d.kpis, asOf: undefined }).toEqual({ ...bruteForce(mine), asOf: undefined });
+    expect({ ...d.kpis, asOf: undefined, completedWeek: undefined }).toEqual({ ...bruteForce(mine), asOf: undefined });
     expect(d.kpis.active).toBe(1);
     expect(d.workloads).toBeNull(); // editors_see_team_workloads is off
     expect(d.bottlenecks).toEqual([]);
@@ -147,7 +174,14 @@ describe("getDashboard / KPIs", () => {
     expect(Array.isArray(d2.bottlenecks)).toBe(true);
   });
 
-  it("falls back to the role default layout", () => {
-    expect(getDashboardLayout(db, contextFor(db, ids.users.editor1)).widgets[0].type).toBe("kpis");
+  it("returns the same layout as the dashboard layout service (role default, allowed widgets only)", () => {
+    for (const key of ["editor1", "photographer1", "manager", "owner"] as const) {
+      const ctx = contextFor(db, ids.users[key]);
+      expect(getDashboard(db, ctx).layout).toEqual(getDashboardLayout(db, ctx).layout);
+    }
+    const editorLayout = getDashboard(db, contextFor(db, ids.users.editor1)).layout;
+    expect(editorLayout.widgets[0].type).toBe("kpis");
+    // an editor never gets widgets they may not load
+    expect(editorLayout.widgets.some((w) => ["team_workload", "editor_performance", "bottlenecks", "revision_rate"].includes(w.type))).toBe(false);
   });
 });

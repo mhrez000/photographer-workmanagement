@@ -61,7 +61,9 @@ function AssignForm({
   onAssigned,
 }: AssignEditorDialogProps) {
   const run = useMutationRunner();
-  const people = useUserOptions(role, { jobId });
+  // Every active person of the role — NOT `{ jobId }`, which keeps only people who can
+  // already view the job (the @mention list) and so would hide every new candidate.
+  const people = useUserOptions(role);
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState<string | null>(null);
   const [reason, setReason] = React.useState("");
@@ -151,7 +153,7 @@ function AssignForm({
           placeholder={`Search ${noun}s…`}
           leading={<Search aria-hidden="true" />}
           aria-label={`Search ${noun}s`}
-          autoFocus
+          data-autofocus
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();

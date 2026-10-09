@@ -11,7 +11,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@/lib/constants";
 
-const PUBLIC_PREFIXES = ["/api/auth/", "/_next/", "/design-system", "/favicon", "/robots.txt", "/sitemap.xml"];
+// /api/system/cron/ authenticates with a bearer CRON_SECRET inside the route (server-to-server).
+const PUBLIC_PREFIXES = ["/api/auth/", "/api/system/cron/", "/_next/", "/design-system", "/favicon", "/robots.txt", "/sitemap.xml"];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PREFIXES.some((p) => pathname === p.replace(/\/$/, "") || pathname.startsWith(p));
@@ -33,7 +34,7 @@ export function proxy(req: NextRequest) {
 
   if (isPublic(pathname) || hasCookie) return NextResponse.next();
 
-  if (pathname.startsWith("/api/")) {
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
     return NextResponse.json({ error: { code: "unauthorized", message: "Sign in required" } }, { status: 401 });
   }
 

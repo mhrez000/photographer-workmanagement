@@ -10,6 +10,7 @@
  */
 import {
   BOTTLENECK_DEFAULTS,
+  CATEGORY_GROUPS,
   PRIORITY_META,
   STATUS_CATEGORY_META,
   WORKLOAD_THRESHOLDS,
@@ -18,7 +19,7 @@ import {
   type StatusCategory,
   type WorkloadBand,
 } from "@/lib/constants";
-import { addCivilDays, civilWeekRange, endOfCivilDayIso, startOfCivilDayIso, todayCivil } from "@/lib/dates";
+import { addCivilDays, civilDate, civilWeekRange, endOfCivilDayIso, startOfCivilDayIso, todayCivil } from "@/lib/dates";
 import type { BottleneckAlert, JobRef, KpiSummary, UserRef, WorkloadHistoryPoint, WorkloadRow } from "@/lib/types";
 import {
   isActiveCategory,
@@ -148,15 +149,30 @@ export function approvingEditorId(transitions: readonly TransitionLike[]): strin
   return latest?.editorIdAtEntry ?? null;
 }
 
-/** Photographer processing times: firstSubmittedAt − shootDate and completedAt − createdAt. */
-export function photographerProcessingSeconds(job: {
-  shootDate: string | null;
-  firstSubmittedAt: string | null;
-  createdAt: string;
-  completedAt: string | null;
-}): { processing: number | null; endToEnd: number | null } {
+/**
+ * Photographer processing times: firstSubmittedAt − START of the shoot's civil
+ * day (org tz) and completedAt − createdAt. `shoot_date` is stored like a
+ * deadline (the LAST millisecond of the civil day), so subtracting it raw
+ * made a same-day submission negative; measuring from the start of the
+ * shoot day and clamping at 0 keeps "processing time" a real duration.
+ */
+export function photographerProcessingSeconds(
+  job: {
+    shootDate: string | null;
+    firstSubmittedAt: string | null;
+    createdAt: string;
+    completedAt: string | null;
+  },
+  timeZone?: string,
+): { processing: number | null; endToEnd: number | null } {
+  let processing: number | null = null;
+  if (job.shootDate && job.firstSubmittedAt) {
+    const shootCivil = civilDate(job.shootDate, timeZone);
+    const shootStart = shootCivil ? startOfCivilDayIso(shootCivil, timeZone) : job.shootDate;
+    processing = durationSeconds(shootStart, job.firstSubmittedAt, job.firstSubmittedAt);
+  }
   return {
-    processing: job.shootDate && job.firstSubmittedAt ? (ms(job.firstSubmittedAt) - ms(job.shootDate)) / 1000 : null,
+    processing,
     endToEnd: job.completedAt ? durationSeconds(job.createdAt, job.completedAt, job.completedAt) : null,
   };
 }
@@ -275,6 +291,7 @@ export function kpiSummary(jobs: readonly KpiJob[], opts: { now: string; tz: str
     paused: 0,
     reviewOverdue: 0,
     asOf: now,
+    completedWeek: { from: week.from, to: week.to },
   };
   for (const j of jobs) {
     const c = j.statusCategory;
@@ -469,7 +486,11 @@ export interface BottleneckInput {
   /** Org jobs (non-active ones are ignored). */
   jobs: readonly BottleneckJob[];
   editors: readonly BottleneckEditor[];
-  /** Revisions requested in the last 7 days and in each of the previous (up to 4) weeks. */
+  /**
+   * Revision REQUESTS in the last 7 days and in each of the previous (up to 4)
+   * 7-day windows, plus the distinct jobs those requests were made on this
+   * week (the alert's `count` / `jobs`).
+   */
   revisions: { thisWeek: number; previousWeeks: readonly number[]; jobs?: readonly JobRef[] };
   /** Users that are deactivated (editor_unavailable); editors with isActive=false are added automatically. */
   inactiveUserIds?: readonly string[];
@@ -477,6 +498,7 @@ export interface BottleneckInput {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const ref = (j: JobRef): JobRef => ({ id: j.id, jobNumber: j.jobNumber, name: j.name });
+const isoParam = (msValue: number) => encodeURIComponent(new Date(msValue).toISOString());
 
 /** Evaluates all BOTTLENECK_KINDS; returns the alerts that fire, in BOTTLENECK_KINDS order. */
 export function evaluateBottlenecks(input: BottleneckInput): BottleneckAlert[] {
@@ -500,7 +522,8 @@ export function evaluateBottlenecks(input: BottleneckInput): BottleneckAlert[] {
       count: waiting.length,
       user: null,
       jobs: waiting.map(ref),
-      href: "/workspace/all?quick=awaiting_review",
+      // statusEnteredBefore reproduces "now − status_entered_at > h" exactly.
+      href: `/workspace/all?quick=awaiting_review&statusEnteredBefore=${isoParam(nowMs - s.reviewBottleneckHours * HOUR_MS)}`,
     });
   }
 
@@ -509,14 +532,15 @@ export function evaluateBottlenecks(input: BottleneckInput): BottleneckAlert[] {
     if (!e.user.isActive) continue;
     const capped = e.active >= s.maxActiveJobsPerEditor && e.dueSoon >= s.editingBottleneckMinDueSoon;
     if (e.band !== "overloaded" && !capped) continue;
-    const theirs = active.filter((j) => j.editorId === e.user.id);
+    // Same set as WorkloadRow.active (held = WORKLOAD categories), so the list matches the count.
+    const theirs = active.filter((j) => j.editorId === e.user.id && isWorkloadCategory(j.statusCategory));
     push("editor_overloaded", {
       severity: e.band === "overloaded" && capped ? "critical" : "warning",
       message: `Editing bottleneck — ${e.user.name} has ${e.active} active ${e.active === 1 ? "job" : "jobs"}, ${e.dueSoon} due within ${s.editingBottleneckDueWithinHours}h`,
       count: e.active,
       user: e.user,
       jobs: theirs.map(ref),
-      href: `/team/users/${e.user.id}`,
+      href: `/workspace/all?editorId=${encodeURIComponent(e.user.id)}&statusCategory=${CATEGORY_GROUPS.WORKLOAD.join(",")}`,
     });
   }
 
@@ -525,13 +549,19 @@ export function evaluateBottlenecks(input: BottleneckInput): BottleneckAlert[] {
   const baseline = prev.length === 0 ? 0 : prev.reduce((a, b) => a + b, 0) / prev.length;
   const n = input.revisions.thisWeek;
   if (n >= s.revisionSpikeMinCount && (baseline === 0 || n >= s.revisionSpikeMultiplier * baseline)) {
+    // The rule fires on REQUEST counts (§8); the alert counts and lists the distinct jobs.
+    const affected = input.revisions.jobs;
+    const requests = plural(n, "revision request", "revision requests");
     push("revision_spike", {
       severity: baseline > 0 && n >= 2 * s.revisionSpikeMultiplier * baseline ? "critical" : "warning",
-      message: `Revision bottleneck — ${plural(n, "job", "jobs")} required revisions this week`,
-      count: n,
+      message: affected
+        ? `Revision bottleneck — ${requests} on ${plural(affected.length, "job", "jobs")} in the last 7 days`
+        : `Revision bottleneck — ${requests} in the last 7 days`,
+      count: affected ? affected.length : n,
       user: null,
-      jobs: (input.revisions.jobs ?? []).map(ref),
-      href: "/workspace/all?quick=revision_required",
+      jobs: (affected ?? []).map(ref),
+      // Every job with a revision requested in the window (cancelled ones included, as in the alert).
+      href: `/workspace/all?revisedFrom=${isoParam(nowMs - 7 * DAY_MS)}&includeCancelled=1`,
     });
   }
 

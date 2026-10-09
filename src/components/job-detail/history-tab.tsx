@@ -11,6 +11,7 @@ import {
   Eye,
   History,
   PackageCheck,
+  Pause,
   Play,
   Plus,
   RotateCcw,
@@ -70,7 +71,17 @@ function Name({ children }: { children: React.ReactNode }) {
   return <strong className="font-semibold text-ink">{children}</strong>;
 }
 
-function stageMoment(stage: StageView, linked: ActivityFeedItem[], assignment: ActivityFeedItem | undefined, previous: StageView | null): Moment {
+/**
+ * One stage moment. `firstEditing` = no earlier stage of the job entered
+ * in_progress (the first start, as opposed to a return to editing).
+ */
+function stageMoment(
+  stage: StageView,
+  linked: ActivityFeedItem[],
+  assignment: ActivityFeedItem | undefined,
+  previous: StageView | null,
+  firstEditing: boolean,
+): Moment {
   const A = actorOf(stage, linked);
   const find = (t: string) => linked.find((e) => e.eventType === t);
   const editor = stage.editorAtEntry?.name;
@@ -138,8 +149,15 @@ function stageMoment(stage: StageView, linked: ActivityFeedItem[], assignment: A
       return { ...base, icon: Check, sentence: <><Name>{A}</Name> accepted the job</> };
     case "in_progress": {
       if (stage.isReopen) return { ...base, icon: RotateCcw, tone: "attention", sentence: <><Name>{A}</Name> reopened the job for more editing</> };
-      if (find("job.work_started")) return { ...base, icon: Play, sentence: <><Name>{A}</Name> started editing</> };
-      return { ...base, icon: Play, sentence: <><Name>{A}</Name> {stage.fromCategory === "assigned" ? "started editing" : "resumed editing"}</> };
+      const resumed = find("job.resumed") !== undefined;
+      const fromAwaiting = stage.fromCategory === "accepted" || stage.fromCategory === "assigned";
+      // "started" = the first entry into editing (or a new editor's first start after
+      // accepting); "resumed" only after a pause or a revision.
+      if (!resumed && (firstEditing || fromAwaiting || find("job.work_started"))) {
+        return { ...base, icon: Play, sentence: <><Name>{A}</Name> started editing</> };
+      }
+      if (resumed || stage.fromCategory === "revision") return { ...base, icon: Play, sentence: <><Name>{A}</Name> resumed editing</> };
+      return { ...base, icon: Undo2, sentence: <><Name>{A}</Name> moved the job back to editing</> };
     }
     case "submitted": {
       const warn = find("job.submitted");
@@ -204,6 +222,9 @@ const EVENT_ICONS: Partial<Record<string, LucideIcon>> = {
   "job.reopened": RotateCcw,
   "job.restored": ArchiveRestore,
   "job.created": Plus,
+  "job.paused": Pause,
+  "job.resumed": Play,
+  "job.declined": UserMinus,
 };
 
 function eventMoment(e: ActivityFeedItem, timeZone: string): Moment {
@@ -219,6 +240,10 @@ function eventMoment(e: ActivityFeedItem, timeZone: string): Moment {
     sentence:
       e.eventType === "job.became_overdue" ? (
         <>The job became <Name>overdue</Name></>
+      ) : e.eventType === "assignment.ended" && e.metadata?.unassignReason === "declined" ? (
+        <>
+          <Name>{A}</Name> declined the job
+        </>
       ) : (
         <>
           <Name>{A}</Name> {e.summary}
@@ -262,11 +287,23 @@ export function buildMoments(entries: HistoryEntry[], timeZone: string): Moment[
     }
   }
 
+  // A decline closes the editor's assignment just before the → ready stage: the
+  // assignment.ended is part of that "declined the job" moment.
+  for (const s of stages) {
+    if (!(linked.get(s.id) ?? []).some((e) => e.eventType === "job.declined")) continue;
+    const ended = events
+      .filter((e) => e.eventType === "assignment.ended" && e.metadata?.unassignReason === "declined" && e.createdAt <= s.enteredAt && !consumed.has(e.id))
+      .pop();
+    if (ended) consumed.add(ended.id);
+  }
+
   const moments: Moment[] = [];
   let previous: StageView | null = null;
+  let editedBefore = false;
   for (const entry of entries) {
     if (entry.kind === "stage" && entry.stage) {
-      moments.push(stageMoment(entry.stage, linked.get(entry.stage.id) ?? [], assignmentFor.get(entry.stage.id), previous));
+      moments.push(stageMoment(entry.stage, linked.get(entry.stage.id) ?? [], assignmentFor.get(entry.stage.id), previous, !editedBefore));
+      if (entry.stage.toCategory === "in_progress") editedBefore = true;
       previous = entry.stage;
     } else if (entry.kind === "event" && entry.event && !consumed.has(entry.event.id)) {
       if (entry.event.eventType === "job.status_changed") continue;

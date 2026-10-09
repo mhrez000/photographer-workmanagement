@@ -8,6 +8,18 @@ export const DEFAULT_TIMEZONE = "Australia/Sydney";
 
 export type DateInput = string | Date | null | undefined;
 
+/** Intl formatters are expensive to build; day-bound math calls them in loops. */
+const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+function cachedFormat(kind: string, timeZone: string, options: () => Intl.DateTimeFormatOptions, locale: string): Intl.DateTimeFormat {
+  const key = `${kind}|${timeZone}`;
+  let f = FORMATTERS.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale, options());
+    FORMATTERS.set(key, f);
+  }
+  return f;
+}
+
 export function toDate(value: DateInput): Date | null {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
@@ -22,12 +34,7 @@ export function nowIso(): string {
 export function civilDate(value: DateInput, timeZone = DEFAULT_TIMEZONE): string | null {
   const d = toDate(value);
   if (!d) return null;
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(d);
+  const parts = cachedFormat("civil", timeZone, () => ({ timeZone, year: "numeric", month: "2-digit", day: "2-digit" }), "en-CA").formatToParts(d);
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
@@ -82,11 +89,38 @@ export function isDueWithinDays(due: DateInput, days: number, timeZone = DEFAULT
 
 /** Start of the civil day (as an ISO instant) in the timezone. */
 export function startOfCivilDayIso(civil: string, timeZone = DEFAULT_TIMEZONE): string {
-  // Find the UTC instant whose civil date in `timeZone` is `civil` at 00:00.
+  // The start of a civil day is the FIRST instant whose civil date (in
+  // `timeZone`) is `civil`. Usually that is local midnight: the fixed point
+  // s = guess − offset(s), using the offset in force AT that midnight (on a
+  // DST-change day it differs from the offset at UTC midnight).
   const [y, m, d] = civil.split("-").map(Number);
   const guess = Date.UTC(y, m - 1, d, 0, 0, 0);
-  const offsetMs = tzOffsetMs(new Date(guess), timeZone);
-  return new Date(guess - offsetMs).toISOString();
+  let s = guess - tzOffsetMs(new Date(guess), timeZone);
+  for (let i = 0; i < 3; i += 1) {
+    const next = guess - tzOffsetMs(new Date(s), timeZone);
+    if (next === s) break;
+    s = next;
+  }
+  if (isFirstInstantOf(s, civil, timeZone)) return new Date(s).toISOString();
+  // Local midnight does not exist (a DST jump AT 00:00, e.g. America/Santiago,
+  // America/Havana): the day starts at the transition. Civil dates never go
+  // backwards across a day boundary, so binary-search the first instant on or
+  // after `civil` between guess − 15 h (still the day before in every zone)
+  // and guess + 15 h (already that day in every zone). Transitions fall on
+  // whole seconds, so 1 s resolution is exact.
+  let lo = guess - 15 * 3_600_000;
+  let hi = guess + 15 * 3_600_000;
+  while (hi - lo > 1000) {
+    const mid = lo + Math.floor((hi - lo) / 2000) * 1000;
+    if ((civilDate(new Date(mid), timeZone) as string) >= civil) hi = mid;
+    else lo = mid;
+  }
+  return new Date(hi).toISOString();
+}
+
+/** True when `ms` is on `civil` and the millisecond before it is not. */
+function isFirstInstantOf(ms: number, civil: string, timeZone: string): boolean {
+  return civilDate(new Date(ms), timeZone) === civil && civilDate(new Date(ms - 1), timeZone) !== civil;
 }
 
 /**
@@ -102,27 +136,27 @@ export function endOfCivilDayIso(civil: string, timeZone = DEFAULT_TIMEZONE): st
 
 /** Offset of `timeZone` from UTC at instant `date`, in ms (positive east of UTC). */
 export function tzOffsetMs(date: Date, timeZone = DEFAULT_TIMEZONE): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
+  const parts = cachedFormat(
+    "offset",
     timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(date);
+    () => ({ timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    "en-US",
+  ).formatToParts(date);
   const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? "0");
   const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
   return asUtc - Math.floor(date.getTime() / 1000) * 1000;
 }
 
-/** Civil week (Mon–Sun) containing `civil`. Returns [startCivil, endCivilExclusive]. */
-export function civilWeekRange(civil: string): [string, string] {
+/**
+ * Civil week containing `civil`, starting on `weekStartsOn` (0 = Sunday …
+ * 6 = Saturday; default 1 = Monday, organisation_settings.week_starts_on).
+ * Returns [startCivil, endCivilExclusive].
+ */
+export function civilWeekRange(civil: string, weekStartsOn = 1): [string, string] {
   const [y, m, d] = civil.split("-").map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 = Sunday
-  const mondayOffset = dow === 0 ? -6 : 1 - dow;
-  const start = addCivilDays(civil, mondayOffset);
+  const first = ((Math.trunc(weekStartsOn) % 7) + 7) % 7;
+  const start = addCivilDays(civil, -((dow - first + 7) % 7));
   return [start, addCivilDays(start, 7)];
 }
 
@@ -136,12 +170,17 @@ export function civilMonthRange(civil: string): [string, string] {
 
 export type RangePreset = "today" | "this_week" | "this_month" | "last_month" | "last_7_days" | "last_30_days" | "custom";
 
-/** Resolves a reporting range preset to ISO instant bounds [startIso, endIsoExclusive]. */
+/**
+ * Resolves a reporting range preset to ISO instant bounds [startIso, endIsoExclusive].
+ * `opts.weekStartsOn` (organisation_settings.week_starts_on, default Monday)
+ * decides where "this_week" starts.
+ */
 export function resolveRange(
   preset: RangePreset,
   timeZone = DEFAULT_TIMEZONE,
   custom?: { from?: string | null; to?: string | null },
   now: Date = new Date(),
+  opts: { weekStartsOn?: number } = {},
 ): { from: string; to: string; label: string } {
   const today = todayCivil(timeZone, now);
   let start = today;
@@ -149,7 +188,7 @@ export function resolveRange(
   let label = "Today";
   switch (preset) {
     case "this_week": {
-      [start, endExcl] = civilWeekRange(today);
+      [start, endExcl] = civilWeekRange(today, opts.weekStartsOn ?? 1);
       label = "This week";
       break;
     }
@@ -189,6 +228,23 @@ export function resolveRange(
 }
 
 // ---------- Formatting ----------
+
+/** Machine-friendly local timestamp "YYYY-MM-DD HH:mm" (24h) in the timezone — CSV exports. */
+export function localDateTimeString(value: DateInput, timeZone = DEFAULT_TIMEZONE): string | null {
+  const d = toDate(value);
+  if (!d) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(d);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+}
 
 export function formatDate(value: DateInput, timeZone = DEFAULT_TIMEZONE): string {
   const d = toDate(value);

@@ -43,7 +43,7 @@ function StatusOptionList({
   };
   return (
     <div ref={listRef} role="radiogroup" aria-label={label} onKeyDown={onKeyDown} className="flex flex-col gap-1">
-      {candidates.map((c) => {
+      {candidates.map((c, index) => {
         const selected = value === c.id;
         return (
           <button
@@ -51,6 +51,8 @@ function StatusOptionList({
             type="button"
             role="radio"
             aria-checked={selected}
+            // First field of the dialog: the modal hook focuses it on open (ahead of the reason field).
+            data-autofocus={(value ? selected : index === 0) || undefined}
             onClick={() => onChange(c.id)}
             className={cn(
               "flex w-full items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors focus-ring",

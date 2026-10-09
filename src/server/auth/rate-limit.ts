@@ -1,9 +1,16 @@
 /**
- * In-memory sliding-window limiter for login attempts (LOGIN_RATE_LIMIT:
- * 5 failed attempts per 15 minutes per email+IP). Process-local by design
- * (single-node SQLite app); state survives dev HMR via globalThis.
+ * In-memory sliding-window limiters for login attempts. Process-local by
+ * design (single-node SQLite app); state survives dev HMR via globalThis.
+ * A login must pass BOTH:
  *
- * Only failures are recorded; a successful login clears the key.
+ *   - per email+IP (LOGIN_RATE_LIMIT: 5 failures / 15 min) — the tight one
+ *   - per email only (LOGIN_EMAIL_RATE_LIMIT: 20 failures / 15 min) — the
+ *     IP-independent backstop, so rotating (or spoofing) the client address
+ *     never buys unlimited guesses against one account
+ *
+ * Only failures are recorded. A successful login clears the email+IP key;
+ * the per-email window is NOT cleared (it only drains with time), so a
+ * victim's own successful sign-in cannot top an attacker back up.
  */
 import { LOGIN_RATE_LIMIT } from "@/lib/constants";
 
@@ -57,33 +64,59 @@ export class SlidingWindowLimiter {
   }
 }
 
-const globalForLimiter = globalThis as unknown as { __pwmLoginLimiter?: SlidingWindowLimiter };
+/** IP-independent backstop: failures per email, whatever address they come from. */
+export const LOGIN_EMAIL_RATE_LIMIT = { attempts: 20, windowMinutes: 15 } as const;
+
+const globalForLimiter = globalThis as unknown as {
+  __pwmLoginLimiter?: SlidingWindowLimiter;
+  __pwmLoginEmailLimiter?: SlidingWindowLimiter;
+};
 
 export const loginLimiter: SlidingWindowLimiter = (globalForLimiter.__pwmLoginLimiter ??= new SlidingWindowLimiter(
   LOGIN_RATE_LIMIT.attempts,
   LOGIN_RATE_LIMIT.windowMinutes * 60_000,
 ));
 
+export const loginEmailLimiter: SlidingWindowLimiter = (globalForLimiter.__pwmLoginEmailLimiter ??= new SlidingWindowLimiter(
+  LOGIN_EMAIL_RATE_LIMIT.attempts,
+  LOGIN_EMAIL_RATE_LIMIT.windowMinutes * 60_000,
+));
+
+function normaliseEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 export function loginRateLimitKey(email: string, ip: string | null | undefined): string {
-  return `${email.trim().toLowerCase()}|${ip?.trim() || "unknown"}`;
+  return `${normaliseEmail(email)}|${ip?.trim() || "unknown"}`;
 }
 
-/** Is another login attempt allowed for this key? (Does not record.) */
-export function checkLoginRateLimit(key: string, nowMs?: number): RateLimitResult {
-  return loginLimiter.check(key, nowMs);
+/** The more restrictive of two results (denied wins; then the longer wait / fewer remaining). */
+function strictest(a: RateLimitResult, b: RateLimitResult): RateLimitResult {
+  if (a.allowed !== b.allowed) return a.allowed ? b : a;
+  return {
+    allowed: a.allowed,
+    remaining: Math.min(a.remaining, b.remaining),
+    retryAfterSeconds: Math.max(a.retryAfterSeconds, b.retryAfterSeconds),
+  };
 }
 
-/** Record a failed attempt; returns the state after recording. */
-export function recordLoginFailure(key: string, nowMs?: number): RateLimitResult {
-  return loginLimiter.hit(key, nowMs);
+/** Is another login attempt for this email (from this IP) allowed under both limiters? (Does not record.) */
+export function checkLoginAttempt(email: string, ip: string | null | undefined, nowMs?: number): RateLimitResult {
+  return strictest(loginLimiter.check(loginRateLimitKey(email, ip), nowMs), loginEmailLimiter.check(normaliseEmail(email), nowMs));
 }
 
-/** Clear the key after a successful login. */
-export function resetLoginRateLimit(key: string): void {
-  loginLimiter.reset(key);
+/** Record a failed attempt in both limiters; returns the combined state after recording. */
+export function recordLoginAttemptFailure(email: string, ip: string | null | undefined, nowMs?: number): RateLimitResult {
+  return strictest(loginLimiter.hit(loginRateLimitKey(email, ip), nowMs), loginEmailLimiter.hit(normaliseEmail(email), nowMs));
+}
+
+/** After a successful login: clear the email+IP key (the per-email window drains with time only). */
+export function resetLoginAttempts(email: string, ip: string | null | undefined): void {
+  loginLimiter.reset(loginRateLimitKey(email, ip));
 }
 
 /** Tests only. */
 export function clearLoginRateLimits(): void {
   loginLimiter.clear();
+  loginEmailLimiter.clear();
 }

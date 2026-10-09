@@ -473,6 +473,39 @@ export function findNavMatch(pathname: string, groups: NavGroup[] = navigation):
   return best;
 }
 
+/** Topbar heading for the current route: page title plus optional breadcrumb eyebrow. */
+export interface RouteTitle {
+  title: string;
+  eyebrow?: string;
+}
+
+/**
+ * Routes that are not sidebar items but still need a topbar title: personal
+ * pages reached from the bell / search / user menu, and dynamic detail pages.
+ * Checked in order after the role-filtered nav and the user menu.
+ */
+export const extraRouteTitles: ReadonlyArray<{ pattern: RegExp; title: string; eyebrow?: string }> = [
+  { pattern: /^\/notifications(?:\/|$)/, title: "Notifications" },
+  { pattern: /^\/search(?:\/|$)/, title: "Search" },
+  { pattern: /^\/team\/users\/[^/]+(?:\/|$)/, title: "Team member", eyebrow: "Team" },
+];
+
+/**
+ * Resolves the topbar title for `pathname`: the longest matching nav item the
+ * viewer can see (with its group as eyebrow), then the user-menu pages, then
+ * `extraRouteTitles`. Null only for routes nobody has named (the shell then
+ * falls back to the product name).
+ */
+export function resolveRouteTitle(pathname: string, groups: NavGroup[] = navigation): RouteTitle | null {
+  const match = findNavMatch(pathname, groups);
+  if (match) return { title: match.item.label, eyebrow: match.group.label };
+  const personal = userMenuItems.find((item) => isNavItemActive(pathname, item));
+  if (personal) return { title: personal.label };
+  const extra = extraRouteTitles.find((entry) => entry.pattern.test(pathname));
+  if (extra) return { title: extra.title, eyebrow: extra.eyebrow };
+  return null;
+}
+
 /** Flat list of every nav item (for the command palette). */
 export function flattenNavigation(groups: NavGroup[] = navigation): Array<NavItem & { group?: string }> {
   return groups.flatMap((group) => group.items.map((item) => ({ ...item, group: group.label })));

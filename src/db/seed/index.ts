@@ -250,20 +250,20 @@ function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: string): v
     rt.setTime(Date.parse(row.createdAt) + 4 * MINUTE);
     return row.id;
   };
+  // The photographer (work_submitted) and the editor (job_overdue) already get a
+  // built-in notice for these events, so the example rules target the managers,
+  // who would otherwise hear nothing (and the engine never double-notifies, §7).
   create(managerId, {
-    name: "Submitted → notify photographer",
-    description: "Tell the photographer as soon as edits land in review.",
+    name: "Submitted → notify managers",
+    description: "Let the managers know edits have landed in review (the photographer is told automatically).",
     trigger: { type: "status_changed", toCategory: "submitted" },
-    actions: [{ type: "notify", target: "photographer", message: "Edits are ready for your review." }],
+    actions: [{ type: "notify", target: "managers", message: "Edits are ready for review." }],
   });
   create(managerId, {
-    name: "Overdue → notify editor and managers",
-    description: "Escalate jobs that pass their editing deadline.",
+    name: "Overdue → notify managers",
+    description: "Escalate jobs that pass their editing deadline (the editor and photographer are told automatically).",
     trigger: { type: "job_overdue" },
-    actions: [
-      { type: "notify", target: "editor", message: "This job is now overdue." },
-      { type: "notify", target: "managers", message: "A job just went overdue." },
-    ],
+    actions: [{ type: "notify", target: "managers", message: "A job just went overdue." }],
   });
   create(managerId, {
     name: "Repeat revision → back to the original editor",

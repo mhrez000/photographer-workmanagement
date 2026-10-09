@@ -16,8 +16,8 @@ export const inputVariants = cva(
   {
     variants: {
       size: {
-        sm: "h-8 rounded-sm px-2.5 text-sm",
-        md: "h-9 rounded-md px-3 text-base",
+        sm: "h-8 pointer-coarse:h-9 rounded-sm px-2.5 text-sm",
+        md: "h-9 pointer-coarse:h-10 rounded-md px-3 text-base",
         lg: "h-10 rounded-md px-3.5 text-md",
       },
       mono: {
@@ -70,6 +70,7 @@ export function Input({
         trailing && (size === "sm" ? "pr-8" : "pr-9"),
         className,
       )}
+      data-autofocus={props.autoFocus ? "" : undefined}
       {...props}
     />
   );

@@ -34,6 +34,7 @@ import {
   automations,
   jobAssignments,
   jobs,
+  notifications,
   users,
   workflowStatuses,
   type AutomationAction,
@@ -277,14 +278,45 @@ function firstRunEventSince(tx: Tx, runId: string, afterRowid: number): string |
     .get()?.id;
 }
 
+/**
+ * Users who already received a built-in (non-automation) notification about
+ * `jobId` caused by the trigger event — the event itself or any event of the
+ * same status transition (`metadata.transitionId`): e.g. `work_submitted`
+ * hangs off `job.submitted` while a status_changed rule fires on
+ * `job.status_changed` of the same move, and `job_overdue` hangs off the
+ * `job.became_overdue` event an overdue rule fires on. A rule never sends
+ * them a second notice for the same thing (ARCHITECTURE.md §7).
+ */
+export function alreadyNotifiedForTrigger(db: DbLike, organisationId: string, jobId: string | null, event: TriggerEventInfo | null): Set<string> {
+  if (!jobId || !event) return new Set();
+  const transitionId = str(bag(event.metadata).transitionId);
+  const sameTrigger = transitionId
+    ? sql`(${notifications.activityEventId} = ${event.id} OR ${notifications.activityEventId} IN (
+        SELECT e.id FROM activity_events e
+         WHERE e.organisation_id = ${organisationId} AND e.job_id = ${jobId}
+           AND json_extract(e.metadata, '$.transitionId') = ${transitionId}))`
+    : eq(notifications.activityEventId, event.id);
+  return new Set(
+    db
+      .select({ userId: notifications.userId })
+      .from(notifications)
+      .where(and(eq(notifications.organisationId, organisationId), eq(notifications.jobId, jobId), sql`${notifications.type} <> 'automation'`, sameTrigger))
+      .all()
+      .map((r) => r.userId),
+  );
+}
+
 function performNotify(tx: Tx, ctx: AuthContext, action: Extract<AutomationAction, { type: "notify" }>, job: Job | null, env: ActionEnv): ActionOutcome {
   const subject = workloadSubject(env.event);
   if (!job && !subject && !["managers", "owner", "user"].includes(action.target)) {
     throw new ValidationError("This trigger has no job to take recipients from");
   }
   if (action.target === "user" && !action.userId) throw new ValidationError("No user chosen to notify");
-  const recipients = notifyRecipients(tx, ctx.organisationId, action, job, env.event);
-  if (recipients.length === 0) return { detail: `No ${action.target.replace(/_/g, " ")} to notify` };
+  const candidates = notifyRecipients(tx, ctx.organisationId, action, job, env.event);
+  if (candidates.length === 0) return { detail: `No ${action.target.replace(/_/g, " ")} to notify` };
+  const covered = alreadyNotifiedForTrigger(tx, ctx.organisationId, job?.id ?? null, env.event);
+  const recipients = candidates.filter((id) => !covered.has(id));
+  if (recipients.length === 0) return { detail: "Already notified about this by the built-in notice" };
 
   let title: string;
   let body: string | null;

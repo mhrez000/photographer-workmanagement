@@ -54,10 +54,12 @@ describe("saved views", () => {
     expect(() => run(ids.users.editor1, (tx, ctx) => createSavedView(tx, ctx, { name: "Bad", scope: "everything", config }))).toThrow(ValidationError);
   });
 
-  it("only the owner edits a private view; managers may edit shared views; others get 403", () => {
+  it("only the owner edits a private view (others: 404, like GET); managers may edit shared views; others get 403 on shared", () => {
     const mine = run(ids.users.photographer1, (tx, ctx) => createSavedView(tx, ctx, { name: "Mine", scope: "jobs", config }));
-    expect(() => run(ids.users.photographer2, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).toThrow(ForbiddenError);
-    expect(() => run(ids.users.manager, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).toThrow(ForbiddenError);
+    // Someone else's private view is invisible: PATCH/DELETE answer 404 (not 403, which would confirm the id exists).
+    expect(() => run(ids.users.photographer2, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).toThrow(NotFoundError);
+    expect(() => run(ids.users.manager, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).toThrow(NotFoundError);
+    expect(() => run(ids.users.editor1, (tx, ctx) => deleteSavedView(tx, ctx, { viewId: mine.id }))).toThrow(NotFoundError);
     const renamed = run(ids.users.photographer1, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "Mine v2", expectedVersion: 1 }));
     expect(renamed).toMatchObject({ name: "Mine v2", version: 2 });
     expect(() => run(ids.users.photographer1, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, isShared: true }))).toThrow(ForbiddenError);
@@ -67,6 +69,13 @@ describe("saved views", () => {
 
     const shared = run(ids.users.owner, (tx, ctx) => createSavedView(tx, ctx, { name: "Team", scope: "kanban", config, isShared: true }));
     expect(run(ids.users.manager, (tx, ctx) => updateSavedView(tx, ctx, { viewId: shared.id, name: "Team board" })).name).toBe("Team board");
+    // A shared view is visible to everyone, so a non-manager gets a real 403.
+    expect(() => run(ids.users.editor1, (tx, ctx) => updateSavedView(tx, ctx, { viewId: shared.id, name: "Mine now" }))).toThrow(ForbiddenError);
+    expect(() => run(ids.users.editor1, (tx, ctx) => deleteSavedView(tx, ctx, { viewId: shared.id }))).toThrow(ForbiddenError);
+
+    // An archived private view of someone else is still a 404 (not "This view was deleted").
+    run(ids.users.photographer1, (tx, ctx) => deleteSavedView(tx, ctx, { viewId: mine.id }));
+    expect(() => run(ids.users.photographer2, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).toThrow(NotFoundError);
   });
 
   it("one default per user and scope", () => {

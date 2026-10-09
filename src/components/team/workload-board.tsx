@@ -17,6 +17,7 @@ import { useUrlState } from "@/hooks/use-url-state";
 import type { WorkloadRow } from "@/lib/types";
 import { cn, formatPercent, pluralise } from "@/lib/utils";
 import { CapacityBar } from "@/components/jobs/capacity-bar";
+import { ScrollFade } from "@/components/work-table/scroll-fade";
 import { CapacityDialog } from "./capacity-dialog";
 import { ReassignDrawer } from "./reassign-drawer";
 
@@ -159,95 +160,105 @@ export function WorkloadBoard({ rows, timeZone, capacityEdit, defaultCapacityHou
 
       {view === "table" ? (
         <Card flush className="hidden overflow-hidden md:block">
-          <Table>
-            <THead>
-              <tr>
-                <TH sortable sortDirection={sortDir("name")} onSort={onSort("name")}>
-                  Editor
-                </TH>
-                <TH numeric sortable sortDirection={sortDir("active")} onSort={onSort("active")}>
-                  Active
-                </TH>
-                <TH numeric sortable sortDirection={sortDir("dueToday")} onSort={onSort("dueToday")}>
-                  Due today
-                </TH>
-                <TH numeric sortable sortDirection={sortDir("overdue")} onSort={onSort("overdue")}>
-                  Overdue
-                </TH>
-                <TH numeric sortable sortDirection={sortDir("completed")} onSort={onSort("completed")} title="Completed this week">
-                  Completed
-                </TH>
-                <TH numeric sortable sortDirection={sortDir("revisionRate")} onSort={onSort("revisionRate")} title="Approved jobs that needed a revision, last 30 days">
-                  Revision rate
-                </TH>
-                <TH sortable sortDirection={sortDir("capacity")} onSort={onSort("capacity")} className="w-48">
-                  Capacity
-                </TH>
-                <TH sortable sortDirection={sortDir("band")} onSort={onSort("band")}>
-                  Band
-                </TH>
-                {canReassign ? <TH shrink><span className="sr-only">Actions</span></TH> : null}
-              </tr>
-            </THead>
-            <TBody>
-              {sorted.map((r) => (
-                <TR key={r.editor.id} className={cn(needsReassign(r) && "bg-danger-soft/30", !r.editor.isActive && "text-ink-muted")}>
-                  <TD>
-                    <div className="flex items-center gap-2">
-                      <PersonChip user={r.editor} size="sm" href={`/team/users/${r.editor.id}`} />
-                      {!r.editor.isActive ? (
-                        <Badge variant="danger" size="sm">
-                          Deactivated
-                        </Badge>
-                      ) : null}
+          <ScrollFade>
+            <Table>
+              <THead>
+                <tr>
+                  <TH sortable sortDirection={sortDir("name")} onSort={onSort("name")}>
+                    Editor
+                  </TH>
+                  {/* Band and capacity sit next to the name so the verdict never scrolls out of view; counts follow. */}
+                  <TH sortable sortDirection={sortDir("band")} onSort={onSort("band")}>
+                    Band
+                  </TH>
+                  <TH sortable sortDirection={sortDir("capacity")} onSort={onSort("capacity")} className="w-44">
+                    Capacity
+                  </TH>
+                  <TH numeric sortable sortDirection={sortDir("active")} onSort={onSort("active")}>
+                    Active
+                  </TH>
+                  <TH numeric sortable sortDirection={sortDir("dueToday")} onSort={onSort("dueToday")}>
+                    Due today
+                  </TH>
+                  <TH numeric sortable sortDirection={sortDir("overdue")} onSort={onSort("overdue")}>
+                    Overdue
+                  </TH>
+                  <TH numeric sortable sortDirection={sortDir("completed")} onSort={onSort("completed")} title="Completed this week">
+                    Completed
+                  </TH>
+                  <TH numeric sortable sortDirection={sortDir("revisionRate")} onSort={onSort("revisionRate")} title="Approved jobs that needed a revision, last 30 days">
+                    Rev. rate
+                  </TH>
+                  {canReassign ? (
+                    <TH shrink>
+                      <span className="sr-only">Actions</span>
+                    </TH>
+                  ) : null}
+                </tr>
+              </THead>
+              <TBody>
+                {sorted.map((r) => (
+                  <TR key={r.editor.id} className={cn(needsReassign(r) && "bg-danger-soft/30", !r.editor.isActive && "text-ink-muted")}>
+                    <TD className="max-w-[16rem]">
+                      <div className="flex min-w-0 items-center gap-2" title={r.editor.name}>
+                        <PersonChip user={r.editor} size="sm" href={`/team/users/${r.editor.id}`} className="min-w-0" />
+                        {!r.editor.isActive ? (
+                          <Badge variant="danger" size="sm">
+                            Deactivated
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </TD>
+                    <TD className="whitespace-nowrap">
                       {needsReassign(r) && canReassign ? (
                         <Button size="sm" onClick={() => setReassignFrom(r)} leadingIcon={<ArrowRightLeft aria-hidden="true" />}>
                           Reassign {pluralise(r.active, "job")}
                         </Button>
-                      ) : null}
-                    </div>
-                  </TD>
-                  <TD numeric className="whitespace-nowrap">
-                    <span className="font-medium text-ink">{r.active}</span>
-                    {r.paused > 0 ? (
-                      <span className="ml-1 inline-flex items-center gap-0.5 text-2xs text-ink-subtle" title={`${r.paused} paused`}>
-                        <Pause aria-hidden="true" className="size-2.5" />
-                        {r.paused}
-                        <span className="sr-only"> paused</span>
-                      </span>
-                    ) : null}
-                  </TD>
-                  <TD numeric>
-                    <span className={cn(r.dueToday > 0 && "font-medium text-attention-fg")}>{r.dueToday}</span>
-                  </TD>
-                  <TD numeric>
-                    <span className={cn(r.overdue > 0 && "font-semibold text-danger-fg")}>{r.overdue}</span>
-                  </TD>
-                  <TD numeric>{r.completedThisWeek}</TD>
-                  <TD numeric>
-                    <span className={cn(r.revisionRate !== null && r.revisionRate > 0.4 && "font-medium text-attention-fg")}>
-                      {r.revisionRate === null ? "—" : formatPercent(r.revisionRate)}
-                    </span>
-                  </TD>
-                  <TD>{capacityCell(r)}</TD>
-                  <TD>
-                    <WorkloadBand band={r.band} ratio={r.ratio} reason={r.bandReason} />
-                  </TD>
-                  {canReassign ? (
-                    <TD className="w-10 text-right">
-                      {r.active > 0 && !needsReassign(r) ? (
-                        <Tooltip content="Move jobs to another editor">
-                          <IconButton label={`Rebalance ${r.editor.name}'s jobs`} size="sm" onClick={() => setReassignFrom(r)}>
-                            <ArrowRightLeft aria-hidden="true" />
-                          </IconButton>
-                        </Tooltip>
+                      ) : r.editor.isActive ? (
+                        <WorkloadBand band={r.band} ratio={r.ratio} reason={r.bandReason} />
+                      ) : (
+                        <span className="text-ink-subtle">—</span>
+                      )}
+                    </TD>
+                    <TD>{capacityCell(r)}</TD>
+                    <TD numeric className="whitespace-nowrap">
+                      <span className="font-medium text-ink">{r.active}</span>
+                      {r.paused > 0 ? (
+                        <span className="ml-1 inline-flex items-center gap-0.5 text-2xs text-ink-subtle" title={`${r.paused} paused`}>
+                          <Pause aria-hidden="true" className="size-2.5" />
+                          {r.paused}
+                          <span className="sr-only"> paused</span>
+                        </span>
                       ) : null}
                     </TD>
-                  ) : null}
-                </TR>
-              ))}
-            </TBody>
-          </Table>
+                    <TD numeric>
+                      <span className={cn(r.dueToday > 0 && "font-medium text-attention-fg")}>{r.dueToday}</span>
+                    </TD>
+                    <TD numeric>
+                      <span className={cn(r.overdue > 0 && "font-semibold text-danger-fg")}>{r.overdue}</span>
+                    </TD>
+                    <TD numeric>{r.completedThisWeek}</TD>
+                    <TD numeric>
+                      <span className={cn(r.revisionRate !== null && r.revisionRate > 0.4 && "font-medium text-attention-fg")}>
+                        {r.revisionRate === null ? "—" : formatPercent(r.revisionRate)}
+                      </span>
+                    </TD>
+                    {canReassign ? (
+                      <TD className="w-10 text-right">
+                        {r.active > 0 && !needsReassign(r) ? (
+                          <Tooltip content="Move jobs to another editor">
+                            <IconButton label={`Rebalance ${r.editor.name}'s jobs`} size="sm" onClick={() => setReassignFrom(r)}>
+                              <ArrowRightLeft aria-hidden="true" />
+                            </IconButton>
+                          </Tooltip>
+                        ) : null}
+                      </TD>
+                    ) : null}
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </ScrollFade>
         </Card>
       ) : null}
 

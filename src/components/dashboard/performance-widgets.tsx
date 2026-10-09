@@ -148,7 +148,7 @@ export function RevisionRateWidget({ rates }: { rates: DashboardData["rates"] })
       ratio={ratio}
       tone={tone}
       sub="Approved jobs this month that needed revisions"
-      href="/workspace/all?quick=revision_required"
+      href="/insights/reports?kind=editors&range=this_month"
     />
   );
 }

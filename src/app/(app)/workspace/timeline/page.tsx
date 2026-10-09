@@ -16,10 +16,11 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { endOfCivilDayIso, formatDate, startOfCivilDayIso, todayCivil } from "@/lib/dates";
+import { PRIORITIES, type Priority } from "@/lib/constants";
 import type { TimelineRow } from "@/lib/types";
 import { load, pageContext, param, params } from "@/server/page";
 import { loadOrgSettingsRow } from "@/server/queries/scope";
-import { getTimelineRows, orgCategoryAverages, TIMELINE_BOTTLENECK_FACTOR } from "@/server/queries/timeline";
+import { getTimelineRows, orgCategoryBaselines, TIMELINE_BOTTLENECK_FACTOR } from "@/server/queries/timeline";
 
 export const metadata: Metadata = { title: "Timeline" };
 
@@ -56,8 +57,24 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const requested = normaliseGroup(param(sp, "group") ?? (ctx.role === "editor" ? "project" : undefined));
   const group = groupModes.includes(requested) ? requested : groupModes[0];
 
-  const all = load(() => getTimelineRows(db, ctx, { from, to, groupBy: group === "photographer" ? "photographer" : "editor" }));
-  const averages = load(() => orgCategoryAverages(db, ctx));
+  // Filters from the FilterBar (URL state).
+  const q = (param(sp, "q") ?? "").trim();
+  const editorIds = params(sp, "editorId");
+  const photographerIds = params(sp, "photographerId");
+  // Unknown priority values in a hand-edited link are ignored rather than failing the page.
+  const priorities = params(sp, "priority").filter((p): p is Priority => (PRIORITIES as readonly string[]).includes(p));
+  const all = load(() =>
+    getTimelineRows(db, ctx, {
+      from,
+      to,
+      groupBy: group === "photographer" ? "photographer" : "editor",
+      q: q || undefined,
+      currentEditorId: editorIds,
+      photographerId: photographerIds,
+      priority: priorities,
+    }),
+  );
+  const baselines = load(() => orgCategoryBaselines(db, ctx));
 
   // Role scope (page map: "managers; P own; E assigned").
   const me = ctx.userId;
@@ -67,19 +84,8 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
       ? all.filter((r) => r.job.photographer?.id === me)
       : all.filter((r) => r.job.editor?.id === me || r.segments.some((s) => s.editor?.id === me));
 
-  // Filters from the FilterBar (URL state).
-  const q = (param(sp, "q") ?? "").trim().toLowerCase();
-  const editorIds = params(sp, "editorId");
-  const photographerIds = params(sp, "photographerId");
-  const priorities = params(sp, "priority");
-  const matches = (ids: string[], id: string | undefined) => ids.length === 0 || ids.includes(id ?? "none");
-  const rows = scoped.filter(
-    (r) =>
-      matches(editorIds, r.job.editor?.id) &&
-      matches(photographerIds, r.job.photographer?.id) &&
-      (priorities.length === 0 || priorities.includes(r.job.priority)) &&
-      (!q || [r.job.jobNumber, r.job.name, r.job.client?.name ?? "", r.job.project?.name ?? ""].some((s) => s.toLowerCase().includes(q))),
-  );
+  // FilterBar filters (URL state) are applied in SQL by getTimelineRows, before its row cap.
+  const rows = scoped;
   const filtered = Boolean(q) || editorIds.length + photographerIds.length + priorities.length > 0;
 
   const days: string[] = [];
@@ -91,7 +97,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const facets: FilterFacet[] = isManagement ? ["editor", "photographer", "priority"] : ctx.role === "photographer" ? ["editor", "priority"] : ["priority"];
 
   const description = isManagement
-    ? "Every job from assignment to delivery. Stages that take more than twice the usual time are outlined so bottlenecks stand out."
+    ? "Every job from assignment to delivery. Stages that take more than twice the usual time, or run past their deadline, are outlined so bottlenecks stand out."
     : ctx.role === "photographer"
       ? "Your jobs from assignment to delivery, stage by stage."
       : "The jobs you are editing or have edited, stage by stage.";
@@ -99,7 +105,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   return (
     <PageContainer width="full" className="max-w-[2000px]">
       <PageHeader eyebrow="Workspace" title="Timeline" description={description}>
-        <FilterBar quickFilters={[]} facets={facets} searchPlaceholder="Filter by job, client, project…" />
+        <FilterBar quickFilters={[]} facets={facets} timeZone={ctx.settings.timezone} searchPlaceholder="Filter by job, client, project…" />
       </PageHeader>
 
       <TimelineToolbar
@@ -134,7 +140,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
         <ul aria-label="Markers" className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <li className="inline-flex items-center gap-1.5">
             <span aria-hidden="true" className="h-2 w-3.5 rounded-xs bg-ink-subtle ring-2 ring-attention ring-offset-1 ring-offset-canvas" />
-            Over {TIMELINE_BOTTLENECK_FACTOR}× average
+            Over {TIMELINE_BOTTLENECK_FACTOR}× usual time
           </li>
           <li className="inline-flex items-center gap-1.5">
             <span aria-hidden="true" className="h-2 w-3.5 rounded-l-xs bg-gradient-to-r from-ink-subtle from-60% to-transparent" />
@@ -181,7 +187,8 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
           dayStarts={dayStarts}
           nowMs={nowMs}
           today={today}
-          averages={averages}
+          baselines={baselines}
+          slowFactor={TIMELINE_BOTTLENECK_FACTOR}
           timeZone={timeZone}
           weeks={weeks}
         />

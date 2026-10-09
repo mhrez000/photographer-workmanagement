@@ -20,7 +20,7 @@ import {
 import type { ClientRef, JobTypeRef, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { MultiSelect, type MultiSelectOption } from "./multi-select";
-import { JOB_FILTER_KEYS, QUICK_FILTER_LABELS, QUICK_FILTER_TONES } from "./quick-filters";
+import { JOB_FILTER_KEYS, QUICK_FILTER_LABELS, QUICK_FILTER_TONES, scopeChips } from "./quick-filters";
 
 export type FilterFacet = "statusCategory" | "editor" | "photographer" | "client" | "jobType" | "priority";
 
@@ -49,6 +49,13 @@ export interface FilterBarProps {
   trailing?: React.ReactNode;
   /** Bind "f" to focus the search box (default true). */
   hotkey?: boolean;
+  /** Org timezone for the drill-down chip labels (default Australia/Sydney). */
+  timeZone?: string;
+  /**
+   * URL keys the page controls with its own widget (e.g. Kanban's "Show
+   * cancelled" toggle = `includeCancelled`): no chip, and "Clear all" leaves them.
+   */
+  ownKeys?: readonly string[];
   className?: string;
 }
 
@@ -118,6 +125,8 @@ export function FilterBar({
   multiQuick = false,
   trailing,
   hotkey = true,
+  timeZone,
+  ownKeys = [],
   className,
 }: FilterBarProps) {
   const url = useUrlState();
@@ -160,11 +169,15 @@ export function FilterBar({
 
   const quick = url.getAll("quick");
   const facetValues = (facet: FilterFacet) => url.getAll(FACET_KEYS[facet]);
+  // Drill-down params from dashboard / bottleneck links: shown as removable chips.
+  const scopes = scopeChips((k) => (ownKeys.includes(k) ? null : url.get(k)), timeZone);
+  const clearKeys = [...JOB_FILTER_KEYS.filter((k) => !ownKeys.includes(k)), "viewId"];
   const activeCount =
     (urlQ ? 1 : 0) +
     quick.length +
     facets.reduce((n, f) => n + (facetValues(f).length > 0 ? 1 : 0), 0) +
-    (url.get("dueFrom") || url.get("dueTo") ? 1 : 0);
+    (url.get("dueFrom") || url.get("dueTo") ? 1 : 0) +
+    scopes.length;
 
   const toggleQuick = (q: QuickFilter) => {
     const on = quick.includes(q);
@@ -260,7 +273,7 @@ export function FilterBar({
               leadingIcon={<X />}
               onClick={() => {
                 setText("");
-                url.clear([...JOB_FILTER_KEYS, "viewId"]);
+                url.clear(clearKeys);
               }}
             >
               Clear all
@@ -271,6 +284,26 @@ export function FilterBar({
         </div>
         {trailing ? <div className="flex flex-wrap items-center gap-2 sm:ml-auto">{trailing}</div> : null}
       </div>
+
+      {scopes.length > 0 ? (
+        <ul className="flex flex-wrap items-center gap-1.5" aria-label="Drill-down filters">
+          {scopes.map((chip) => (
+            <li key={chip.id}>
+              <span className="inline-flex h-7 max-w-full items-center gap-1 rounded-full border border-accent/40 bg-accent-soft pl-3 pr-1 text-xs font-medium text-accent-ink">
+                <span className="truncate">{chip.label}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove filter: ${chip.label}`}
+                  onClick={() => url.patch({ ...Object.fromEntries(chip.keys.map((k) => [k, null])), viewId: null })}
+                  className="inline-flex size-5 shrink-0 items-center justify-center rounded-full hover:bg-accent/15 focus-ring"
+                >
+                  <X aria-hidden="true" className="size-3" />
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       {quickFilters.length > 0 ? (
         <div className="-mx-4 overflow-x-auto px-4 scrollbar-none sm:mx-0 sm:px-0">

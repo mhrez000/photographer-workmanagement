@@ -8,6 +8,7 @@ import { users } from "@/db/schema";
 import type { AuthContext, Job, JobPermissionRef, UserRef } from "@/lib/types";
 import { can } from "@/server/auth/permissions";
 import { buildContextFromDb } from "@/server/auth/session";
+import { NotFoundError } from "@/server/errors";
 import { jobPermissionRef, loadJobInOrg, loadPastEditorIds, userRef } from "./_shared";
 
 /** A job row plus its full permission ref (pastEditorIds always loaded). */
@@ -17,13 +18,20 @@ export interface LoadedJob {
 }
 
 /**
- * Loads a job in the actor's org (404 otherwise) with `pastEditorIds`
- * populated, so the ref can be evaluated for any role (actor or a mention
- * target / notification recipient).
+ * Loads a job the actor can SEE (`job.view`) in the actor's org with
+ * `pastEditorIds` populated, so the ref can be evaluated for any role (actor
+ * or a mention target / notification recipient).
+ *
+ * A job that is missing, in another org, or merely invisible to the actor all
+ * throw the same 404 — a 403 here would reveal that the id exists. Callers
+ * keep their own action checks (`comment.add`, `link.replace`, …), which
+ * still answer 403 for a VISIBLE job where that specific action is denied.
  */
 export function loadJobWithRef(db: DbLike, ctx: AuthContext, jobId: string): LoadedJob {
   const job = loadJobInOrg(db, ctx, jobId);
-  return { job, ref: jobPermissionRef(job, loadPastEditorIds(db, job.id)) };
+  const ref = jobPermissionRef(job, loadPastEditorIds(db, job.id));
+  if (!can(ctx, "job.view", ref)) throw new NotFoundError("Job");
+  return { job, ref };
 }
 
 /** `{ jobNumber, jobName }` for event metadata (feeds render job labels from it). */

@@ -11,13 +11,17 @@
  *                   turnaround / revision rate / on-time
  *
  * Durations are reported in hours (2 dp), rates as percentages (1 dp).
+ * JSON keeps ISO instants; the CSV writes date columns in the organisation
+ * timezone ("YYYY-MM-DD HH:mm", or the civil date for deadline columns) and
+ * names the file after the range's civil dates.
  */
 import { and, asc, eq, gte, inArray, lt, or } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { clients, jobs } from "@/db/schema";
 import { REPORT_KINDS, type ReportKind } from "@/lib/constants";
-import { csvFileName, csvFromObjects } from "@/lib/csv";
+import { csvFileName, csvFromObjects, type CsvValue } from "@/lib/csv";
+import { civilDate, DEFAULT_TIMEZONE, localDateTimeString } from "@/lib/dates";
 import { isPastDue, onTimeRate, revisionRate, turnaroundSeconds } from "@/lib/metrics";
 import type { AuthContext, Report, ReportCell, ReportColumn, ResolvedRange } from "@/lib/types";
 import { isDeadlineBound } from "@/lib/workflow";
@@ -62,7 +66,7 @@ export function getReport(db: DbLike, ctx: AuthContext, kind: unknown, rawRange?
   assertCan(ctx, "reports.view");
   const parsed = KindSchema.safeParse(kind);
   if (!parsed.success) throw new NotFoundError("Report");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   return buildReport(db, ctx, parsed.data, range);
 }
 
@@ -115,6 +119,9 @@ function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Ta
     } satisfies Record<string, ReportCell>;
   });
   const factsList = [...facts.values()];
+  // Totals are over jobs APPROVED in range (same population as Business / Analytics / Editors),
+  // averaged from unrounded seconds — not over every touched row's rounded hours.
+  const approvedInRange = factsList.filter((j) => j.approvedAt !== null && j.approvedAt >= range.from && j.approvedAt < range.to);
   return {
     columns: [
       col("jobNumber", "Job"),
@@ -127,7 +134,7 @@ function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Ta
       col("status", "Status"),
       col("priority", "Priority"),
       col("createdAt", "Created", "date"),
-      col("dueDate", "Due", "date"),
+      { ...col("dueDate", "Due", "date"), civil: true },
       col("approvedAt", "Approved", "date"),
       col("completedAt", "Completed", "date"),
       col("revisionCount", "Revisions", "number"),
@@ -139,8 +146,8 @@ function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Ta
       jobNumber: "Total",
       name: `${out.length} jobs`,
       revisionCount: out.reduce((s, r) => s + r.revisionCount, 0),
-      turnaroundHours: hours(mean(out.map((r) => (r.turnaroundHours === null ? null : r.turnaroundHours * 3600)))),
-      onTime: pct(onTimeRate(factsList.filter((j) => j.approvedAt !== null && j.approvedAt >= range.from && j.approvedAt < range.to)).rate),
+      turnaroundHours: hours(mean(approvedInRange.map((j) => turnaroundSeconds(j, transitions.get(j.id) ?? [])))),
+      onTime: pct(onTimeRate(approvedInRange).rate),
     },
   };
 }
@@ -158,7 +165,8 @@ function editorsTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table
       col("revisionRate", "Revision rate %", "percent"),
       col("revisionsPerJob", "Revisions / job", "number"),
       col("onTimePercent", "On time %", "percent"),
-      col("active", "Active now", "number"),
+      // WorkloadRow.active: editor-held + in-review jobs (WORKLOAD), not every open job.
+      col("active", "Held now", "number"),
       col("overdue", "Overdue now", "number"),
     ],
     rows: rows.map((r) => ({
@@ -288,13 +296,35 @@ function businessTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Tabl
 /*  CSV                                                                */
 /* ------------------------------------------------------------------ */
 
-/** The report as CSV (header row from column labels; totals appended as the last row). Formula-safe. */
-export function toCsv(report: Report): string {
+/**
+ * The report as CSV (header row from column labels; totals appended as the
+ * last row). Formula-safe. Date columns are written in `timeZone` (the
+ * organisation's): "YYYY-MM-DD HH:mm", or the civil date for deadline
+ * columns (`civil: true`).
+ */
+export function toCsv(report: Report, timeZone: string = DEFAULT_TIMEZONE): string {
   const rows = report.totals ? [...report.rows, report.totals] : report.rows;
-  return csvFromObjects(report.columns, rows);
+  const dateCols = report.columns.filter((c) => c.kind === "date");
+  const local = rows.map((r) => {
+    if (dateCols.length === 0) return r;
+    const out: Record<string, CsvValue> = { ...r };
+    for (const c of dateCols) {
+      const v = r[c.key];
+      if (typeof v !== "string" || !Number.isFinite(Date.parse(v))) continue;
+      out[c.key] = (c.civil ? civilDate(v, timeZone) : localDateTimeString(v, timeZone)) ?? v;
+    }
+    return out;
+  });
+  return csvFromObjects(report.columns, local);
 }
 
-/** e.g. "editors-report-2026-09-09-2026-10-09.csv" (civil dates of the range bounds, UTC). */
-export function reportFileName(report: Report): string {
-  return csvFileName(`${report.kind}-report-${report.range.from.slice(0, 10)}-${report.range.to.slice(0, 10)}`);
+/**
+ * e.g. "editors-report-2026-10-01-2026-10-31.csv": the FIRST and LAST civil
+ * day of the range in `timeZone` (the range end is exclusive, so the last day
+ * is civil(to − 1 ms)).
+ */
+export function reportFileName(report: Report, timeZone: string = DEFAULT_TIMEZONE): string {
+  const first = civilDate(report.range.from, timeZone) ?? report.range.from.slice(0, 10);
+  const last = civilDate(new Date(Date.parse(report.range.to) - 1), timeZone) ?? report.range.to.slice(0, 10);
+  return csvFileName(`${report.kind}-report-${first}-${last}`);
 }

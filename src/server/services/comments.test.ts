@@ -96,7 +96,8 @@ describe("addComment threading", () => {
   });
 
   it("denies editors who are not the current editor (past/unassigned are read-only)", () => {
-    expect(() => run(ids.users.editor2, (tx, ctx) => addComment(tx, ctx, { jobId, body: "hi" }))).toThrow(ForbiddenError);
+    // editor2 cannot even see the job → 404 (no existence oracle), not 403
+    expect(() => run(ids.users.editor2, (tx, ctx) => addComment(tx, ctx, { jobId, body: "hi" }))).toThrow(NotFoundError);
   });
 });
 
@@ -218,7 +219,7 @@ describe("deleteComment", () => {
 describe("listComments", () => {
   it("requires job.view", () => {
     run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId, body: "hello" }));
-    expect(() => listComments(db, contextFor(db, ids.users.editor2), jobId)).toThrow(ForbiddenError);
+    expect(() => listComments(db, contextFor(db, ids.users.editor2), jobId)).toThrow(NotFoundError); // invisible job → 404
     expect(listComments(db, contextFor(db, ids.users.photographer1), jobId)[0].canEdit).toBe(false);
     expect(listComments(db, contextFor(db, ids.users.manager), jobId)[0].canEdit).toBe(true);
   });

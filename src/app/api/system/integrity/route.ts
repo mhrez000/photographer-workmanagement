@@ -4,6 +4,7 @@ import { verifyDerived } from "@/db/verify";
 import { assertCan } from "@/server/auth/permissions";
 import { requireContext } from "@/server/auth/session";
 import { handle } from "@/server/http";
+import { methodNotAllowed } from "@/app/api/_lib/route";
 
 /**
  * GET /api/system/integrity — owner-only `db:verify` report for the caller's
@@ -16,3 +17,9 @@ export const GET = handle(async () => {
   const db = getDb() as Db & { $client?: Database.Database };
   return verifyDerived(db.$client ?? sqlite, ctx.organisationId);
 });
+
+/** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
+export const POST = methodNotAllowed(["GET"]);
+export const PUT = methodNotAllowed(["GET"]);
+export const PATCH = methodNotAllowed(["GET"]);
+export const DELETE = methodNotAllowed(["GET"]);

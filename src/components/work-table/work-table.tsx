@@ -24,6 +24,7 @@ import { BulkActions } from "./bulk-actions";
 import { JobIdentity, WorkCell } from "./cells";
 import { COLUMN_META, nextSort, parseSort, sortParam, type SortState, type WorkGroupBy } from "./columns";
 import { JobCard } from "./job-card";
+import { ScrollFade } from "./scroll-fade";
 import { useTableColumns } from "./use-table-columns";
 
 export interface WorkTableGroup {
@@ -310,180 +311,187 @@ export function WorkTable(props: WorkTableProps) {
         )}
         aria-busy={url.isPending || undefined}
       >
-        <Table aria-label={label} maxHeight={maxHeight} density="compact" aria-rowcount={total ?? undefined}>
-          <THead>
-            <TR className="hover:bg-transparent">
-              {columns.map((column) => {
-                const meta = COLUMN_META[column];
-                const isJob = column === "job";
-                const direction = sort?.column === column ? sort.dir : null;
-                if (isJob && selectable) {
-                  // Checkbox + sort button side by side (a checkbox may not sit inside the sort <button>).
-                  const SortIcon = direction === "asc" ? ArrowUp : direction === "desc" ? ArrowDown : ChevronsUpDown;
+        <ScrollFade>
+          <Table aria-label={label} maxHeight={maxHeight} density="compact" aria-rowcount={total ?? undefined}>
+            <THead>
+              <TR className="hover:bg-transparent">
+                {columns.map((column) => {
+                  const meta = COLUMN_META[column];
+                  const isJob = column === "job";
+                  const direction = sort?.column === column ? sort.dir : null;
+                  if (isJob && selectable) {
+                    // Checkbox + sort button side by side (a checkbox may not sit inside the sort <button>).
+                    const SortIcon = direction === "asc" ? ArrowUp : direction === "desc" ? ArrowDown : ChevronsUpDown;
+                    return (
+                      <TH
+                        key={column}
+                        className={cn(meta.width, "sticky left-0 z-20 bg-surface-sunken p-0 shadow-[inset_-1px_0_0_var(--border)]")}
+                        aria-sort={sortable ? (direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none") : undefined}
+                      >
+                        <span className="flex items-center gap-1 pl-4">
+                          <Checkbox
+                            size="sm"
+                            checked={allSelected}
+                            indeterminate={someSelected}
+                            onChange={toggleAll}
+                            aria-label={allSelected ? "Deselect all loaded jobs" : `Select all ${shownCount} loaded jobs`}
+                          />
+                          {sortable ? (
+                            <button
+                              type="button"
+                              onClick={() => onSort(column)}
+                              className={cn(
+                                "group/sort inline-flex items-center gap-1 rounded-xs px-2 py-2 uppercase tracking-wider hover:text-ink focus-ring-inset",
+                                direction && "text-ink",
+                              )}
+                            >
+                              <span>{meta.label}</span>
+                              <SortIcon
+                                aria-hidden="true"
+                                className={cn("size-3.5 shrink-0", direction ? "text-accent-ink" : "text-ink-subtle opacity-50 group-hover/sort:opacity-100")}
+                              />
+                            </button>
+                          ) : (
+                            <span className="px-2">{meta.label}</span>
+                          )}
+                        </span>
+                      </TH>
+                    );
+                  }
                   return (
                     <TH
                       key={column}
-                      className={cn(meta.width, "sticky left-0 z-20 bg-surface-sunken p-0 shadow-[inset_-1px_0_0_var(--border)]")}
-                      aria-sort={sortable ? (direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none") : undefined}
+                      numeric={meta.numeric}
+                      sortable={sortable && meta.sortable}
+                      sortDirection={direction}
+                      onSort={() => onSort(column)}
+                      className={cn(meta.width, isJob && "sticky left-0 z-20 bg-surface-sunken shadow-[inset_-1px_0_0_var(--border)]")}
+                      title={meta.label}
                     >
-                      <span className="flex items-center gap-1 pl-4">
-                        <Checkbox
-                          size="sm"
-                          checked={allSelected}
-                          indeterminate={someSelected}
-                          onChange={toggleAll}
-                          aria-label={allSelected ? "Deselect all loaded jobs" : `Select all ${shownCount} loaded jobs`}
-                        />
-                        {sortable ? (
-                          <button
-                            type="button"
-                            onClick={() => onSort(column)}
-                            className={cn(
-                              "group/sort inline-flex items-center gap-1 rounded-xs px-2 py-2 uppercase tracking-wider hover:text-ink focus-ring-inset",
-                              direction && "text-ink",
-                            )}
-                          >
-                            <span>{meta.label}</span>
-                            <SortIcon
-                              aria-hidden="true"
-                              className={cn("size-3.5 shrink-0", direction ? "text-accent-ink" : "text-ink-subtle opacity-50 group-hover/sort:opacity-100")}
-                            />
-                          </button>
-                        ) : (
-                          <span className="px-2">{meta.label}</span>
-                        )}
-                      </span>
+                      {meta.label}
                     </TH>
                   );
-                }
-                return (
-                  <TH
-                    key={column}
-                    numeric={meta.numeric}
-                    sortable={sortable && meta.sortable}
-                    sortDirection={direction}
-                    onSort={() => onSort(column)}
-                    className={cn(meta.width, isJob && "sticky left-0 z-20 bg-surface-sunken shadow-[inset_-1px_0_0_var(--border)]")}
-                    title={meta.label}
-                  >
-                    {meta.label}
-                  </TH>
-                );
-              })}
-            </TR>
-          </THead>
-          {sections.map((section) => {
-            const isCollapsed = collapsed.has(section.key);
-            const sectionSelected = selectable && section.rows.length > 0 && section.rows.every((r) => selectedIds.has(r.id));
-            return (
-              <TBody key={section.key}>
-                {grouped ? (
-                  <tr className="border-b border-border bg-surface-sunken/70">
-                    <th scope="rowgroup" colSpan={colCount} className="p-0 text-left font-normal">
-                      <div className="sticky left-0 flex w-max max-w-[100vw] items-center gap-2 py-1.5 pl-2 pr-4">
-                        {selectable ? (
-                          <span className="pl-1.5">
-                            <Checkbox
-                              size="sm"
-                              checked={sectionSelected}
-                              indeterminate={!sectionSelected && section.rows.some((r) => selectedIds.has(r.id))}
-                              onChange={() => toggleSection(section.rows)}
-                              aria-label={`Select loaded jobs in ${section.label}`}
-                            />
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => toggleGroup(section.key)}
-                          aria-expanded={!isCollapsed}
-                          className="inline-flex items-center gap-2 rounded-sm px-1.5 py-1 text-sm text-ink hover:bg-surface-muted focus-ring"
-                        >
-                          {isCollapsed ? <ChevronRight aria-hidden="true" className="size-4 text-ink-muted" /> : <ChevronDown aria-hidden="true" className="size-4 text-ink-muted" />}
-                          <GroupLabel groupBy={groupBy} section={section} />
-                          <Badge size="sm" variant="neutral" className="numeric">
-                            {section.count}
-                          </Badge>
-                          {section.rows.length < section.count ? (
-                            <span className="text-xs text-ink-subtle numeric">{section.rows.length} loaded</span>
+                })}
+              </TR>
+            </THead>
+            {sections.map((section) => {
+              const isCollapsed = collapsed.has(section.key);
+              const sectionSelected = selectable && section.rows.length > 0 && section.rows.every((r) => selectedIds.has(r.id));
+              return (
+                <TBody key={section.key}>
+                  {grouped ? (
+                    <tr className="border-b border-border bg-surface-sunken/70">
+                      <th scope="rowgroup" colSpan={colCount} className="p-0 text-left font-normal">
+                        <div className="sticky left-0 flex w-max max-w-[100vw] items-center gap-2 py-1.5 pl-2 pr-4">
+                          {selectable ? (
+                            <span className="pl-1.5">
+                              <Checkbox
+                                size="sm"
+                                checked={sectionSelected}
+                                indeterminate={!sectionSelected && section.rows.some((r) => selectedIds.has(r.id))}
+                                onChange={() => toggleSection(section.rows)}
+                                aria-label={`Select loaded jobs in ${section.label}`}
+                              />
+                            </span>
                           ) : null}
-                        </button>
-                      </div>
-                    </th>
-                  </tr>
-                ) : null}
-                {isCollapsed
-                  ? null
-                  : section.rows.map((row) => {
-                      const isSelected = selectedIds.has(row.id);
-                      return (
-                        <TR
-                          key={row.id}
-                          data-row-id={row.id}
-                          interactive
-                          selected={isSelected}
-                          tabIndex={firstTabRow === row.id ? 0 : -1}
-                          aria-selected={selectable ? isSelected : undefined}
-                          onClick={(e) => onRowClick(e, row)}
-                          onKeyDown={(e) => onRowKeyDown(e, row)}
-                          onFocus={(e) => {
-                            if (e.target === e.currentTarget) setFocusedId(row.id);
-                          }}
-                          className={cn(
-                            "group/row outline-none focus-visible:bg-accent-soft/40 focus-visible:shadow-[inset_2px_0_0_var(--accent)]",
-                            row.isOverdue && "shadow-[inset_2px_0_0_var(--danger)]",
-                          )}
-                        >
-                          {columns.map((column) => {
-                            const meta = COLUMN_META[column];
-                            if (column === "job") {
-                              return (
-                                <TD
-                                  key={column}
-                                  className={cn(
-                                    "sticky left-0 z-[1] max-w-[24rem] bg-surface shadow-[inset_-1px_0_0_var(--border)]",
-                                    "group-hover/row:bg-[color-mix(in_oklab,var(--surface-muted)_60%,var(--surface))]",
-                                    "group-data-[state=selected]/row:bg-[color-mix(in_oklab,var(--accent-soft)_50%,var(--surface))]",
-                                  )}
-                                >
-                                  <span className="flex min-w-0 items-center gap-3">
-                                    {selectable ? (
-                                      <Checkbox
-                                        size="sm"
-                                        checked={isSelected}
-                                        onChange={() => toggleRow(row.id)}
-                                        aria-label={`Select ${row.jobNumber} ${row.name}`}
+                          <button
+                            type="button"
+                            onClick={() => toggleGroup(section.key)}
+                            aria-expanded={!isCollapsed}
+                            className="inline-flex items-center gap-2 rounded-sm px-1.5 py-1 text-sm text-ink hover:bg-surface-muted focus-ring"
+                          >
+                            {isCollapsed ? <ChevronRight aria-hidden="true" className="size-4 text-ink-muted" /> : <ChevronDown aria-hidden="true" className="size-4 text-ink-muted" />}
+                            <GroupLabel groupBy={groupBy} section={section} />
+                            <Badge size="sm" variant="neutral" className="numeric">
+                              {section.count}
+                            </Badge>
+                            {section.rows.length < section.count ? (
+                              <span className="text-xs text-ink-subtle numeric">{section.rows.length} loaded</span>
+                            ) : null}
+                          </button>
+                        </div>
+                      </th>
+                    </tr>
+                  ) : null}
+                  {isCollapsed
+                    ? null
+                    : section.rows.map((row) => {
+                        const isSelected = selectedIds.has(row.id);
+                        return (
+                          <TR
+                            key={row.id}
+                            data-row-id={row.id}
+                            interactive
+                            selected={isSelected}
+                            tabIndex={firstTabRow === row.id ? 0 : -1}
+                            aria-selected={selectable ? isSelected : undefined}
+                            onClick={(e) => onRowClick(e, row)}
+                            onKeyDown={(e) => onRowKeyDown(e, row)}
+                            onFocus={(e) => {
+                              if (e.target === e.currentTarget) setFocusedId(row.id);
+                            }}
+                            className={cn(
+                              "group/row outline-none focus-visible:bg-accent-soft/40 focus-visible:shadow-[inset_2px_0_0_var(--accent)]",
+                              row.isOverdue && "shadow-[inset_2px_0_0_var(--danger)]",
+                            )}
+                          >
+                            {columns.map((column) => {
+                              const meta = COLUMN_META[column];
+                              if (column === "job") {
+                                return (
+                                  <TD
+                                    key={column}
+                                    className={cn(
+                                      // Capped so the identity column never pushes Status / Priority off a 1440 screen (name truncates, full text in its title).
+                                      "sticky left-0 z-[1] max-w-[18rem] bg-surface shadow-[inset_-1px_0_0_var(--border)]",
+                                      "group-hover/row:bg-[color-mix(in_oklab,var(--surface-muted)_60%,var(--surface))]",
+                                      "group-data-[state=selected]/row:bg-[color-mix(in_oklab,var(--accent-soft)_50%,var(--surface))]",
+                                      // The opaque sticky cell hides the row's own tint / edge bar, so repeat them here.
+                                      row.isOverdue && "shadow-[inset_2px_0_0_var(--danger),inset_-1px_0_0_var(--border)]",
+                                      "group-focus-visible/row:bg-[color-mix(in_oklab,var(--accent-soft)_40%,var(--surface))]",
+                                      "group-focus-visible/row:shadow-[inset_2px_0_0_var(--accent),inset_0_1px_0_var(--accent),inset_0_-1px_0_var(--accent),inset_-1px_0_0_var(--border)]",
+                                    )}
+                                  >
+                                    <span className="flex min-w-0 items-center gap-3">
+                                      {selectable ? (
+                                        <Checkbox
+                                          size="sm"
+                                          checked={isSelected}
+                                          onChange={() => toggleRow(row.id)}
+                                          aria-label={`Select ${row.jobNumber} ${row.name}`}
+                                          tabIndex={-1}
+                                        />
+                                      ) : null}
+                                      <a
+                                        href={jobHref(row.id)}
                                         tabIndex={-1}
-                                      />
-                                    ) : null}
-                                    <a
-                                      href={jobHref(row.id)}
-                                      tabIndex={-1}
-                                      onClick={(e) => {
-                                        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                                        e.preventDefault();
-                                        openJob(row);
-                                      }}
-                                      className="min-w-0 flex-1 rounded-xs focus-ring"
-                                    >
-                                      <JobIdentity row={row} timeZone={timeZone} />
-                                    </a>
-                                  </span>
+                                        onClick={(e) => {
+                                          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                                          e.preventDefault();
+                                          openJob(row);
+                                        }}
+                                        className="min-w-0 flex-1 rounded-xs focus-ring"
+                                      >
+                                        <JobIdentity row={row} timeZone={timeZone} />
+                                      </a>
+                                    </span>
+                                  </TD>
+                                );
+                              }
+                              return (
+                                <TD key={column} numeric={meta.numeric} className={cn(meta.width, "max-w-[12rem]")}>
+                                  <WorkCell column={column} row={row} timeZone={timeZone} />
                                 </TD>
                               );
-                            }
-                            return (
-                              <TD key={column} numeric={meta.numeric} className={cn(meta.width, "max-w-[16rem]")}>
-                                <WorkCell column={column} row={row} timeZone={timeZone} />
-                              </TD>
-                            );
-                          })}
-                        </TR>
-                      );
-                    })}
-              </TBody>
-            );
-          })}
-        </Table>
+                            })}
+                          </TR>
+                        );
+                      })}
+                </TBody>
+              );
+            })}
+          </Table>
+        </ScrollFade>
       </div>
 
       {/* Mobile cards */}

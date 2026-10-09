@@ -13,8 +13,9 @@ export interface BottleneckBannersProps {
   className?: string;
 }
 
+/** Labelled from `count` — the number the alert states and the linked list reproduces. */
 function linkLabel(alert: BottleneckAlert): string {
-  const n = alert.jobs.length || alert.count;
+  const n = alert.count;
   if (alert.kind === "editor_overloaded" && alert.user) return `View ${alert.user.name.split(" ")[0]}'s ${pluralise(n, "job")}`;
   return `View ${pluralise(n, "job")}`;
 }

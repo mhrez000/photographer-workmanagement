@@ -48,16 +48,16 @@ describe("addNote permissions per kind", () => {
     expect(() => run(ids.users.photographer1, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "x" }))).toThrow(
       ForbiddenError,
     );
-    // photographer2 does not own the job.
+    // photographer2 does not own (or see) the job → 404, no existence oracle.
     expect(() => run(ids.users.photographer2, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "x" }))).toThrow(
-      ForbiddenError,
+      NotFoundError,
     );
   });
 
   it("editor: assigned job, editor/revision kinds only", () => {
     run(ids.users.editor1, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "Used preset B" }));
     expect(() => run(ids.users.editor1, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "x" }))).toThrow(ForbiddenError);
-    expect(() => run(ids.users.editor2, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "x" }))).toThrow(ForbiddenError);
+    expect(() => run(ids.users.editor2, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "x" }))).toThrow(NotFoundError); // invisible job
   });
 
   it("writes note.added; internal notes produce management-only events", () => {

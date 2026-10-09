@@ -84,3 +84,75 @@ describe("ranges and formatting", () => {
     expect(formatRelative("2026-10-10T14:30:00Z", NOW)).toBe("in 2d");
   });
 });
+
+describe("day bounds across DST changes (Sydney)", () => {
+  const days = ["2026-10-03", "2026-10-04", "2027-04-03", "2027-04-04"];
+  it.each(days)("start and end of %s fall on that civil day", (d) => {
+    expect(civilDate(startOfCivilDayIso(d, TZ), TZ)).toBe(d);
+    expect(civilDate(endOfCivilDayIso(d, TZ), TZ)).toBe(d);
+    // end of day + 1 ms is the start of the next day
+    expect(new Date(Date.parse(endOfCivilDayIso(d, TZ)) + 1).toISOString()).toBe(startOfCivilDayIso(addCivilDays(d, 1), TZ));
+  });
+  it("uses the offset in force at local midnight", () => {
+    // Sat 3 Oct 2026 is AEST (+10) all day; DST starts at 02:00 on Sun 4 Oct.
+    expect(endOfCivilDayIso("2026-10-03", TZ)).toBe("2026-10-03T13:59:59.999Z");
+    expect(startOfCivilDayIso("2026-10-04", TZ)).toBe("2026-10-03T14:00:00.000Z");
+    // Sun 4 Apr 2027 starts in AEDT (+11); DST ends at 03:00.
+    expect(startOfCivilDayIso("2027-04-04", TZ)).toBe("2027-04-03T13:00:00.000Z");
+    expect(endOfCivilDayIso("2027-04-03", TZ)).toBe("2027-04-03T12:59:59.999Z");
+  });
+});
+
+describe("day bounds when local midnight does not exist", () => {
+  it("starts the day at the DST transition (America/Santiago, America/Havana)", () => {
+    // Santiago jumps 00:00 → 01:00 on Sun 6 Sep 2026 (−04 → −03).
+    expect(startOfCivilDayIso("2026-09-06", "America/Santiago")).toBe("2026-09-06T04:00:00.000Z");
+    expect(endOfCivilDayIso("2026-09-05", "America/Santiago")).toBe("2026-09-06T03:59:59.999Z");
+    // Havana jumps 00:00 → 01:00 on Sun 8 Mar 2026 (−05 → −04).
+    expect(startOfCivilDayIso("2026-03-08", "America/Havana")).toBe("2026-03-08T05:00:00.000Z");
+    expect(endOfCivilDayIso("2026-03-07", "America/Havana")).toBe("2026-03-08T04:59:59.999Z");
+  });
+
+  const ZONES = [
+    "Australia/Sydney",
+    "Australia/Lord_Howe",
+    "Pacific/Auckland",
+    "Pacific/Chatham",
+    "America/Santiago",
+    "America/Havana",
+    "America/Asuncion",
+    "America/New_York",
+    "Europe/London",
+    "Asia/Tehran",
+    "UTC",
+  ];
+  it.each(ZONES)("every day of 2026–2027 in %s starts on that day and ends where the next begins", (zone) => {
+    let day = "2026-01-01";
+    for (let i = 0; i < 730; i += 1) {
+      const start = startOfCivilDayIso(day, zone);
+      const end = endOfCivilDayIso(day, zone);
+      expect(civilDate(start, zone), `${zone} start ${day}`).toBe(day);
+      expect(civilDate(new Date(Date.parse(start) - 1), zone), `${zone} start-1ms ${day}`).toBe(addCivilDays(day, -1));
+      expect(civilDate(end, zone), `${zone} end ${day}`).toBe(day);
+      expect(new Date(Date.parse(end) + 1).toISOString(), `${zone} end+1ms ${day}`).toBe(startOfCivilDayIso(addCivilDays(day, 1), zone));
+      day = addCivilDays(day, 1);
+    }
+  });
+});
+
+describe("week start", () => {
+  it("civilWeekRange honours weekStartsOn", () => {
+    expect(civilWeekRange("2026-10-08")).toEqual(["2026-10-05", "2026-10-12"]); // Thu → Mon
+    expect(civilWeekRange("2026-10-08", 0)).toEqual(["2026-10-04", "2026-10-11"]); // Thu → Sun
+    expect(civilWeekRange("2026-10-04", 0)).toEqual(["2026-10-04", "2026-10-11"]); // Sun stays
+    expect(civilWeekRange("2026-10-04", 1)).toEqual(["2026-09-28", "2026-10-05"]);
+    expect(civilWeekRange("2026-10-08", 6)).toEqual(["2026-10-03", "2026-10-10"]); // Sat
+  });
+  it("this_week starts on Sunday with weekStartsOn = 0", () => {
+    const week = resolveRange("this_week", TZ, undefined, NOW, { weekStartsOn: 0 }); // now = Fri 9 Oct (Sydney)
+    expect(civilDate(week.from, TZ)).toBe("2026-10-04");
+    expect(new Date(Date.parse(week.from)).getUTCDay()).toBe(6); // Sun 00:00 AEDT = Sat 13:00Z
+    expect(week.from).toBe(startOfCivilDayIso("2026-10-04", TZ));
+    expect(week.to).toBe(startOfCivilDayIso("2026-10-11", TZ));
+  });
+});

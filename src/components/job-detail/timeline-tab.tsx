@@ -3,16 +3,10 @@ import { GitCommitVertical, TriangleAlert, UserRoundCog } from "lucide-react";
 import { PersonChip, StatusPill, statusColour } from "@/components/jobs";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import type { StatusCategory } from "@/lib/constants";
 import { formatDateShort, formatDateTime, formatTime } from "@/lib/dates";
 import type { StageView, TimelineRow } from "@/lib/types";
 import { cn, initials } from "@/lib/utils";
-import { formatSeconds, STAGE_LABELS, STAGES, stageOf, type Stage } from "./format";
-
-function laneOf(category: StatusCategory): Stage | null {
-  if (category === "new") return "assignment";
-  return stageOf(category);
-}
+import { formatSeconds, STAGE_LABELS, STAGES, stageOf, stageTotalsFromStages } from "./format";
 
 export interface TimelineTabProps {
   stages: StageView[];
@@ -29,7 +23,7 @@ export interface TimelineTabProps {
  * editor holding it, and markers where work was re-attributed to another editor.
  */
 export function TimelineTab({ stages, timeline, timeZone, now }: TimelineTabProps) {
-  const bars = stages.map((s) => ({ stage: s, lane: laneOf(s.toCategory) }));
+  const bars = stages.map((s) => ({ stage: s, lane: stageOf(s.toCategory) }));
   const start = stages.length > 0 ? Date.parse(stages[0].enteredAt) : NaN;
   const endIso = stages.reduce((max, s) => {
     const e = s.exitedAt ?? now;
@@ -49,8 +43,7 @@ export function TimelineTab({ stages, timeline, timeZone, now }: TimelineTabProp
   const bottleneck = new Set((timeline?.segments ?? []).filter((s) => s.isBottleneck).map((s) => s.stageId));
   const pos = (iso: string) => ((Date.parse(iso) - start) / span) * 100;
   const reattributions = stages.filter((s) => s.kind === "reattribution");
-  const totals = new Map<Stage, number>();
-  for (const b of bars) if (b.lane) totals.set(b.lane, (totals.get(b.lane) ?? 0) + b.stage.durationSeconds);
+  const totals = stageTotalsFromStages(stages);
   const cancelled = stages.find((s) => s.toCategory === "cancelled" && s.isCurrent);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => new Date(start + f * span).toISOString());
 
@@ -89,7 +82,7 @@ export function TimelineTab({ stages, timeline, timeZone, now }: TimelineTabProp
                     <li key={lane} className="flex items-center gap-2">
                       <div className="w-[96px] shrink-0">
                         <p className="truncate text-xs font-medium text-ink-secondary">{STAGE_LABELS[lane]}</p>
-                        <p className="text-2xs text-ink-subtle numeric">{totals.get(lane) ? formatSeconds(totals.get(lane)) : "—"}</p>
+                        <p className="text-2xs text-ink-subtle numeric">{totals[lane] > 0 ? formatSeconds(totals[lane]) : "—"}</p>
                       </div>
                       <div className="relative h-8 flex-1 rounded-sm bg-surface-sunken ring-1 ring-inset ring-border/60">
                         {inLane.map(({ stage }) => {

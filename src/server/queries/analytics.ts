@@ -144,7 +144,7 @@ export function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: Tre
 /** `GET /api/analytics/overview?range=…` → AnalyticsOverview (analytics.view). */
 export function getAnalyticsOverview(db: DbLike, ctx: AuthContext, rawRange?: unknown): AnalyticsOverview {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   return computeAnalyticsOverview(db, ctx, range);
 }
 
@@ -276,7 +276,7 @@ export function getEditorAnalytics(db: DbLike, ctx: AuthContext, userId: string,
   const target = loadUserInOrg(db, ctx, userId);
   if (target.id === ctx.userId) assertCan(ctx, "analytics.view_self");
   else assertCan(ctx, "performance.view");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   const user = refOf(target);
   return {
     range,
@@ -290,7 +290,7 @@ export function getEditorAnalytics(db: DbLike, ctx: AuthContext, userId: string,
 /** `GET /api/analytics/me` — My Performance for any role (analytics.view_self). */
 export function getMyAnalytics(db: DbLike, ctx: AuthContext, rawRange?: unknown): MyAnalytics {
   assertCan(ctx, "analytics.view_self");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   const me = ctx.userId ? loadUserInOrg(db, ctx, ctx.userId) : null;
   if (!me) return { range, role: ctx.role, editor: null, photographer: null, trend: [], stageAverages: [] };
   const user = refOf(me);
@@ -316,13 +316,13 @@ export function getMyAnalytics(db: DbLike, ctx: AuthContext, rawRange?: unknown)
 /** `GET /api/analytics/editors?range` — editor table (analytics.view). */
 export function getAnalyticsEditors(db: DbLike, ctx: AuthContext, rawRange?: unknown): { range: ResolvedRange; editors: PerformanceRow[] } {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   return { range, editors: computeEditorPerformance(db, ctx, range) };
 }
 
 /** `GET /api/analytics/photographers?range` — photographer table (analytics.view). */
 export function getAnalyticsPhotographers(db: DbLike, ctx: AuthContext, rawRange?: unknown): { range: ResolvedRange; photographers: PhotographerPerformanceRow[] } {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange);
+  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
   return { range, photographers: computePhotographerPerformance(db, ctx, range) };
 }

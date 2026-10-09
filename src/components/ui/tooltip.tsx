@@ -4,6 +4,12 @@ import { cn } from "@/lib/utils";
 export interface TooltipProps {
   content: React.ReactNode;
   side?: "top" | "bottom" | "left" | "right";
+  /**
+   * Horizontal alignment for `top` / `bottom` tooltips. Use `end` for triggers
+   * at the right edge of the layout (the tooltip then grows leftwards and never
+   * widens the page), `start` for the left edge. Default `center`.
+   */
+  align?: "start" | "center" | "end";
   /** The trigger. A single focusable element works best. */
   children: React.ReactElement<Record<string, unknown>>;
   /** Hide the tooltip entirely (keeps the children as-is). */
@@ -14,17 +20,23 @@ export interface TooltipProps {
 }
 
 const placements: Record<NonNullable<TooltipProps["side"]>, string> = {
-  top: "bottom-full left-1/2 mb-2 -translate-x-1/2 origin-bottom",
-  bottom: "top-full left-1/2 mt-2 -translate-x-1/2 origin-top",
+  top: "bottom-full mb-2 origin-bottom",
+  bottom: "top-full mt-2 origin-top",
   left: "right-full top-1/2 mr-2 -translate-y-1/2 origin-right",
   right: "left-full top-1/2 ml-2 -translate-y-1/2 origin-left",
+};
+
+const alignments: Record<NonNullable<TooltipProps["align"]>, string> = {
+  start: "left-0",
+  center: "left-1/2 -translate-x-1/2",
+  end: "right-0",
 };
 
 /**
  * Pure CSS/ARIA tooltip: shows on hover and keyboard focus, no JS.
  * The child receives `aria-describedby`.
  */
-export function Tooltip({ content, side = "top", children, disabled, className, wrapperClassName }: TooltipProps) {
+export function Tooltip({ content, side = "top", align = "center", children, disabled, className, wrapperClassName }: TooltipProps) {
   const id = React.useId();
   if (disabled || !content) return children;
 
@@ -42,6 +54,7 @@ export function Tooltip({ content, side = "top", children, disabled, className, 
           "group-hover/tooltip:opacity-100 group-hover/tooltip:scale-100 group-hover/tooltip:delay-300",
           "group-has-[:focus-visible]/tooltip:opacity-100 group-has-[:focus-visible]/tooltip:scale-100",
           placements[side],
+          side === "top" || side === "bottom" ? alignments[align] : null,
           className,
         )}
       >

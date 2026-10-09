@@ -223,6 +223,17 @@ function PaletteBody({
     navItems.length === 0 &&
     actionItems.length === 0;
 
+  // cmdk highlights the first item only when the INPUT changes; results arrive later
+  // (debounced fetch). When an exact job number comes back, highlight it so Enter opens
+  // its History (the ↵ hint promises that). Controlled value, re-pointed per exact match.
+  const exactValue = exact ? `exact-history-${exact.id}` : null;
+  const [highlighted, setHighlighted] = React.useState("");
+  const [highlightedFor, setHighlightedFor] = React.useState<string | null>(null);
+  if (exactValue !== highlightedFor) {
+    setHighlightedFor(exactValue);
+    if (exactValue) setHighlighted(exactValue);
+  }
+
   const itemClass =
     "group/item flex cursor-pointer select-none items-center gap-3 rounded-md px-3 py-2 text-sm text-ink outline-none data-[selected=true]:bg-surface-muted data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50";
   const groupClass =
@@ -233,12 +244,14 @@ function PaletteBody({
       label="Command palette"
       shouldFilter={false}
       loop
+      value={highlighted}
+      onValueChange={setHighlighted}
       className="flex max-h-[min(36rem,calc(100dvh-8rem))] flex-col overflow-hidden rounded-xl border border-border bg-surface-raised text-ink shadow-pop"
     >
       <div className="flex items-center gap-3 border-b border-border px-4">
         {loading ? <Spinner size="sm" className="text-ink-subtle" /> : <Search aria-hidden="true" className="size-4 shrink-0 text-ink-subtle" />}
         <Command.Input
-          autoFocus
+          data-autofocus
           value={query}
           onValueChange={setQuery}
           placeholder="Search jobs, clients, people… or type a command"
@@ -250,7 +263,7 @@ function PaletteBody({
       <Command.List className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2 scrollbar-thin">
         {exact ? (
           <Command.Group heading="Jump to job" className={groupClass}>
-            <Command.Item value={`exact-history-${exact.id}`} onSelect={() => openJob(exact, "history")} className={itemClass}>
+            <Command.Item value={exactValue ?? undefined} onSelect={() => openJob(exact, "history")} className={itemClass}>
               <IconTile icon={History} tone="accent" />
               <span className="min-w-0 flex-1 truncate">
                 Open <span className="font-mono numeric font-medium">{exact.jobNumber}</span> history

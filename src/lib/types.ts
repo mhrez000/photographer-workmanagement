@@ -461,6 +461,8 @@ export interface KpiSummary {
   paused: number;
   reviewOverdue: number;
   asOf: string;
+  /** [from, to) instants of the week `completedThisWeek` counts (organisation week start), for drill-down links. */
+  completedWeek?: { from: string; to: string };
 }
 
 export interface WorkloadRow {
@@ -516,6 +518,12 @@ export interface BottleneckAlert {
   /** Where the banner links to. */
   href: string;
   detectedAt: string;
+  /**
+   * Affected jobs left out of `jobs` because the viewer may not open them
+   * (non-management viewers; `count` stays organisation-wide). 0 / absent =
+   * every affected job is listed.
+   */
+  hiddenJobCount?: number;
 }
 
 export interface PerformanceRow {
@@ -691,7 +699,7 @@ export interface NotificationView {
 
 export interface SearchResults {
   query: string;
-  jobs: (JobRef & { status: StatusRef; client: ClientRef; matchedIn: "number" | "name" | "note" | "comment" | "description" })[];
+  jobs: (JobRef & { status: StatusRef; client: ClientRef; matchedIn: "number" | "name" | "note" | "comment" | "description" | "status" })[];
   clients: ClientRef[];
   projects: (ProjectRef & { client: ClientRef })[];
   users: UserRef[];
@@ -879,6 +887,8 @@ export interface ReportColumn {
   label: string;
   /** hours = number of hours (2 dp); percent = 0..100 (1 dp); date = ISO instant. */
   kind: "text" | "number" | "hours" | "percent" | "date";
+  /** date columns only: a calendar deadline — CSV writes the org-local civil date instead of date + time. */
+  civil?: boolean;
 }
 
 export interface Report {

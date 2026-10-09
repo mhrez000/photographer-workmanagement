@@ -6,7 +6,7 @@ import { Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buttonVariants, type ButtonProps } from "./button";
 import { Spinner } from "./spinner";
-import { moveFocus, useAutoFlip, useControllableOpen, useDismissable } from "./use-dismissable";
+import { moveFocus, useAutoFlip, useControllableOpen, useDismissable, useViewportClamp } from "./use-dismissable";
 
 interface MenuContextValue {
   open: boolean;
@@ -123,6 +123,7 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
 function MenuPanel({ align = "start", side = "bottom", width, className, children, onKeyDown, ...props }: DropdownMenuContentProps) {
   const { setOpen, triggerRef, contentRef, menuId } = useMenuContext("DropdownMenuContent");
   useAutoFlip(contentRef, side);
+  useViewportClamp(contentRef, align);
 
   React.useEffect(() => {
     const frame = requestAnimationFrame(() => moveFocus(contentRef.current, ITEM_SELECTOR, "first"));

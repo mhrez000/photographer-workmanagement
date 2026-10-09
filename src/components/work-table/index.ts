@@ -11,6 +11,7 @@ export { useTableColumns, type TableColumnsState } from "./use-table-columns";
 export { WorkCell, JobIdentity, DaysRemaining, CompletionBar, PrimaryLinkButton, deadlineSettled } from "./cells";
 export { JobCard, type JobCardProps } from "./job-card";
 export { QuickTabs, type QuickTab } from "./quick-tabs";
+export { ScrollFade, type ScrollFadeProps } from "./scroll-fade";
 export {
   COLUMN_META,
   DEFAULT_ALL_WORK_COLUMNS,

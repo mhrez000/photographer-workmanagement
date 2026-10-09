@@ -24,10 +24,10 @@ export const buttonVariants = cva(
         link: "h-auto rounded-none p-0 text-accent-ink underline-offset-4 hover:underline",
       },
       size: {
-        sm: "h-8 rounded-sm px-2.5 text-sm [&_svg]:size-3.5",
-        md: "h-9 rounded-md px-3.5 text-base [&_svg]:size-4",
+        sm: "h-8 pointer-coarse:h-9 rounded-sm px-2.5 text-sm [&_svg]:size-3.5",
+        md: "h-9 pointer-coarse:h-10 rounded-md px-3.5 text-base [&_svg]:size-4",
         lg: "h-10 rounded-md px-4 text-md [&_svg]:size-4",
-        icon: "size-9 rounded-md p-0 [&_svg]:size-4",
+        icon: "size-9 pointer-coarse:size-10 rounded-md p-0 [&_svg]:size-4",
       },
     },
     compoundVariants: [
@@ -125,6 +125,7 @@ export function Button(props: ButtonProps) {
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={classes}
+      data-autofocus={buttonRest.autoFocus ? "" : undefined}
       {...buttonRest}
     >
       {content}

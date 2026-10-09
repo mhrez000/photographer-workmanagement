@@ -543,6 +543,7 @@ export const jobs = sqliteTable(
     index("jobs_org_client_idx").on(t.organisationId, t.clientId),
     index("jobs_org_activity_idx").on(t.organisationId, t.lastActivityAt),
     index("jobs_org_created_by_idx").on(t.organisationId, t.createdByUserId),
+    index("jobs_org_created_idx").on(t.organisationId, t.createdAt),
   ],
 );
 

@@ -162,7 +162,10 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
     expect(runsOf(submitted.id).map((r) => r.status)).toEqual(["succeeded"]);
     expect(runsOf(byKey.id).map((r) => r.status)).toEqual(["succeeded"]);
     expect(runsOf(approved.id)).toEqual([]);
-    expect(automationNotices().map((n) => n.userId).sort()).toEqual([ids.users.manager, ids.users.owner, ids.users.photographer1].sort());
+    // The creator (photographer1) already got the built-in work_submitted for this
+    // move, so the creator rule does not notify them a second time (§7 dedupe).
+    expect(automationNotices().map((n) => n.userId).sort()).toEqual([ids.users.manager, ids.users.owner].sort());
+    expect(runsOf(byKey.id)[0]?.actionsPerformed?.[0]).toMatchObject({ ok: true, detail: "Already notified about this by the built-in notice" });
     expectClean();
   });
 
@@ -176,8 +179,11 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
     withTxThenAutomations(ctxOf("manager"), (tx) => assignEditor(tx, ctxOf("manager"), { jobId: job.id, userId: ids.users.editor2 }), { db });
     expect(runsOf(assigned.id)).toHaveLength(1);
     expect(runsOf(reassigned.id).map((r) => r.status)).toEqual(["succeeded"]);
-    const notices = automationNotices();
-    expect(notices.map((n) => n.userId)).toEqual([ids.users.editor1, ids.users.editor1]);
+    // editor1 already got job_assigned / job_reassigned for those very events (§7 dedupe):
+    // the rules succeed without a second notice.
+    expect(automationNotices()).toEqual([]);
+    expect(runsOf(assigned.id)[0]?.actionsPerformed?.[0]).toMatchObject({ ok: true, detail: "Already notified about this by the built-in notice" });
+    expect(runsOf(reassigned.id)[0]?.actionsPerformed?.[0]).toMatchObject({ ok: true, detail: "Already notified about this by the built-in notice" });
     expectClean();
   });
 

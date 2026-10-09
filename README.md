@@ -41,7 +41,7 @@ npm run db:reset            # create data/app.db, install integrity triggers, se
 npm run dev                 # http://localhost:3000
 ```
 
-`.env` keys: `SESSION_SECRET` (required, ≥ 32 chars), `DATABASE_PATH` (default `./data/app.db`) and `APP_URL`.
+`.env` keys: `SESSION_SECRET` (required, ≥ 32 chars), `DATABASE_PATH` (default `./data/app.db`), `APP_URL`, and optional `CRON_SECRET` (≥ 32 chars). With `CRON_SECRET` set, a scheduler can call `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>` every few minutes so overdue alerts fire even when nobody has the app open.
 
 ### Demo accounts
 
@@ -102,8 +102,23 @@ Conventions that matter when adding a page:
 
 ```bash
 npm run typecheck && npm run lint && npm run test
-npm run db:verify          # ledger ↔ derived-column integrity on the dev DB
-npm run e2e                # browser tests
+npm run db:verify          # ledger ↔ derived-column integrity on the dev DB (must report 0 drift)
+npm run e2e                # Playwright, desktop + mobile projects
 ```
 
-The Vitest suite covers the permission policy, the workflow engine and side effects, services (audit in the same transaction), queries, metrics, automations and the seed invariants. It uses an in-memory DB built from `drizzle/` via `makeTestDb()`.
+The Vitest suite covers the permission policy, the workflow engine and side effects, services (audit in the same transaction), queries, metrics, automations, date maths (DST), the REST surface (every route answers every method with JSON) and the seed invariants. It uses an in-memory DB built from `drizzle/` via `makeTestDb()`.
+
+### End-to-end (Playwright)
+
+Two ways to run it:
+
+| Mode | Command | What happens |
+|---|---|---|
+| Own server (default) | `npm run e2e` | Playwright resets `data/e2e.db` (`npm run e2e:prepare`: reset → guard → seed), starts `next dev` on **:3100** against it, runs both projects. If something already listens on :3100 it is reused **without** a reset — stop it, or run `npm run e2e:prepare` first. |
+| Existing server | `E2E_BASE_URL=http://localhost:3000 npx playwright test` | No server is started and no database is reset: specs create every job, client and user they need through the API, so they also run against a shared, already-seeded dev server. |
+
+- Projects: `desktop` (1440×900, every spec except `mobile.spec.ts`) and `mobile` (390×844 touch, `mobile.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/kanban.spec.ts`.
+- One worker, no retries by default (`E2E_RETRIES=n` to allow some). Pages wait for hydration and the dev-server HMR socket is muted so other people's edits cannot reload a page mid-test (`E2E_KEEP_HMR=1` to keep it).
+- Output: `test-results/` and `playwright-report/` (`npx playwright show-report`); override with `E2E_OUTPUT_DIR` / `E2E_REPORT_DIR` when several runs share a checkout.
+- Layout: `e2e/api.ts` (server URL, seeded accounts, REST client and data factories), `e2e/fixtures.ts` (role fixtures — `test.use({ role: "editor" })`, `api`, `apiAs`, `pageAs`, `loginAs`, `pageWithState` — plus UI/layout helpers), one spec per area of spec §40 (`auth`, `permissions`, `job-create`, `assignment`, `status-flow`, `kanban`, `revisions`, `comments`, `links`, `notifications`, `activity-audit`, `filters-search`, `calendar-timeline`, `dashboard`, `edge-cases`, `mobile`) and `regression-*.spec.ts` for audit regressions.
+- Seeded accounts are only ever signed in through their own cookie jars; tests that log out, deactivate or anonymise users invite their own.

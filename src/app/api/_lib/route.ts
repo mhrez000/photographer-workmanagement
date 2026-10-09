@@ -14,7 +14,7 @@
 import { getDb, type DbLike, type Tx } from "@/db/index";
 import type { AuthContext } from "@/lib/types";
 import { requireContext } from "@/server/auth/session";
-import { bodyOrNull, handle, searchParamsToObject } from "@/server/http";
+import { bodyOrNull, errorJson, handle, searchParamsToObject } from "@/server/http";
 import { withTxThenAutomations } from "@/server/services/_shared";
 
 /** Next 16 route context: dynamic params arrive as a Promise. */
@@ -110,4 +110,36 @@ export function flag(q: Query, key: string): boolean {
 export function one(q: Query, key: string): string | undefined {
   const v = q[key];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/** Methods a route file can export (HEAD/OPTIONS are derived by Next). */
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+/**
+ * JSON 404 for an `/api/*` path no route handles (the `[...path]` catch-all).
+ * Runs through `handle`, so request ids and the CSRF check still apply.
+ */
+export function notFoundRoute() {
+  return handle(async (req) => {
+    const { pathname } = new URL(req.url);
+    return errorJson(404, { code: "not_found", message: `No API route for ${req.method.toUpperCase()} ${pathname.slice(0, 200)}` });
+  });
+}
+
+/**
+ * JSON 405 for a method a route file does not implement (Next's own 405 has
+ * an empty body). Export it under each missing method:
+ *
+ *   export const GET = methodNotAllowed(["POST"]);
+ *
+ * Body `{ error: { code: "method_not_allowed", message } }` + an `Allow` header.
+ */
+export function methodNotAllowed(allowed: readonly HttpMethod[]) {
+  const allow = allowed.join(", ");
+  return handle(async (req) =>
+    Response.json(
+      { error: { code: "method_not_allowed", message: `${req.method.toUpperCase()} is not supported here. Allowed: ${allow}` } },
+      { status: 405, headers: { allow } },
+    ),
+  );
 }

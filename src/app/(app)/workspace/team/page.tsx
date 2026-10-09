@@ -107,6 +107,7 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
       <div className="flex flex-col gap-3">
         <FilterBar
           quickFilters={TEAM_QUICK_FILTERS}
+          timeZone={ctx.settings.timezone}
           facets={["client", "priority", "jobType"]}
           options={{ jobTypes }}
           searchPlaceholder="Search jobs, clients, PJ-numbers…"

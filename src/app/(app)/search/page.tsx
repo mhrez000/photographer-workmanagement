@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Kbd } from "@/components/ui/kbd";
+import { ModKbd } from "@/components/ui/mod-kbd";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusPill } from "@/components/jobs/status-pill";
 import { Highlight } from "@/components/production/highlight";
@@ -42,6 +42,7 @@ const MATCH_LABEL: Record<JobHit["matchedIn"], string> = {
   description: "Description",
   note: "Note",
   comment: "Comment",
+  status: "Status",
 };
 
 function Group({ id, title, icon: Icon, count, children }: { id: string; title: string; icon: LucideIcon; count: number; children: React.ReactNode }) {
@@ -117,7 +118,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
   const results = q ? load(() => globalSearch(db, ctx, q, { limit: SEARCH_PAGE_LIMIT })) : null;
 
   const exact = results?.exactJob ? results.jobs.find((j) => j.id === results.exactJob?.id) ?? null : null;
-  const jobs = results?.jobs.filter((j) => j.id !== exact?.id && (j.matchedIn === "number" || j.matchedIn === "name" || j.matchedIn === "description")) ?? [];
+  const jobs = results?.jobs.filter((j) => j.id !== exact?.id && (j.matchedIn === "number" || j.matchedIn === "name" || j.matchedIn === "description" || j.matchedIn === "status")) ?? [];
   const noteJobs = results?.jobs.filter((j) => j.id !== exact?.id && j.matchedIn === "note") ?? [];
   const commentJobs = results?.jobs.filter((j) => j.id !== exact?.id && j.matchedIn === "comment") ?? [];
   const total = results ? results.jobs.length + results.clients.length + results.projects.length + results.users.length : 0;
@@ -140,7 +141,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
       >
         <UrlSearchInput placeholder="Job number, address, client, person…" label="Search" autoFocus={!q} size="lg" />
         <p className="hidden text-xs text-ink-subtle sm:block">
-          Tip: press <Kbd keys={["⌘", "K"]} /> anywhere to search without leaving the page.
+          Tip: press <ModKbd keys={["K"]} /> anywhere to search without leaving the page.
         </p>
       </PageHeader>
 
@@ -184,7 +185,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
           {jobs.length > 0 ? (
             <Group id="jobs" title="Jobs" icon={Briefcase} count={jobs.length}>
               {jobs.map((j) => (
-                <JobRowLink key={j.id} job={j} q={q} showMatch={j.matchedIn === "description"} />
+                <JobRowLink key={j.id} job={j} q={q} showMatch={j.matchedIn === "description" || j.matchedIn === "status"} />
               ))}
             </Group>
           ) : null}

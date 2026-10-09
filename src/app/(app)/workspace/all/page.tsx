@@ -74,6 +74,7 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
         <SavedViewsBar scope="all_work" canShare={canShare} initialViews={savedViews ?? undefined} defaultColumns={DEFAULT_ALL_WORK_COLUMNS} />
         <FilterBar
           quickFilters={ALL_WORK_QUICK_FILTERS}
+          timeZone={timeZone}
           options={{ jobTypes }}
           searchPlaceholder="Search jobs, clients, addresses, PJ-numbers…"
           trailing={

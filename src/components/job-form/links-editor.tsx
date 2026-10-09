@@ -8,6 +8,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { LINK_KIND_META, LINK_KINDS, LINK_PROVIDER_LABELS, type LinkKind } from "@/lib/constants";
+import { cn } from "@/lib/utils";
 import { deriveLinkProvider, isAllowedLinkUrl } from "@/lib/validation/links";
 
 export interface DraftLink {
@@ -79,52 +80,65 @@ export function LinksEditor({ links, onChange, kinds = LINK_KINDS, errors, showE
             const error = errors?.[link.key] ?? localError;
             const errorId = `${link.key}-error`;
             return (
-              <li key={link.key} className="flex flex-col gap-2 rounded-md border border-border bg-surface-sunken/50 p-3 sm:flex-row sm:items-start sm:gap-2 sm:border-0 sm:bg-transparent sm:p-0">
-                <div className="sm:w-44 sm:shrink-0">
-                  <Select
-                    aria-label={`Link ${index + 1} kind`}
-                    value={link.kind}
-                    onChange={(e) => update(link.key, { kind: e.target.value as LinkKind })}
-                    options={kindOptions}
-                    disabled={disabled}
-                  />
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                  <Input
-                    type="url"
-                    inputMode="url"
-                    aria-label={`Link ${index + 1} URL`}
-                    aria-describedby={error ? errorId : undefined}
-                    invalid={Boolean(error)}
-                    value={link.url}
-                    placeholder="https://drive.google.com/…"
-                    onChange={(e) => update(link.key, { url: e.target.value })}
-                    onBlur={() => setTouched((t) => ({ ...t, [link.key]: true }))}
-                    leading={<LinkProviderIcon provider={provider ?? "other"} url={url || null} />}
-                    trailing={provider && provider !== "other" ? <span className="text-xs text-ink-muted">{LINK_PROVIDER_LABELS[provider]}</span> : undefined}
-                    className={provider && provider !== "other" ? "pr-28" : undefined}
-                    disabled={disabled}
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                  {error ? (
-                    <p id={errorId} role="alert" className="text-sm text-danger">
-                      {error}
-                    </p>
-                  ) : null}
-                </div>
-                <div className="flex items-start gap-2 sm:w-56 sm:shrink-0">
-                  <Input
-                    aria-label={`Link ${index + 1} label (optional)`}
-                    value={link.label}
-                    placeholder="Label (optional)"
-                    onChange={(e) => update(link.key, { label: e.target.value })}
-                    maxLength={200}
-                    disabled={disabled}
-                  />
-                  <IconButton label={`Remove link ${index + 1}`} variant="ghost" onClick={() => remove(link.key)} disabled={disabled}>
-                    <X />
-                  </IconButton>
+              // Container query on the row so the URL always gets the widest track: narrow rows stack
+              // kind / URL / label (URL full width); wide rows (≥ 56rem) are kind | URL | label | remove.
+              // Visual order always matches DOM (tab) order.
+              <li key={link.key} className="@container rounded-md border border-border bg-surface-sunken/50 p-3">
+                <div
+                  className={cn(
+                    "grid items-start gap-2",
+                    "grid-cols-[minmax(0,1fr)_auto] [grid-template-areas:'kind_remove'_'url_url'_'label_label']",
+                    "@4xl:grid-cols-[11rem_minmax(0,1fr)_13rem_auto] @4xl:[grid-template-areas:'kind_url_label_remove']",
+                  )}
+                >
+                  <div className="min-w-0 max-w-64 [grid-area:kind] @4xl:max-w-none">
+                    <Select
+                      aria-label={`Link ${index + 1} kind`}
+                      value={link.kind}
+                      onChange={(e) => update(link.key, { kind: e.target.value as LinkKind })}
+                      options={kindOptions}
+                      disabled={disabled}
+                    />
+                  </div>
+                  <div className="flex min-w-0 flex-col gap-1.5 [grid-area:url]">
+                    <Input
+                      type="url"
+                      inputMode="url"
+                      aria-label={`Link ${index + 1} URL`}
+                      aria-describedby={error ? errorId : undefined}
+                      invalid={Boolean(error)}
+                      value={link.url}
+                      placeholder="https://drive.google.com/…"
+                      onChange={(e) => update(link.key, { url: e.target.value })}
+                      onBlur={() => setTouched((t) => ({ ...t, [link.key]: true }))}
+                      leading={<LinkProviderIcon provider={provider ?? "other"} url={url || null} />}
+                      trailing={provider && provider !== "other" ? <span className="text-xs text-ink-muted">{LINK_PROVIDER_LABELS[provider]}</span> : undefined}
+                      className={provider && provider !== "other" ? "pr-28" : undefined}
+                      disabled={disabled}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    {error ? (
+                      <p id={errorId} role="alert" className="text-sm text-danger">
+                        {error}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="min-w-0 [grid-area:label]">
+                    <Input
+                      aria-label={`Link ${index + 1} label (optional)`}
+                      value={link.label}
+                      placeholder="Label (optional)"
+                      onChange={(e) => update(link.key, { label: e.target.value })}
+                      maxLength={200}
+                      disabled={disabled}
+                    />
+                  </div>
+                  <div className="[grid-area:remove]">
+                    <IconButton label={`Remove link ${index + 1}`} variant="ghost" onClick={() => remove(link.key)} disabled={disabled}>
+                      <X />
+                    </IconButton>
+                  </div>
                 </div>
               </li>
             );

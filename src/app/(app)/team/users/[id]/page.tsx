@@ -27,7 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
-import { ROLE_LABELS } from "@/lib/constants";
+import { CATEGORY_GROUPS, ROLE_LABELS } from "@/lib/constants";
 import { formatDuration } from "@/lib/dates";
 import { formatPercent, pluralise } from "@/lib/utils";
 import { loadOrgSettings } from "@/server/queries/metrics";
@@ -61,6 +61,13 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
   const rangeKey = RANGE_OPTIONS.some((o) => o.value === rangeParam) ? (rangeParam as string) : DEFAULT_RANGE;
   const work = w ? load(() => getUserCompletedWork(db, ctx, ref.id, { range: rangeKey })) : null;
   const maxActive = w ? loadOrgSettings(db, ctx).maxActiveJobsPerEditor : 0;
+  // Editors: the list is the jobs behind "Active" (held = WORKLOAD categories, same as WorkloadRow.active);
+  // approved / delivered jobs are no longer on their plate. Photographers: every open job they shot.
+  const heldCategories: readonly string[] = CATEGORY_GROUPS.WORKLOAD;
+  const currentJobs = w ? (isPhotographer ? w.currentJobs : w.currentJobs.filter((j) => heldCategories.includes(j.statusCategory))) : [];
+  const allWorkHref = isPhotographer
+    ? `/workspace/all?photographerId=${ref.id}&statusCategory=${CATEGORY_GROUPS.ACTIVE.join(",")}`
+    : `/workspace/all?editorId=${ref.id}&statusCategory=${CATEGORY_GROUPS.WORKLOAD.join(",")}`;
 
   const header = (
     <PageHeader
@@ -204,10 +211,14 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
 
       <SectionCard
         title="Current jobs"
-        description={w.currentJobs.length ? `${pluralise(w.currentJobs.length, "open job")}, soonest due first.` : undefined}
+        description={
+          currentJobs.length
+            ? `${pluralise(currentJobs.length, isPhotographer ? "open job" : "active job")}${isPhotographer ? "" : " (editor-held + in review)"}, soonest due first.`
+            : undefined
+        }
         actions={
-          w.currentJobs.length ? (
-            <Button variant="ghost" size="sm" href={`/workspace/all?${holderKey}=${ref.id}`}>
+          currentJobs.length ? (
+            <Button variant="ghost" size="sm" href={allWorkHref}>
               Open in All Work
             </Button>
           ) : null
@@ -215,7 +226,7 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
         flush
       >
         <JobMiniList
-          jobs={w.currentJobs}
+          jobs={currentJobs}
           timeZone={tz}
           person={otherSide}
           empty={

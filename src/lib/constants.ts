@@ -220,6 +220,8 @@ export const EVENT_ACTIONS = [
   "started", "paused", "resumed", "stopped", "superseded", "removed", "archived", "restored",
   "deactivated", "reactivated", "anonymised", "flagged", "mentioned", "soft_deleted", "ran",
   "logged_in", "login_failed", "logged_out", "migrated",
+  // job milestones (§5: the action matches the milestone name)
+  "accepted", "declined", "submitted", "approved", "delivered", "completed", "cancelled", "reopened",
 ] as const;
 export type EventAction = (typeof EVENT_ACTIONS)[number];
 
@@ -243,7 +245,7 @@ export const EVENT_TYPES = [
   // notes
   "note.added", "note.edited", "note.archived", "note.restored",
   // links
-  "link.added", "link.replaced", "link.removed",
+  "link.added", "link.replaced", "link.removed", "link.updated",
   // time tracking
   "work_session.started", "work_session.ended",
   // users / auth / teams
@@ -277,6 +279,9 @@ export const HISTORY_EVENT_TYPES: readonly EventType[] = [
   "job.created", "job.status_changed", "assignment.created", "assignment.ended", "revision.requested",
   "revision.resolved", "job.approved", "job.completed", "job.cancelled", "job.reopened", "job.restored",
   "job.due_date_changed", "job.became_overdue", "job.workflow_migrated", "job.stage_reattributed",
+  // milestones the History tab links to their stage (start vs resume, decline vs unassign)
+  "job.accepted", "job.declined", "job.work_started", "job.submitted", "job.review_started",
+  "job.paused", "job.resumed",
 ];
 
 /* ------------------------------------------------------------------ */

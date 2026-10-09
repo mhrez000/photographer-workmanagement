@@ -5,6 +5,7 @@ import { SectionCard } from "@/components/common/section-card";
 import { CapacityBar } from "@/components/jobs/capacity-bar";
 import { WorkloadBand } from "@/components/jobs/workload-band";
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import type { WorkloadBand as WorkloadBandKey } from "@/lib/constants";
@@ -38,6 +39,38 @@ function RowCapacity({ row, className }: { row: WorkloadRow; className?: string 
   return <CapacityBar ratio={row.ratio} band={row.band} capacityHours={row.editor.capacityHoursPerWeek} loadHours={row.score} className={cn("min-w-16", className)} />;
 }
 
+/** Same window as computeWorkloads (last 30 days) and /team/workloads — not "this month". */
+const REVISION_RATE_TITLE = "Approved jobs that needed at least one revision, last 30 days";
+
+function revRate(row: WorkloadRow): string {
+  return row.revisionRate === null ? "—" : formatPercent(row.revisionRate);
+}
+
+/** In progress · done this week, as one compact line under the name (narrow table). */
+function SecondaryStats({ row, className }: { row: WorkloadRow; className?: string }) {
+  return (
+    <span className={cn("numeric truncate text-2xs font-normal text-ink-muted", className)}>
+      {row.inProgress} in progress · {row.completedThisWeek} done this wk
+    </span>
+  );
+}
+
+/** A deactivated editor has no live load band (computeWorkloads forces "overloaded" with reason "inactive"). */
+function DeactivatedBadge({ compact = false }: { compact?: boolean }) {
+  return (
+    <Badge variant="neutral" size="sm" title="Deactivated — reassign any jobs they still hold">
+      {compact ? (
+        <>
+          <span aria-hidden="true">Off</span>
+          <span className="sr-only">Deactivated</span>
+        </>
+      ) : (
+        "Deactivated"
+      )}
+    </Badge>
+  );
+}
+
 const MOBILE_STATS = [
   { key: "active", label: "Assigned", tone: undefined },
   { key: "inProgress", label: "In prog.", tone: undefined },
@@ -53,7 +86,11 @@ export interface WorkloadOverviewProps {
 
 /**
  * Editor workload overview (spec §3): compact table when the card is wide
- * enough (container query), cards below; secondary columns drop out first. Every row opens the person page (`/team/users/[id]`).
+ * enough (container query), cards below. In progress, done this week and the
+ * 30-day revision rate are always visible: revision rate is always a column;
+ * in progress and done are columns from @4xl and a second line under the name
+ * in the narrower table; the cards show all three.
+ * Every row opens the person page (`/team/users/[id]`).
  */
 export function WorkloadOverview({ rows, showAllLink = true }: WorkloadOverviewProps) {
   const sorted = sortWorkloads(rows);
@@ -103,38 +140,45 @@ export function WorkloadOverview({ rows, showAllLink = true }: WorkloadOverviewP
                   <TH numeric title="Active jobs held by or waiting on this editor">
                     Assigned
                   </TH>
-                  <TH numeric className="hidden @3xl:table-cell">In progress</TH>
+                  <TH numeric className="hidden @4xl:table-cell">In progress</TH>
                   <TH numeric>Due today</TH>
                   <TH numeric>Overdue</TH>
-                  <TH numeric title="Completed this week" className="hidden @3xl:table-cell">
+                  <TH numeric title="Completed this week" className="hidden @4xl:table-cell">
                     Done this wk
                   </TH>
-                  <TH numeric title="Jobs approved this month that needed at least one revision" className="hidden @4xl:table-cell">
-                    Rev. rate
+                  <TH numeric title={REVISION_RATE_TITLE} className="whitespace-nowrap">
+                    Rev. rate <span className="font-normal normal-case tracking-normal">30d</span>
                   </TH>
-                  <TH className="w-40">Capacity</TH>
+                  <TH className="w-32">Capacity</TH>
                 </tr>
               </THead>
               <TBody>
                 {sorted.map((row) => (
                   <TR key={row.editor.id} interactive className={cn("relative", !row.editor.isActive && "opacity-60")}>
-                    <TD primary>
+                    <TD primary className="max-w-40 @4xl:max-w-64" title={row.editor.name}>
                       <Link
                         href={userHref(row)}
-                        className="inline-flex min-w-0 items-center gap-2 rounded-xs font-medium text-ink focus-ring after:absolute after:inset-0 hover:underline underline-offset-2"
+                        className="flex min-w-0 max-w-full items-center gap-2 rounded-xs font-medium text-ink focus-ring after:absolute after:inset-0 hover:underline underline-offset-2"
                       >
                         <Avatar name={row.editor.name} colour={row.editor.avatarColour || undefined} size="sm" />
-                        <span className="truncate">{row.editor.name}</span>
-                        {!row.editor.isActive ? <span className="text-2xs font-normal text-ink-subtle">(deactivated)</span> : null}
+                        <span className="min-w-0">
+                          <span className="block truncate">{row.editor.name}</span>
+                          {/* Below @4xl the secondary columns fold into this line so they never disappear. */}
+                          <SecondaryStats row={row} className="block @4xl:hidden" />
+                        </span>
                       </Link>
                     </TD>
                     <TD>
-                      <WorkloadBand band={row.band} ratio={row.ratio} reason={row.bandReason} showLabel={false} />
+                      {row.editor.isActive ? (
+                        <WorkloadBand band={row.band} ratio={row.ratio} reason={row.bandReason} showLabel={false} />
+                      ) : (
+                        <DeactivatedBadge compact />
+                      )}
                     </TD>
                     <TD numeric>
                       <Num value={row.active} />
                     </TD>
-                    <TD numeric className="hidden @3xl:table-cell">
+                    <TD numeric className="hidden @4xl:table-cell">
                       <Num value={row.inProgress} />
                     </TD>
                     <TD numeric>
@@ -143,11 +187,11 @@ export function WorkloadOverview({ rows, showAllLink = true }: WorkloadOverviewP
                     <TD numeric>
                       <Num value={row.overdue} tone="danger" />
                     </TD>
-                    <TD numeric className="hidden @3xl:table-cell">
+                    <TD numeric className="hidden @4xl:table-cell">
                       <Num value={row.completedThisWeek} />
                     </TD>
-                    <TD numeric muted className="hidden @4xl:table-cell">
-                      {row.revisionRate === null ? "—" : formatPercent(row.revisionRate)}
+                    <TD numeric muted title={REVISION_RATE_TITLE}>
+                      {revRate(row)}
                     </TD>
                     <TD>
                       <RowCapacity row={row} />
@@ -172,7 +216,7 @@ export function WorkloadOverview({ rows, showAllLink = true }: WorkloadOverviewP
                       <Avatar name={row.editor.name} colour={row.editor.avatarColour || undefined} size="sm" />
                       <span className="truncate text-sm font-medium text-ink">{row.editor.name}</span>
                     </span>
-                    <WorkloadBand band={row.band} ratio={row.ratio} reason={row.bandReason} />
+                    {row.editor.isActive ? <WorkloadBand band={row.band} ratio={row.ratio} reason={row.bandReason} /> : <DeactivatedBadge />}
                   </div>
                   <dl className="grid grid-cols-4 gap-2 text-center">
                     {MOBILE_STATS.map((s) => (
@@ -186,8 +230,8 @@ export function WorkloadOverview({ rows, showAllLink = true }: WorkloadOverviewP
                   </dl>
                   <div className="flex items-center gap-3 text-xs text-ink-muted">
                     <RowCapacity row={row} className="flex-1" />
-                    <span className="numeric shrink-0">
-                      {row.completedThisWeek} done · rev {row.revisionRate === null ? "—" : formatPercent(row.revisionRate)}
+                    <span className="numeric shrink-0" title={REVISION_RATE_TITLE}>
+                      {row.completedThisWeek} done this wk · rev {revRate(row)} (30d)
                     </span>
                   </div>
                 </Link>

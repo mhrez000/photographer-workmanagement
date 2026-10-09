@@ -5,9 +5,10 @@ import { DueChip, JobActionBar, PausedChip, PersonChip, PriorityPill, RevisionCo
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { STATUS_CATEGORY_META } from "@/lib/constants";
-import { daysRemaining, formatDateTime } from "@/lib/dates";
+import { daysRemaining, describeDue, formatDateTime } from "@/lib/dates";
 import type { JobDetail, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { showsDaysRemaining } from "./format";
 
 export interface JobHeaderProps {
   detail: JobDetail;
@@ -22,16 +23,13 @@ export interface JobHeaderProps {
   timeTrackingEnabled: boolean;
 }
 
+/** "12 days left" next to a due chip that shows a plain date (never for overdue / today / soon). */
 function DaysRemaining({ due, timeZone }: { due: string; timeZone: string }) {
   const days = daysRemaining(due, timeZone);
-  if (days === null) return null;
-  const text = days < 0 ? `${-days} ${-days === 1 ? "day" : "days"} overdue` : days === 0 ? "due today" : `${days} ${days === 1 ? "day" : "days"} left`;
+  if (days === null || days < 0) return null;
   return (
-    <span
-      className={cn("numeric text-xs", days < 0 ? "text-danger-fg" : days === 0 ? "text-attention-fg" : "text-ink-muted")}
-      title={`Due ${formatDateTime(due, timeZone)}`}
-    >
-      {text}
+    <span className="numeric text-xs text-ink-muted" title={`Due ${formatDateTime(due, timeZone)}`}>
+      {days} {days === 1 ? "day" : "days"} left
     </span>
   );
 }
@@ -82,7 +80,10 @@ export function JobHeader({ detail, timeZone, canOverride, linkPeople, viewerId,
           <PriorityPill priority={job.priority} size="md" />
           <span className="inline-flex items-center gap-1.5">
             <DueChip due={job.dueDate} timeZone={timeZone} completedAt={finished} done={meta.done} />
-            {job.dueDate && !meta.done && meta.open ? <DaysRemaining due={job.dueDate} timeZone={timeZone} /> : null}
+            {/* The chip already says overdue / due today / due soon; days left only adds to a plain date. */}
+            {job.dueDate && !meta.done && meta.open && showsDaysRemaining(describeDue(job.dueDate, timeZone).tone) ? (
+              <DaysRemaining due={job.dueDate} timeZone={timeZone} />
+            ) : null}
           </span>
           {job.isPaused ? <PausedChip pausedAt={job.pausedAt} timeZone={timeZone} /> : null}
           {job.revisionCount > 0 ? <RevisionCount count={job.revisionCount} /> : null}

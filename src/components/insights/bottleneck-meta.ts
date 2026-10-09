@@ -33,7 +33,7 @@ export const BOTTLENECK_META: Record<BottleneckKind, BottleneckMeta> = {
   revision_spike: {
     label: "Revision spike",
     icon: RotateCcw,
-    rule: (s) => `${s.revisionSpikeMinCount}+ revisions requested in the last 7 days and at least ${s.revisionSpikeMultiplier}× the 4-week weekly average.`,
+    rule: (s) => `${s.revisionSpikeMinCount}+ revision requests in the last 7 days and at least ${s.revisionSpikeMultiplier}× the 4-week weekly average (the alert counts the jobs they were made on).`,
     fix: "Look for a common cause — one client, one job type, unclear briefs.",
   },
   unassigned_backlog: {

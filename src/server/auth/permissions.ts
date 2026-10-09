@@ -439,22 +439,22 @@ export const POLICY = {
       owner: `own, ${COMMENT_EDIT_WINDOW_MINUTES} min`,
       manager: `own, ${COMMENT_EDIT_WINDOW_MINUTES} min`,
       photographer: `own, ${COMMENT_EDIT_WINDOW_MINUTES} min`,
-      editor: `own, ${COMMENT_EDIT_WINDOW_MINUTES} min`,
+      editor: `own, ${COMMENT_EDIT_WINDOW_MINUTES} min, assigned jobs`,
     },
     allow: (ctx, c) => {
       if (!c || c.deletedAt || c.authorUserId !== ctx.userId) return false;
-      if (!isManagement(ctx) && !canViewJob(ctx, c.job)) return false;
+      if (!isManagement(ctx) && !canWriteCommentsOn(ctx, c.job)) return false;
       const ageMs = Date.parse(ctx.now()) - Date.parse(c.createdAt);
       return Number.isFinite(ageMs) && ageMs <= COMMENT_EDIT_WINDOW_MINUTES * 60_000;
     },
   },
   "comment.delete": {
     label: "Delete comments (soft)",
-    scope: { ...OM, photographer: "own comments", editor: "own comments" },
+    scope: { ...OM, photographer: "own comments", editor: "own comments, assigned jobs" },
     allow: (ctx, c) => {
       if (isManagement(ctx)) return true;
       if (!c || c.deletedAt) return false;
-      return c.authorUserId === ctx.userId && canViewJob(ctx, c.job);
+      return c.authorUserId === ctx.userId && canWriteCommentsOn(ctx, c.job);
     },
   },
   "timer.use": {
@@ -579,6 +579,15 @@ function linkChangeRule(label: string): Rule<LinkPermissionRef> {
   };
 }
 
+/**
+ * Non-management comment write access to a job's thread: photographers on
+ * any visible job; editors only while assigned (a past/team job is read-only).
+ * Shared by comment.add / comment.mention / comment.edit / comment.delete.
+ */
+function canWriteCommentsOn(ctx: AuthContext, job: JobPermissionRef): boolean {
+  return ctx.role === "photographer" ? canViewJob(ctx, job) : isAssignedJob(ctx, job);
+}
+
 function commentWriteRule(label: string): Rule<JobPermissionRef> {
   return {
     label,
@@ -586,7 +595,7 @@ function commentWriteRule(label: string): Rule<JobPermissionRef> {
     allow: (ctx, job) => {
       if (isManagement(ctx)) return true;
       if (!job) return false;
-      return ctx.role === "photographer" ? canViewJob(ctx, job) : isAssignedJob(ctx, job);
+      return canWriteCommentsOn(ctx, job);
     },
   };
 }

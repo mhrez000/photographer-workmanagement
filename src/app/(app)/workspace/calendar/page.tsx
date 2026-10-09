@@ -59,7 +59,7 @@ export default async function CalendarPage({ searchParams }: PageProps<"/workspa
         title="Calendar"
         description="Shoots, editing, review, delivery and revision deadlines in one place. Overdue items are flagged in red."
       >
-        <FilterBar quickFilters={[]} facets={["editor", "photographer", "client", "priority"]} searchPlaceholder="Filter by job, client…" />
+        <FilterBar quickFilters={[]} facets={["editor", "photographer", "client", "priority"]} timeZone={ctx.settings.timezone} searchPlaceholder="Filter by job, client…" />
       </PageHeader>
       <CalendarView
         events={events}

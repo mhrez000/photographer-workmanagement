@@ -7,7 +7,7 @@ import { LINK_KIND_META, STATUS_CATEGORY_META, type StatusCategory } from "@/lib
 import { formatDate, formatDateTime } from "@/lib/dates";
 import type { JobDetail, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { formatSeconds } from "./format";
+import { formatSeconds, stageTotalsFromCategories } from "./format";
 
 /* ------------------------------------------------------------------ */
 /*  Small building blocks                                              */
@@ -103,10 +103,12 @@ export function FactsRail({ detail, timeZone, viewerId, timeTrackingEnabled }: F
   const ownRunning = running && running.isRunning && running.user.id === viewerId ? running : null;
   const primaryFinished = finishedWork[0] ?? null;
   const onTime = job.wasOnTime;
+  const stageSeconds = stageTotalsFromCategories(metrics.secondsPerCategory);
 
   return (
-    <div className="flex flex-col gap-4">
-      <SectionCard eyebrow="Traceability" title="Who did what, when" as="h2">
+    // Below xl the rail sits under the tabs: traceability beside dates + effort instead of one long column.
+    <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-1">
+      <SectionCard eyebrow="Traceability" className="md:row-span-2 xl:row-span-1" title="Who did what, when" as="h2">
         <dl className="-my-2 divide-y divide-border">
           <Fact label="Worked on by">
             {stints.length === 0 ? (
@@ -249,14 +251,21 @@ export function FactsRail({ detail, timeZone, viewerId, timeTrackingEnabled }: F
           <Fact label="In status">
             <span className="numeric">{formatSeconds(metrics.timeInCurrentStatusSeconds)}</span>
           </Fact>
+          {/* Same stage grouping as the Overview stepper and the Timeline tab. */}
           <Fact label="Editing time">
-            <span className="numeric">{formatSeconds(metrics.editingSeconds)}</span>
-            {metrics.activeEditingSeconds !== null ? (
-              <span className="ml-1 text-xs text-ink-muted numeric">({formatSeconds(metrics.activeEditingSeconds)} tracked)</span>
-            ) : null}
+            <span className="numeric">{formatSeconds(stageSeconds.editing)}</span>
           </Fact>
+          <Fact label="Revision time">
+            <span className="numeric">{stageSeconds.revision > 0 ? formatSeconds(stageSeconds.revision) : <span className="text-ink-subtle">None</span>}</span>
+          </Fact>
+          {metrics.activeEditingSeconds !== null ? (
+            <Fact label="Tracked">
+              <span className="numeric">{formatSeconds(metrics.activeEditingSeconds)}</span>
+              <span className="ml-1 text-xs text-ink-muted">editing + revisions</span>
+            </Fact>
+          ) : null}
           <Fact label="Review time">
-            <span className="numeric">{formatSeconds(metrics.reviewSeconds)}</span>
+            <span className="numeric">{formatSeconds(stageSeconds.review)}</span>
           </Fact>
           {metrics.turnaroundSeconds !== null ? (
             <Fact label="Turnaround">

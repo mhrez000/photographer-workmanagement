@@ -1,5 +1,5 @@
 /** POST /api/teams/:id/members/:userId/remove */
-import { type RouteParams } from "@/app/api/_lib/route";
+import { type RouteParams, methodNotAllowed } from "@/app/api/_lib/route";
 import { requireContext } from "@/server/auth/session";
 import { handle } from "@/server/http";
 import { withTxThenAutomations } from "@/server/services/_shared";
@@ -10,3 +10,9 @@ export const POST = handle<RouteParams<{ id: string; userId: string }>>(async (_
   const { id, userId } = await params;
   return withTxThenAutomations(ctx, (tx) => removeMember(tx, ctx, { teamId: id, userId }));
 });
+
+/** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
+export const GET = methodNotAllowed(["POST"]);
+export const PUT = methodNotAllowed(["POST"]);
+export const PATCH = methodNotAllowed(["POST"]);
+export const DELETE = methodNotAllowed(["POST"]);

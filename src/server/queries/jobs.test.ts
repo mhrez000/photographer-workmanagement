@@ -4,7 +4,7 @@ import { clients, jobAssignments, organisationSettings, projects, savedViews } f
 import { addTeamFixture, contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { endOfCivilDayIso } from "@/lib/dates";
 import { NotFoundError, ValidationError } from "@/server/errors";
-import { decodeOffsetCursor, encodeOffsetCursor, getJobRowByNumber, listJobs } from "./jobs";
+import { decodeOffsetCursor, encodeOffsetCursor, getJobRowByNumber, JOB_LIST_API_KEYS, listJobs, listJobsApi, parseJobListApiQuery, parseJobListFilters } from "./jobs";
 
 const TZ = "Australia/Sydney";
 const NOW = "2026-10-08T00:00:00.000Z"; // Thu 8 Oct 2026, 11:00 Sydney
@@ -317,5 +317,45 @@ describe("listJobs sorting, grouping, pagination", () => {
       primaryLink: null,
       timeInStatusSeconds: 7200,
     });
+  });
+});
+
+describe("query aliases and the strict REST schema", () => {
+  it("filter=mine is an alias for quick=my_jobs (API and page parsing)", () => {
+    const ctx = ctxOf("editor1");
+    expect(parseJobListApiQuery(db, ctx, { filter: "mine" }).quick).toEqual(["my_jobs"]);
+    expect(parseJobListFilters(db, ctx, { filter: "mine" }).quick).toEqual(["my_jobs"]);
+    expect(parseJobListApiQuery(db, ctx, { filter: "mine", quick: "overdue" }).quick).toEqual(["overdue", "my_jobs"]);
+    const mine = job({ statusKey: "in_progress", editorId: ids.users.editor1 });
+    job({ statusKey: "in_progress", editorId: ids.users.editor2 });
+    const owner = ctxOf("owner");
+    expect(listJobsApi(db, owner, { filter: "mine" }).rows.map((r) => r.id)).not.toContain(mine.id);
+    expect(listJobsApi(db, ctx, { filter: "mine" }).rows.map((r) => r.id)).toEqual([mine.id]);
+  });
+
+  it("an unknown key or alias value is a 400 on the API, but ignored by page parsing", () => {
+    const ctx = ctxOf("owner");
+    expect(() => parseJobListApiQuery(db, ctx, { bogus: "1" })).toThrow(ValidationError);
+    expect(() => listJobsApi(db, ctx, { bogus: "1" })).toThrow(ValidationError);
+    expect(() => parseJobListApiQuery(db, ctx, { filter: "everything" })).toThrow(ValidationError);
+    expect(() => parseJobListFilters(db, ctx, { bogus: "1" })).not.toThrow();
+    expect(() => listJobs(db, ctx, { bogus: "1" })).not.toThrow();
+  });
+
+  it("accepts every key the work table forwards (filters, cursor, limit, viewId, sort, UI-only keys)", () => {
+    const ctx = ctxOf("owner");
+    for (const k of ["q", "quick", "statusCategory", "editorId", "sort", "groupBy", "viewId", "cursor", "limit", "tab", "columns", "dir", "completedFrom", "revisedFrom", "statusEnteredBefore"]) {
+      expect(JOB_LIST_API_KEYS).toContain(k);
+    }
+    expect(() =>
+      listJobsApi(db, ctx, { q: "x", quick: "overdue", sort: "dueDate:asc", groupBy: "status", cursor: encodeOffsetCursor(0), limit: "10", tab: "all", columns: "job,status", dir: "asc" }),
+    ).not.toThrow();
+  });
+
+  it("drill-down bounds reject malformed instants", () => {
+    const ctx = ctxOf("owner");
+    expect(() => listJobsApi(db, ctx, { completedFrom: "2026-10-01Tnope" })).toThrow(ValidationError);
+    expect(() => listJobsApi(db, ctx, { statusEnteredBefore: "yesterday" })).toThrow(ValidationError);
+    expect(() => listJobsApi(db, ctx, { revisedFrom: "2026-10-01T00:00:00.000Z", revisedTo: "2026-10-08" })).not.toThrow();
   });
 });

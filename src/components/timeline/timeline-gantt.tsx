@@ -20,8 +20,10 @@ export interface TimelineGanttProps {
   dayStarts: number[];
   nowMs: number;
   today: string;
-  /** Org-wide average closed-stage seconds per category (bottleneck baseline). */
-  averages: Partial<Record<StatusCategory, number>>;
+  /** Org-wide usual (median, floored) closed-stage seconds per category (slow-stage baseline). */
+  baselines: Partial<Record<StatusCategory, number>>;
+  /** Slow-stage multiplier over the baseline (TIMELINE_BOTTLENECK_FACTOR). */
+  slowFactor: number;
   timeZone: string;
   weeks: TimelineWindow;
 }
@@ -37,10 +39,11 @@ interface HoverState {
 /**
  * Gantt of job stages over a date window (spec §11). Sticky job labels on
  * the left, one bar per stage from the transition ledger (current stage runs
- * to "now"), a due-date marker per job, overdue rows tinted, and stages that
- * took more than 2× the organisation's average outlined in the attention colour.
+ * to "now"), a due-date marker per job, overdue rows tinted, and slow stages
+ * (isSlowStage: over 2× the usual time, or a current stage past its deadline)
+ * outlined in the attention colour.
  */
-export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, averages, timeZone, weeks }: TimelineGanttProps) {
+export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, baselines, slowFactor, timeZone, weeks }: TimelineGanttProps) {
   const dayWidth = DAY_WIDTH[weeks];
   const trackWidth = days.length * dayWidth;
   const rangeStart = dayStarts[0];
@@ -69,8 +72,11 @@ export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, aver
   React.useEffect(() => {
     const el = scroller.current;
     if (!el || !nowVisible) return;
+    // The sticky label column covers the first labelW px of the viewport, so
+    // the visible track is [scrollLeft, scrollLeft + clientWidth − labelW] in
+    // track coordinates: put "now" 60 % of the way across it.
     const labelW = labelRef.current?.offsetWidth ?? 0;
-    el.scrollLeft = Math.max(0, labelW + nowX - (el.clientWidth - labelW) * 0.6);
+    el.scrollLeft = Math.max(0, nowX - (el.clientWidth - labelW) * 0.6);
   }, [nowVisible, nowX, weeks, rangeStart]);
 
   const groups = React.useMemo(() => groupRows(rows, group), [rows, group]);
@@ -87,14 +93,24 @@ export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, aver
               <span className="eyebrow">Job</span>
             </div>
             <div className="relative" style={{ width: trackWidth }}>
-              <div className="flex h-6 items-end">
+              {/* Month labels sit in their own row (relative, so they never drop onto the day numbers); the Now pill lives here too. */}
+              <div className="relative h-6">
                 {monthMarks.map(({ d, i, show }) =>
                   show ? (
-                    <span key={d} className="absolute bottom-0 whitespace-nowrap pl-1.5 text-2xs font-semibold text-ink-secondary" style={{ left: i * dayWidth }}>
+                    <span key={d} className="absolute bottom-0.5 whitespace-nowrap pl-1.5 text-2xs leading-4 font-semibold text-ink-secondary" style={{ left: i * dayWidth }}>
                       {formatMonth(d)}
                     </span>
                   ) : null,
                 )}
+                {nowVisible ? (
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-0.5 z-[1] -translate-x-1/2 rounded-full bg-accent px-1.5 py-0.5 text-[9px] leading-none font-semibold uppercase tracking-wide text-accent-fg"
+                    style={{ left: nowX }}
+                  >
+                    Now
+                  </span>
+                ) : null}
               </div>
               <div className="flex">
                 {days.map((d) => {
@@ -166,13 +182,12 @@ export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, aver
           {nowVisible ? (
             <div aria-hidden="true" className="pointer-events-none absolute bottom-0 top-0 z-10" style={{ left: `calc(var(--gantt-label) + ${nowX}px)` }}>
               <div className="h-full w-px bg-accent" />
-              <div className="absolute top-12 -translate-x-1/2 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent-fg">Now</div>
             </div>
           ) : null}
         </div>
       </div>
 
-      {hover ? <SegmentTooltip hover={hover} averages={averages} timeZone={timeZone} /> : null}
+      {hover ? <SegmentTooltip hover={hover} baselines={baselines} slowFactor={slowFactor} timeZone={timeZone} /> : null}
     </div>
   );
 }
@@ -210,18 +225,23 @@ function GanttRow({ row, xOf, nowMs, rangeStart, rangeEnd, trackWidth, dayWidth,
     <div className={cn("group/row flex border-b border-border/70 last:border-b-0", overdue && "bg-danger-soft/35")} style={{ height: ROW_HEIGHT }}>
       <div
         className={cn(
-          "sticky left-0 z-20 flex w-36 shrink-0 flex-col justify-center border-r border-border px-3 sm:w-60",
+          "sticky left-0 z-20 flex w-36 shrink-0 flex-col justify-center overflow-hidden border-r border-border px-3 sm:w-60",
           overdue ? "bg-[color-mix(in_oklab,var(--color-danger-soft)_35%,var(--color-surface))]" : "bg-surface",
           "group-hover/row:bg-surface-muted",
         )}
       >
-        <Link href={href} className="min-w-0 rounded-xs focus-ring">
-          <span className="flex items-center gap-1.5">
-            <span className="numeric text-2xs font-semibold text-ink-muted">{job.jobNumber}</span>
-            {overdue ? <span className="rounded-full bg-danger-soft px-1 text-[9px] font-semibold uppercase text-danger-fg">Overdue</span> : null}
+        {/* Two fixed-height lines (number · client, then name) so the label always fits inside ROW_HEIGHT. */}
+        <Link
+          href={href}
+          title={[job.jobNumber, job.name, job.client?.name].filter(Boolean).join(" · ")}
+          className="flex min-w-0 flex-col gap-1 overflow-hidden rounded-xs leading-none focus-ring"
+        >
+          <span className="flex min-w-0 items-center gap-1.5 text-2xs leading-none">
+            <span className="numeric shrink-0 font-semibold text-ink-muted">{job.jobNumber}</span>
+            {overdue ? <span className="shrink-0 rounded-full bg-danger-soft px-1 py-px text-[9px] leading-none font-semibold uppercase text-danger-fg">Overdue</span> : null}
+            {job.client ? <span className="hidden min-w-0 truncate text-ink-subtle sm:inline">{job.client.name}</span> : null}
           </span>
-          <span className="block truncate text-sm font-medium leading-tight text-ink hover:underline">{job.name}</span>
-          {job.client ? <span className="hidden truncate text-2xs text-ink-subtle sm:block">{job.client.name}</span> : null}
+          <span className="block truncate pb-px text-sm leading-tight font-medium text-ink hover:underline">{job.name}</span>
         </Link>
       </div>
 
@@ -292,10 +312,12 @@ function GanttRow({ row, xOf, nowMs, rangeStart, rangeEnd, trackWidth, dayWidth,
 /*  Tooltip (fixed, so the scroll container never clips it)           */
 /* ------------------------------------------------------------------ */
 
-function SegmentTooltip({ hover, averages, timeZone }: { hover: HoverState; averages: Partial<Record<StatusCategory, number>>; timeZone: string }) {
+function SegmentTooltip({ hover, baselines, slowFactor, timeZone }: { hover: HoverState; baselines: Partial<Record<StatusCategory, number>>; slowFactor: number; timeZone: string }) {
   const { seg, rect } = hover;
   const stage = stageOf(seg.category);
-  const avg = averages[seg.category];
+  const usual = baselines[seg.category];
+  // A current stage is also flagged when it has run past its deadline (see isSlowStage).
+  const pastDeadline = seg.isBottleneck && seg.isCurrent && !(usual && seg.durationSeconds > slowFactor * usual);
   const took = formatDuration(seg.durationSeconds * 1000);
   const width = 260;
   const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), (typeof window !== "undefined" ? window.innerWidth : 1024) - width - 8);
@@ -310,15 +332,16 @@ function SegmentTooltip({ hover, averages, timeZone }: { hover: HoverState; aver
         {seg.jobNumber} · {stage.label}
         <span className="font-normal opacity-70"> — {seg.statusName}</span>
       </p>
-      {seg.isBottleneck && avg ? (
+      {seg.isBottleneck ? (
         <p className="font-medium text-attention">
-          {stage.label} {seg.isCurrent ? "has taken" : "took"} {took} (avg {formatDuration(avg * 1000)})
+          {stage.label} {seg.isCurrent ? "has taken" : "took"} {took}
+          {pastDeadline ? " · past its due date" : usual ? ` (usually ${formatDuration(usual * 1000)})` : null}
         </p>
       ) : (
         <p>
           {seg.isCurrent ? "In this stage for " : "Took "}
           <span className="numeric font-medium">{took}</span>
-          {avg ? <span className="opacity-70"> · avg {formatDuration(avg * 1000)}</span> : null}
+          {usual ? <span className="opacity-70"> · usually {formatDuration(usual * 1000)}</span> : null}
         </p>
       )}
       <p className="numeric opacity-70">

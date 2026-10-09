@@ -153,12 +153,22 @@ export const RangeInputSchema = z
  * Resolves raw range input (query params / JSON) to ISO bounds in the org
  * timezone using the context clock. An already-resolved `ResolvedRange` is
  * passed through unchanged. Invalid input → ValidationError (400).
+ *
+ * "this_week" starts on organisation_settings.week_starts_on: pass it as
+ * `opts.weekStartsOn`, or pass `opts.db` and it is loaded (only when the
+ * preset needs it). Without either the week starts on Monday.
  */
-export function resolveRangeInput(ctx: AuthContext, raw: unknown, fallback: ResolvedRange["preset"] = "last_30_days"): ResolvedRange {
+export function resolveRangeInput(
+  ctx: AuthContext,
+  raw: unknown,
+  fallback: ResolvedRange["preset"] = "last_30_days",
+  opts: { db?: DbLike; weekStartsOn?: number } = {},
+): ResolvedRange {
   if (isResolvedRange(raw)) return raw;
   const input = parseInput(RangeInputSchema, raw ?? {});
   const preset = input.range ?? input.preset ?? (input.from || input.to ? "custom" : fallback);
-  const r = resolveRange(preset, ctx.settings.timezone, { from: input.from ?? null, to: input.to ?? null }, new Date(ctx.now()));
+  const weekStartsOn = opts.weekStartsOn ?? (preset === "this_week" && opts.db ? loadOrgSettings(opts.db, ctx).weekStartsOn : 1);
+  const r = resolveRange(preset, ctx.settings.timezone, { from: input.from ?? null, to: input.to ?? null }, new Date(ctx.now()), { weekStartsOn });
   return { preset, from: r.from, to: r.to, label: r.label };
 }
 

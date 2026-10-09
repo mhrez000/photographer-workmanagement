@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { activityEvents, users } from "@/db/schema";
 import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { buildContextFromDb } from "@/server/auth/session";
-import { clearLoginRateLimits } from "@/server/auth/rate-limit";
+import { LOGIN_EMAIL_RATE_LIMIT, clearLoginRateLimits } from "@/server/auth/rate-limit";
+import { clientIp } from "@/server/http";
 import { verifyPassword } from "@/server/auth/password";
 import { RateLimitedError, UnauthorizedError, ValidationError } from "@/server/errors";
 import { withTx } from "./_shared";
@@ -58,6 +59,34 @@ describe("authenticate", () => {
     expect(blocked).toBeInstanceOf(RateLimitedError);
     expect((blocked as RateLimitedError).retryAfterSeconds).toBeGreaterThan(0);
     await expect(attempt("8.8.8.8", ids.password)).resolves.toMatchObject({ id: ids.users.manager });
+  });
+
+  it("rotating X-Forwarded-For buys nothing: XFF is ignored without trusted proxies, so 5 failures → 429 (even for the right password)", async () => {
+    const attempt = (i: number, password = "bad") =>
+      authenticate(db, { email: ids.emails.editor1, password, ip: clientIp(new Headers({ "x-forwarded-for": `10.0.0.${i}` }), 0) });
+    for (let i = 0; i < 4; i += 1) await expect(attempt(i)).rejects.toThrow(UnauthorizedError);
+    await expect(attempt(4)).rejects.toThrow(RateLimitedError);
+    for (let i = 5; i < 12; i += 1) await expect(attempt(i)).rejects.toThrow(RateLimitedError);
+    await expect(attempt(12, ids.password)).rejects.toThrow(RateLimitedError);
+  });
+
+  it("the per-email limiter caps guesses across genuinely different IPs (trusted proxy)", async () => {
+    // Behind a trusted proxy every attempt has its own real IP, so only the IP-independent limiter can stop it.
+    const attempt = (i: number, password = "bad") =>
+      authenticate(db, {
+        email: ids.emails.editor1,
+        password,
+        ip: clientIp(new Headers({ "x-forwarded-for": `6.6.6.6, 203.0.113.${i}` }), 1),
+      });
+    for (let i = 0; i < LOGIN_EMAIL_RATE_LIMIT.attempts - 1; i += 1) await expect(attempt(i)).rejects.toThrow(UnauthorizedError);
+    await expect(attempt(100)).rejects.toThrow(RateLimitedError);
+    const blocked = await attempt(101, ids.password).catch((e: unknown) => e);
+    expect(blocked).toBeInstanceOf(RateLimitedError);
+    expect((blocked as RateLimitedError).retryAfterSeconds).toBeGreaterThan(0);
+    // other accounts are unaffected
+    await expect(authenticate(db, { email: ids.emails.manager, password: ids.password, ip: "203.0.113.200" })).resolves.toMatchObject({
+      id: ids.users.manager,
+    });
   });
 });
 

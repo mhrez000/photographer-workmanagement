@@ -9,10 +9,11 @@ import { cn, formatNumber, pluralise } from "@/lib/utils";
 type Tone = "default" | "attention" | "danger" | "success" | "accent";
 
 interface KpiDef {
-  key: keyof Omit<KpiSummary, "asOf">;
+  key: keyof Omit<KpiSummary, "asOf" | "completedWeek">;
   label: string;
   icon: LucideIcon;
-  href: string;
+  /** Drill-down; a function when the link depends on the summary (e.g. the week bounds). */
+  href: string | ((k: KpiSummary) => string);
   /** Tone when the value is non-zero (zero is always calm). */
   tone: Tone;
   sub?: (k: KpiSummary, rates: DashboardData["rates"]) => string | null;
@@ -54,7 +55,11 @@ export const KPI_DEFS: readonly KpiDef[] = [
     key: "completedThisWeek",
     label: "Completed this week",
     icon: CircleCheckBig,
-    href: `${ALL_WORK}?quick=completed`,
+    // Same set as the count (§8 completedInRange over the org's week): the linked list's total equals the KPI.
+    href: (k) =>
+      k.completedWeek
+        ? `${ALL_WORK}?quick=completed&completedFrom=${encodeURIComponent(k.completedWeek.from)}&completedTo=${encodeURIComponent(k.completedWeek.to)}`
+        : `${ALL_WORK}?quick=completed`,
     tone: "success",
     sub: (_k, rates) => `${formatNumber(rates.completedThisMonth)} this month`,
   },
@@ -95,7 +100,7 @@ export function KpiStrip({ kpis, rates, className }: KpiStripProps) {
         return (
           <Link
             key={def.key}
-            href={def.href}
+            href={typeof def.href === "function" ? def.href(kpis) : def.href}
             aria-label={`${def.label}: ${pluralise(value, "job")}. View in All Work`}
             className={cn(
               "group/kpi relative flex min-w-0 flex-col rounded-lg border border-border bg-surface px-4 py-3 shadow-xs",
