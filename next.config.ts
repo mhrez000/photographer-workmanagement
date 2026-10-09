@@ -13,6 +13,8 @@ const nextConfig: NextConfig = {
     },
   },
   serverExternalPackages: ["better-sqlite3"],
+  // forbidden() + src/app/forbidden.tsx for permission-denied pages.
+  experimental: { authInterrupts: true },
 };
 
 export default nextConfig;
