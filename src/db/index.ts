@@ -29,9 +29,30 @@ export type DbLike = BaseSQLiteDatabase<"sync", Database.RunResult, typeof schem
 
 export const DEFAULT_DATABASE_PATH = "./data/app.db";
 
+/**
+ * Hosted demo mode (Vercel): the deployment filesystem is read-only, so the app
+ * runs on a copy of the seeded demo database in /tmp. Each new server instance
+ * starts from the bundled template (data/demo.db, built by scripts/build-demo-db.mjs);
+ * changes last only as long as that instance. See README "Deploying to Vercel".
+ */
+export const HOSTED_DEMO_DATABASE_PATH = "/tmp/proofline.db";
+export const DEMO_TEMPLATE_PATH = "./data/demo.db";
+
+function isHostedDemo(): boolean {
+  return Boolean(process.env.VERCEL) && !process.env.DATABASE_PATH?.trim();
+}
+
+/** Template copied into an empty database path: DEMO_DB_TEMPLATE, or data/demo.db in hosted demo mode. */
+export function resolveTemplatePath(): string | null {
+  const raw = process.env.DEMO_DB_TEMPLATE?.trim();
+  if (raw) return path.isAbsolute(raw) ? raw : path.resolve(/*turbopackIgnore: true*/ process.cwd(), raw);
+  return isHostedDemo() ? path.resolve(/*turbopackIgnore: true*/ process.cwd(), DEMO_TEMPLATE_PATH) : null;
+}
+
 export function resolveDatabasePath(): string {
   const raw = process.env.DATABASE_PATH?.trim();
-  if (!raw) return path.resolve(process.cwd(), DEFAULT_DATABASE_PATH);
+  if (isHostedDemo()) return HOSTED_DEMO_DATABASE_PATH;
+  if (!raw) return path.resolve(/*turbopackIgnore: true*/ process.cwd(), DEFAULT_DATABASE_PATH);
   if (raw === ":memory:") return raw;
   // DATABASE_PATH is runtime config, not a bundled asset: keep Turbopack from
   // tracing the whole project into the server output.
@@ -51,6 +72,17 @@ export interface DatabaseHandle {
 export function createDatabase(filePath: string = resolveDatabasePath(), opts: { installGuards?: boolean } = {}): DatabaseHandle {
   if (filePath !== ":memory:") {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const template = resolveTemplatePath();
+    if (template && !fs.existsSync(/*turbopackIgnore: true*/ filePath) && fs.existsSync(/*turbopackIgnore: true*/ template)) {
+      // Copy to a temp name and rename, so concurrent cold starts never open a half-copied file.
+      const staging = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+      fs.copyFileSync(/*turbopackIgnore: true*/ template, staging);
+      try {
+        fs.renameSync(staging, filePath);
+      } catch {
+        fs.rmSync(staging, { force: true });
+      }
+    }
   }
   const sqlite = new Database(filePath);
   sqlite.pragma("journal_mode = WAL");

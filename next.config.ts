@@ -13,6 +13,12 @@ const nextConfig: NextConfig = {
     },
   },
   serverExternalPackages: ["better-sqlite3"],
+  // Hosted demo (Vercel): ship the seeded template DB and the build-time
+  // session secret with every server function (see src/db/index.ts).
+  outputFileTracingIncludes: {
+    "/*": ["./data/demo.db", "./data/.session-secret"],
+    "/**": ["./data/demo.db", "./data/.session-secret"],
+  },
   // forbidden() + src/app/forbidden.tsx for permission-denied pages.
   experimental: { authInterrupts: true },
   // Legacy paths from PRODUCT-SPEC / SPEC-CHECKLIST, renamed in ARCHITECTURE §10.

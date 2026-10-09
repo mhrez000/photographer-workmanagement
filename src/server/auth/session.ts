@@ -12,6 +12,8 @@
  *   - `requireContext()` / `getOptionalContext()` — cookie → AuthContext, cached per request
  *   - `systemContext(orgId, opts)` — automations / sweep / seed (isSystem, userId null)
  */
+import fs from "node:fs";
+import path from "node:path";
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
@@ -31,8 +33,21 @@ import { currentRequestId, newRequestId } from "@/server/request-scope";
 
 export const SESSION_SECRET_MIN_LENGTH = 32;
 
+/**
+ * Fallback for hosted demo builds: scripts/build-demo-db.mjs writes a random
+ * per-deployment secret to data/.session-secret when SESSION_SECRET is not
+ * configured (never committed). An explicit SESSION_SECRET always wins.
+ */
+function readBuildSecret(): string | undefined {
+  try {
+    return fs.readFileSync(path.resolve(/*turbopackIgnore: true*/ process.cwd(), "data/.session-secret"), "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
 function loadSecret(): Uint8Array {
-  const raw = process.env.SESSION_SECRET?.trim();
+  const raw = process.env.SESSION_SECRET?.trim() || readBuildSecret();
   if (!raw || raw.length < SESSION_SECRET_MIN_LENGTH) {
     throw new Error(
       `SESSION_SECRET is missing or shorter than ${SESSION_SECRET_MIN_LENGTH} characters. Set it in .env (see .env.example).`,

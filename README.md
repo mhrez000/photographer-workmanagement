@@ -98,6 +98,20 @@ Conventions that matter when adding a page:
 - **Shared UI**: status, priority, due, person, workload and capacity display pieces and all job actions are in `@/components/jobs`. Filters are in `@/components/filters` and `SectionCard`/`StatTile`/`RouteError` are in `@/components/common`. Reuse them rather than writing local copies.
 - **Navigation**: `src/config/nav.ts` filters by role, plus `grant`s for flag-based access (for example a photographer with `can_view_analytics` sees Insights).
 
+## Deploying to Vercel (hosted demo)
+
+The repo deploys to Vercel with no configuration. Import it at **vercel.com/new**, keep the detected Next.js preset and deploy. Vercel runs the `vercel-build` script, which seeds a fresh demo database (`data/demo.db`, through the real services) and then runs `next build`.
+
+How the hosted demo works:
+
+- **Database:** Vercel's filesystem is read-only, so each server instance copies the bundled demo database to `/tmp` on first request and runs on that copy (`src/db/index.ts`).
+- **Data does not persist.** Changes last only as long as that server instance. A new instance (after idle time, a redeploy, or a scale-out) starts again from the seeded demo data. The demo data is dated to the deploy, so redeploy to refresh it.
+- **Session secret:** set `SESSION_SECRET` (≥ 32 chars) in the project's environment variables. If you don't, the build generates a random one per deployment, so everyone is signed out on each deploy.
+- **Overdue alerts on a schedule (optional):** set `CRON_SECRET` and point a scheduler at `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>`.
+- **Region:** pick the region closest to your studio in the project settings (for Australia, Sydney `syd1`).
+
+For production use with saved data, the app needs a hosted database instead of the bundled SQLite file. The closest fit is a hosted SQLite service such as Turso (libSQL). That is a larger change because the data layer is synchronous today.
+
 ## Testing
 
 ```bash
