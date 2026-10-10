@@ -73,7 +73,8 @@ const LabelSchema = z
   .max(LINK_LABEL_MAX, `Keep labels under ${LINK_LABEL_MAX} characters`)
   .transform((v) => (v.length === 0 ? null : v));
 
-export const AddLinkInput = z.object({
+/** Strict (docs/ROLES.md §3.5): `sharedWithClient` / `addedBySharer` and unknown keys → 400. */
+export const AddLinkInput = z.strictObject({
   jobId: Id,
   kind: z.enum(LINK_KINDS),
   url: LinkUrlSchema,
@@ -81,7 +82,7 @@ export const AddLinkInput = z.object({
 });
 export type AddLinkInput = z.input<typeof AddLinkInput>;
 
-export const ReplaceLinkInput = z.object({
+export const ReplaceLinkInput = z.strictObject({
   linkId: Id,
   url: LinkUrlSchema,
   /** Omitted → keep the old label; null or "" → clear it. */
@@ -94,7 +95,7 @@ export type ReplaceLinkInput = z.input<typeof ReplaceLinkInput>;
  * another kind and/or relabel it (same URL). At least one field required.
  */
 export const UpdateLinkInput = z
-  .object({
+  .strictObject({
     linkId: Id,
     kind: z.enum(LINK_KINDS).optional(),
     /** Omitted → keep the old label; null or "" → clear it. */
@@ -113,3 +114,10 @@ export const RemoveLinkInput = z.object({
     .nullish(),
 });
 export type RemoveLinkInput = z.input<typeof RemoveLinkInput>;
+
+/** `POST /api/links/:id/share { shared }` — client visibility of one CURRENT link (`link.share_with_client`). */
+export const ShareLinkInput = z.strictObject({
+  linkId: Id,
+  shared: z.boolean(),
+});
+export type ShareLinkInput = z.input<typeof ShareLinkInput>;

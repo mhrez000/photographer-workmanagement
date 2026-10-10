@@ -46,17 +46,19 @@ import {
 } from "@/db/schema";
 import {
   AUTOMATION_MAX_DEPTH,
+  AUTOMATION_NOTE_KINDS,
   CATEGORY_GROUPS,
   NOTE_KIND_META,
   PRIORITY_META,
   STATUS_CATEGORY_META,
   WORKLOAD_BAND_META,
   type AutomationRunStatus,
+  type NoteKind,
   type WorkloadBand,
 } from "@/lib/constants";
 import { isPastDue } from "@/lib/metrics";
 import type { ActivityEvent, AuthContext, Automation, AutomationDryRunResult, AutomationRun, Job } from "@/lib/types";
-import { AutomationActionsSchema, AutomationConditionsSchema, AutomationTriggerSchema, parseJsonColumn } from "@/lib/validation/json";
+import { AutomationActionsReadSchema, AutomationConditionsSchema, AutomationTriggerSchema, parseJsonColumn } from "@/lib/validation/json";
 import { recordEvent } from "@/server/audit";
 import { systemContext } from "@/server/auth/session";
 import { nowIso } from "@/server/clock";
@@ -67,7 +69,7 @@ import { triggerMatches, triggerTypesForEvent } from "./automationTriggers";
 import { applyJobFieldChanges } from "./jobs";
 import { hasCurrentLinkOfKind } from "./links";
 import { addNote } from "./notes";
-import { managersOf, notify, ownersOf } from "./notifications";
+import { adminsOf, notify } from "./notifications";
 import { jobLinkPath, loadVisibleJob, loadWorkflowGraph, movesFor, toWorkflowJob, transitionLoadedJob } from "./workflow";
 
 export {
@@ -250,10 +252,8 @@ export async function notifyRecipients(
       return job?.previousEditorId ? [job.previousEditorId] : [];
     case "creator":
       return job ? [job.createdByUserId] : [];
-    case "managers":
-      return await managersOf(db, organisationId);
-    case "owner":
-      return await ownersOf(db, organisationId);
+    case "admins":
+      return await adminsOf(db, organisationId);
     case "user":
       return action.userId ? [action.userId] : [];
     default:
@@ -329,7 +329,7 @@ async function performNotify(
   env: ActionEnv,
 ): Promise<ActionOutcome> {
   const subject = workloadSubject(env.event);
-  if (!job && !subject && !["managers", "owner", "user"].includes(action.target)) {
+  if (!job && !subject && !["admins", "user"].includes(action.target)) {
     throw new ValidationError("This trigger has no job to take recipients from");
   }
   if (action.target === "user" && !action.userId) throw new ValidationError("No user chosen to notify");
@@ -367,6 +367,10 @@ async function performNotify(
   return { detail: sent.recipientIds.length === 0 ? "Nobody eligible to notify" : `Notified ${sent.recipientIds.length} user${sent.recipientIds.length === 1 ? "" : "s"}` };
 }
 
+function isAutomationNoteKind(kind: NoteKind): boolean {
+  return (AUTOMATION_NOTE_KINDS as readonly NoteKind[]).includes(kind);
+}
+
 async function performAction(tx: Tx, ctx: AuthContext, action: AutomationAction, env: ActionEnv): Promise<ActionOutcome> {
   const job = await loadJobForRun(tx, ctx, env.run.jobId);
   const reason = `Automation: ${env.automation.name}`;
@@ -399,6 +403,8 @@ async function performAction(tx: Tx, ctx: AuthContext, action: AutomationAction,
     }
     case "add_note": {
       const current = requireJob(job);
+      // docs/ROLES.md §6.3: automations never publish client-visible text (frozen definitions may still hold one).
+      if (!isAutomationNoteKind(action.kind)) return { detail: "Skipped: automations can't write client-visible delivery notes" };
       await addNote(tx, ctx, { jobId: current.id, kind: action.kind, body: action.body });
       return { detail: `Added ${NOTE_KIND_META[action.kind].label.toLowerCase().replace(/s$/, "")}` };
     }
@@ -506,7 +512,7 @@ async function executeRunInTx(tx: Tx, organisationId: string, runId: string, req
   if (run.depth > AUTOMATION_MAX_DEPTH) return skip(`Chain depth ${run.depth} exceeds the limit of ${AUTOMATION_MAX_DEPTH}`);
   if (!automation || automation.archivedAt !== null) return skip("The rule was archived");
   if (!automation.isEnabled) return skip("The rule is disabled");
-  const actions = parseJsonColumn(AutomationActionsSchema, automation.actions, []);
+  const actions = parseJsonColumn(AutomationActionsReadSchema, automation.actions, []);
   if (actions.length === 0) return skip("The rule has no valid actions");
 
   const now = ctx.now();
@@ -735,7 +741,8 @@ async function previewAction(
         : { description: `Set priority to ${PRIORITY_META[action.priority].label}`, problem: null };
     case "add_note": {
       const preview = action.body.length > 80 ? `${action.body.slice(0, 77)}…` : action.body;
-      return { description: `Add a ${NOTE_KIND_META[action.kind].label.toLowerCase().replace(/s$/, "")}: “${preview}”`, problem: null };
+      const problem = isAutomationNoteKind(action.kind) ? null : "Automations can't write client-visible delivery notes (skipped)";
+      return { description: `Add a ${NOTE_KIND_META[action.kind].label.toLowerCase().replace(/s$/, "")}: “${preview}”`, problem };
     }
     default:
       return { description: `Unknown action in ${automation.name}`, problem: "Unknown action" };
@@ -757,7 +764,7 @@ export async function dryRunAutomation(
   const now = ctx.now();
   const trigger = parseJsonColumn(AutomationTriggerSchema, automation.trigger, { type: "job_created" });
   const conditions = parseJsonColumn(AutomationConditionsSchema, automation.conditions, []);
-  const actions = parseJsonColumn(AutomationActionsSchema, automation.actions, []);
+  const actions = parseJsonColumn(AutomationActionsReadSchema, automation.actions, []);
   const statusKeyOf = await statusKeyLookup(db, ctx.organisationId);
 
   let triggerResult: AutomationDryRunResult["trigger"];

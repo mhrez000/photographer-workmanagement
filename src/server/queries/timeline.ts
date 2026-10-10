@@ -20,8 +20,18 @@ import { durationSeconds } from "@/lib/metrics";
 import type { AuthContext, JobStatusTransition, TimelineEvent, TimelineRow, UserRef } from "@/lib/types";
 import { NotFoundError } from "@/server/errors";
 import { parseInput } from "@/server/services/_shared";
-import { jobFiltersWhere, JobListFiltersSchema } from "./jobs";
-import { loadOrgSettingsRow, loadUserRefs, loadVisibleJob, orgDayBounds, selectRawJobs, visibleJobsWhere, type RawJobRow } from "./scope";
+import { jobFiltersWhere, JobListFiltersSchema, listViewScope, type ListScopeOptions } from "./jobs";
+import {
+  loadOrgSettingsRow,
+  loadUserRefs,
+  loadVisibleJob,
+  orgDayBounds,
+  redactOtherEditor,
+  selectRawJobs,
+  viewScopeWhere,
+  visibleJobsWhere,
+  type RawJobRow,
+} from "./scope";
 
 export const TIMELINE_BOTTLENECK_FACTOR = 2;
 /** Minimum baseline for queue stages, so a few hours' wait is never "slow" just because the org is usually quick. */
@@ -58,6 +68,8 @@ export const TimelineQuerySchema = z.object({
   currentEditorId: JobListFiltersSchema.shape.editorId,
   photographerId: JobListFiltersSchema.shape.photographerId,
   priority: JobListFiltersSchema.shape.priority,
+  /** Personal / business view (§8): "mine" = My shoots. Ignored without the scope switch. */
+  scope: JobListFiltersSchema.shape.scope,
 });
 export type TimelineQueryInput = z.input<typeof TimelineQuerySchema>;
 
@@ -190,19 +202,25 @@ export function toTimelineEvent(
   };
 }
 
-function rowJob(raw: RawJobRow): TimelineRow["job"] {
+function rowJob(ctx: AuthContext, raw: RawJobRow): TimelineRow["job"] {
   return {
     id: raw.job.id,
     jobNumber: raw.job.jobNumber,
     name: raw.job.name,
     priority: raw.job.priority,
     dueDate: raw.job.dueDate,
-    editor: raw.editor ? { ...raw.editor } : null,
+    editor: redactOtherEditor(ctx, raw.editor ? { ...raw.editor } : null),
     photographer: raw.photographer ? { ...raw.photographer } : null,
     statusCategory: raw.job.statusCategory,
     client: { id: raw.client.id, name: raw.client.name },
     project: { id: raw.project.id, name: raw.project.name },
   };
+}
+
+/** The job's current holder is "Another editor" for editors with past/created-only access (§2.3). */
+function redactSegment(ctx: AuthContext, raw: RawJobRow, segment: TimelineEvent): TimelineEvent {
+  if (segment.editor === null || raw.job.editorId === null || segment.editor.id !== raw.job.editorId) return segment;
+  return { ...segment, editor: redactOtherEditor(ctx, segment.editor) };
 }
 
 function rangeOf(ctx: AuthContext, from: string | undefined, to: string | undefined, now: string): { from: string; to: string } {
@@ -232,7 +250,7 @@ async function jobFilterSubquery(db: DbLike, ctx: AuthContext, q: z.output<typeo
 }
 
 /** Gantt rows for visible jobs with a (non-terminal) stage overlapping [from, to] (`to` is an end-of-day instant). */
-export async function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<TimelineRow[]> {
+export async function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {}, opts: ListScopeOptions = {}): Promise<TimelineRow[]> {
   const q = parseInput(TimelineQuerySchema, input ?? {});
   const now = ctx.now();
   const range = rangeOf(ctx, q.from, q.to, now);
@@ -240,10 +258,15 @@ export async function getTimelineRows(db: DbLike, ctx: AuthContext, input: unkno
   const conditions: (SQL | undefined)[] = [
     eq(jobStatusTransitions.organisationId, ctx.organisationId),
     visibleJobsWhere(ctx),
+    viewScopeWhere(ctx, listViewScope(ctx, q, opts)),
     lte(jobStatusTransitions.enteredAt, range.to),
     or(isNull(jobStatusTransitions.exitedAt), gt(jobStatusTransitions.exitedAt, range.from)),
     notInArray(jobStatusTransitions.toCategory, [...CATEGORY_GROUPS.TERMINAL]),
-    q.editorId ? eq(jobStatusTransitions.editorIdAtEntry, q.editorId) : undefined,
+    q.editorId
+      ? ctx.role === "editor" && !ctx.canViewTeamJobs && q.editorId !== ctx.userId
+        ? sql`1 = 0` // editors never filter by another editor (§2.3)
+        : eq(jobStatusTransitions.editorIdAtEntry, q.editorId)
+      : undefined,
     q.jobId ? eq(jobStatusTransitions.jobId, q.jobId) : undefined,
     await jobFilterSubquery(db, ctx, q),
   ];
@@ -274,8 +297,8 @@ export async function getTimelineRows(db: DbLike, ctx: AuthContext, input: unkno
     if (!raw) continue;
     const dates = { ...raw.job, openRevisionDueDate: revisionDue.get(id) ?? null };
     rows.push({
-      job: rowJob(raw),
-      segments: transitions.filter((t) => t.jobId === id).map((t) => toTimelineEvent(dates, t, users, baselines, now)),
+      job: rowJob(ctx, raw),
+      segments: transitions.filter((t) => t.jobId === id).map((t) => redactSegment(ctx, raw, toTimelineEvent(dates, t, users, baselines, now))),
     });
   }
 
@@ -314,8 +337,8 @@ export async function getJobTimelineRow(db: DbLike, ctx: AuthContext, jobId: str
   const baselines = await orgCategoryBaselines(db, ctx);
   const dates = { ...job, openRevisionDueDate: (await openRevisionDueDates(db, ctx, [job.id])).get(job.id) ?? null };
   return {
-    job: rowJob(raw),
-    segments: transitions.map((t) => toTimelineEvent(dates, t, users, baselines, now)),
+    job: rowJob(ctx, raw),
+    segments: transitions.map((t) => redactSegment(ctx, raw, toTimelineEvent(dates, t, users, baselines, now))),
   };
 }
 

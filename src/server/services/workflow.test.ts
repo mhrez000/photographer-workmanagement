@@ -109,8 +109,8 @@ async function expectClean() {
   expect(report.structural).toEqual([]);
 }
 
-const ENGINE_INTERNAL = (from: string, to: string) =>
-  to === "assigned" || (to === "ready" && ["accepted", "in_progress", "revision"].includes(from));
+/** roles v2: only → assigned is engine-internal; → ready while an editor holds the job is an unassignment (job.assign_editor). */
+const ENGINE_INTERNAL = (_from: string, to: string) => to === "assigned";
 
 describe("default edges (§4.2)", () => {
   for (const def of DEFAULT_WORKFLOW_TRANSITIONS) {
@@ -118,7 +118,7 @@ describe("default edges (§4.2)", () => {
     it(`${def.from} → ${def.to} ${internal ? "is engine-internal (422 via transitionJobStatus)" : "succeeds with its ledger rows"}`, async () => {
       const { job } = await insertJobFixture(db, ids, { statusKey: def.from, dueDate: "2026-10-20T12:59:59.999Z" });
       if (internal) {
-        const err = await catchErr(moveTo("manager", job.id, def.to));
+        const err = await catchErr(moveTo("coAdmin", job.id, def.to));
         expect(err.status).toBe(422);
         // requiresAssignedEditor edges explain the missing editor first
         expect(["invalid_transition", "editor_required"]).toContain(err.code);
@@ -171,7 +171,7 @@ describe("missing edges", () => {
         if (from.key === to.key || edgeKeys.has(`${from.key}->${to.key}`)) continue;
         if (from.key === "cancelled" && to.key === "new") continue; // computed restore target
         const { job } = await insertJobFixture(db, ids, { statusKey: from.key });
-        const err = await catchErr(moveTo("manager", job.id, to.key, { reason: "x", revision: revisionPayload }));
+        const err = await catchErr(moveTo("coAdmin", job.id, to.key, { reason: "x", revision: revisionPayload }));
         if (err.status !== 422 || err.code !== "invalid_transition") failures.push(`${from.key}->${to.key}: ${err.code}`);
         expect((await jobRow(job.id)).statusId).toBe(ids.statuses[from.key]);
       }
@@ -183,10 +183,10 @@ describe("missing edges", () => {
 describe("override", () => {
   it("lets a manager jump any → any with a reason, flagged is_override", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "new" });
-    expect((await catchErr(moveTo("manager", job.id, "in_progress", { override: true }))).status).toBe(400);
-    expect((await catchErr(moveTo("manager", job.id, "in_progress", { override: true, reason: "Imported" }))).code).toBe("editor_required");
-    await act("manager", assignEditor, job.id, { userId: ids.users.editor1 });
-    const res = await moveTo("manager", job.id, "approved", { override: true, reason: "Imported from the old system" });
+    expect((await catchErr(moveTo("coAdmin", job.id, "in_progress", { override: true }))).status).toBe(400);
+    expect((await catchErr(moveTo("coAdmin", job.id, "in_progress", { override: true, reason: "Imported" }))).code).toBe("editor_required");
+    await act("coAdmin", assignEditor, job.id, { userId: ids.users.editor1 });
+    const res = await moveTo("coAdmin", job.id, "approved", { override: true, reason: "Imported from the old system" });
     expect(res.isOverride).toBe(true);
     const row = (await transitionsOf(job.id)).at(-1);
     expect(row).toMatchObject({ isOverride: true, reason: "Imported from the old system" });
@@ -204,10 +204,10 @@ describe("override", () => {
 describe("actor checks", () => {
   it("assigneeOnly: a past editor may view but not act; a manager acts on behalf", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "assigned", editorId: ids.users.editor2 });
-    await act("manager", assignEditor, job.id, { userId: ids.users.editor1 });
+    await act("coAdmin", assignEditor, job.id, { userId: ids.users.editor1 });
     const err = await catchErr(moveTo("editor2", job.id, "accepted"));
     expect(err.status).toBe(403);
-    const res = await moveTo("manager", job.id, "accepted");
+    const res = await moveTo("coAdmin", job.id, "accepted");
     expect(res.toStatus.category).toBe("accepted");
     expect((await eventsOf(job.id, "job.status_changed")).at(-1)?.metadata.onBehalfOf).toBe(ids.users.editor1);
   });
@@ -217,9 +217,9 @@ describe("actor checks", () => {
     expect((await catchErr(moveTo("editor2", job.id, "accepted"))).status).toBe(404);
     const other = await seedMinimalOrg(db, { slug: "other" });
     const foreign = (await insertJobFixture(db, other, { statusKey: "new" })).job;
-    expect((await catchErr(move("manager", foreign.id, { toStatusId: other.statuses.ready }))).status).toBe(404);
+    expect((await catchErr(move("coAdmin", foreign.id, { toStatusId: other.statuses.ready }))).status).toBe(404);
     // status of another workflow / org → 404
-    expect((await catchErr(move("manager", job.id, { toStatusId: other.statuses.accepted }))).status).toBe(404);
+    expect((await catchErr(move("coAdmin", job.id, { toStatusId: other.statuses.accepted }))).status).toBe(404);
   });
 
   it("photographers act only on their own jobs", async () => {
@@ -268,7 +268,7 @@ describe("ledger invariants", () => {
 
   it("409 on a stale expectedVersion, with the current row", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "new" });
-    const err = await catchErr(as("manager", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toStatusId: ids.statuses.ready, expectedVersion: job.version + 5 })));
+    const err = await catchErr(as("coAdmin", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toStatusId: ids.statuses.ready, expectedVersion: job.version + 5 })));
     expect(err).toBeInstanceOf(ConflictError);
     expect(err.status).toBe(409);
     expect((err as ConflictError<Job>).current?.id).toBe(job.id);
@@ -287,7 +287,7 @@ describe("side effects per category (§4.4)", () => {
   });
 
   it("submitted: milestones, completion ≥ 90, review SLA default (audited), work_submitted notice + link warning", async () => {
-    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", createdByUserId: ids.users.manager });
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", createdByUserId: ids.users.coAdmin });
     const res = await moveTo("editor1", job.id, "submitted");
     const after = await jobRow(job.id);
     expect(after.firstSubmittedAt).toBe(T0);
@@ -300,7 +300,7 @@ describe("side effects per category (§4.4)", () => {
     expect(sla[0].summary).toContain("review SLA");
     expect(res.warnings).toHaveLength(1);
     const recipients = (await db.select().from(notifications).where(eq(notifications.type, "work_submitted"))).map((n) => n.userId);
-    expect(recipients.sort()).toEqual([ids.users.manager, ids.users.photographer1].sort());
+    expect(recipients.sort()).toEqual([ids.users.coAdmin, ids.users.photographer1].sort());
   });
 
   it("an existing review deadline is never overwritten by the SLA", async () => {
@@ -324,7 +324,7 @@ describe("side effects per category (§4.4)", () => {
     await moveTo("photographer1", job.id, "revision", { revision: revisionPayload });
     await as("editor1", (tx, ctx) => startTimer(tx, ctx, { jobId: job.id }));
     expect(await db.select().from(workSessions).where(isNull(workSessions.endedAt))).toHaveLength(1);
-    await act("manager", cancelJob, job.id, { reason: "Client went elsewhere" });
+    await act("coAdmin", cancelJob, job.id, { reason: "Client went elsewhere" });
     const sessions = await db.select().from(workSessions);
     expect(sessions[0]).toMatchObject({ endReason: "auto_status_change" });
     const rev = await first(db.select().from(jobRevisions).where(eq(jobRevisions.jobId, job.id)));
@@ -364,7 +364,7 @@ describe("side effects per category (§4.4)", () => {
 });
 
 describe("decline", () => {
-  it("assigned → ready by the editor: editor removed, previous_editor kept, job_declined to photographer + managers", async () => {
+  it("assigned → ready by the editor: editor removed, previous_editor kept, job_declined to photographer + admins", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "assigned" });
     const res = await as("editor1", (tx, ctx) => declineJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "On leave" }));
     expect(res.toStatus.category).toBe("ready");
@@ -375,20 +375,26 @@ describe("decline", () => {
     expect(closed).toMatchObject({ unassignReason: "declined", unassignedByUserId: ids.users.editor1 });
     expect((await eventsOf(job.id, "job.declined"))[0].metadata.reason).toBe("On leave");
     const recipients = (await db.select().from(notifications).where(eq(notifications.type, "job_declined"))).map((n) => n.userId);
-    expect(recipients.sort()).toEqual([ids.users.manager, ids.users.owner, ids.users.photographer1].sort());
+    expect(recipients.sort()).toEqual([ids.users.coAdmin, ids.users.owner, ids.users.photographer1].sort());
     await expectClean();
   });
 
-  it("is not available to managers (unassign goes through the assignment service)", async () => {
+  it("an admin's move to ready is an unassignment, never a decline (roles v2 §5.2)", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "assigned" });
-    expect((await catchErr(as("manager", (tx, ctx) => declineJob(tx, ctx, { jobId: job.id, expectedVersion: job.version })))).code).toBe("invalid_transition");
+    const res = await as("coAdmin", (tx, ctx) => declineJob(tx, ctx, { jobId: job.id, expectedVersion: job.version }));
+    expect(res.toStatus.category).toBe("ready");
+    const closed = await first(db.select().from(jobAssignments).where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, "editor"))));
+    expect(closed).toMatchObject({ unassignReason: "unassigned", unassignedByUserId: ids.users.coAdmin });
+    expect(await eventsOf(job.id, "job.declined")).toHaveLength(0);
+    expect((await db.select().from(notifications).where(eq(notifications.type, "job_unassigned"))).map((n) => n.userId)).toEqual([ids.users.editor1]);
+    await expectClean();
   });
 });
 
 describe("restore", () => {
   it("returns a cancelled job to the status it was cancelled from", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
-    await moveTo("manager", job.id, "cancelled", { reason: "Paused by client" });
+    await moveTo("coAdmin", job.id, "cancelled", { reason: "Paused by client" });
     fakeClock.advanceDays(1);
     const res = await act("photographer1", restoreJob, job.id);
     expect(res.isRestore).toBe(true);
@@ -399,18 +405,18 @@ describe("restore", () => {
 
   it("falls back to Ready when the editor was deactivated meanwhile", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
-    await moveTo("manager", job.id, "cancelled", { reason: "On hold" });
+    await moveTo("coAdmin", job.id, "cancelled", { reason: "On hold" });
     await db.update(users).set({ isActive: false }).where(eq(users.id, ids.users.editor1));
-    await act("manager", restoreJob, job.id);
+    await act("coAdmin", restoreJob, job.id);
     expect(await jobRow(job.id)).toMatchObject({ statusId: ids.statuses.ready, editorId: null, previousEditorId: ids.users.editor1 });
     await expectClean();
   });
 
   it("transitionJobStatus to the restore target works; any other target is 422", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "review" });
-    await moveTo("manager", job.id, "cancelled", { reason: "x" });
-    expect((await catchErr(moveTo("manager", job.id, "approved"))).code).toBe("invalid_transition");
-    expect((await moveTo("manager", job.id, "review")).isRestore).toBe(true);
+    await moveTo("coAdmin", job.id, "cancelled", { reason: "x" });
+    expect((await catchErr(moveTo("coAdmin", job.id, "approved"))).code).toBe("invalid_transition");
+    expect((await moveTo("coAdmin", job.id, "review")).isRestore).toBe(true);
   });
 });
 
@@ -422,11 +428,11 @@ describe("custom workflow shapes", () => {
       .values({ id, organisationId: ids.organisationId, workflowId: ids.workflowId, key: "final_cut", name: "Final Cut", category: "in_progress", sortOrder, isInitial: false });
     await db
       .insert(workflowTransitions)
-      .values({ organisationId: ids.organisationId, workflowId: ids.workflowId, fromStatusId: id, toStatusId: ids.statuses.submitted, allowedRoles: ["owner", "manager", "editor"], assigneeOnly: true });
+      .values({ organisationId: ids.organisationId, workflowId: ids.workflowId, fromStatusId: id, toStatusId: ids.statuses.submitted, allowedRoles: ["admin", "editor"], assigneeOnly: true });
     if (withEdgeFromAccepted) {
       await db
         .insert(workflowTransitions)
-        .values({ organisationId: ids.organisationId, workflowId: ids.workflowId, fromStatusId: ids.statuses.accepted, toStatusId: id, allowedRoles: ["owner", "manager", "editor"], assigneeOnly: true });
+        .values({ organisationId: ids.organisationId, workflowId: ids.workflowId, fromStatusId: ids.statuses.accepted, toStatusId: id, allowedRoles: ["admin", "editor"], assigneeOnly: true });
     }
     return id;
   }
@@ -453,7 +459,7 @@ describe("custom workflow shapes", () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     const input = { jobId: job.id, workflowId: other.workflowId, toStatusId: other.statuses.in_progress, expectedVersion: job.version };
     expect((await catchErr(as("photographer1", (tx, ctx) => migrateWorkflow(tx, ctx, input)))).status).toBe(403);
-    const res = await as("manager", (tx, ctx) => migrateWorkflow(tx, ctx, input));
+    const res = await as("coAdmin", (tx, ctx) => migrateWorkflow(tx, ctx, input));
     expect(res.job).toMatchObject({ workflowId: other.workflowId, statusId: other.statuses.in_progress });
     expect((await transitionsOf(job.id)).at(-1)).toMatchObject({ kind: "migration", activityEventId: res.eventId });
     expect(await eventsOf(job.id, "job.workflow_migrated")).toHaveLength(1);
@@ -476,6 +482,8 @@ describe("system context & allowed transitions", () => {
     const res = await getAllowedTransitions(db, await ctxOf("editor1"), job.id);
     expect(res.transitions.map((t) => t.label).sort()).toEqual(["Accept", "Decline", "Start"]);
     expect(res.allowedColumns.sort()).toEqual(["in_progress", "new"]);
-    expect((await getAllowedTransitions(db, await ctxOf("manager"), job.id)).transitions.map((t) => t.toStatus.key)).toEqual(["accepted", "in_progress", "cancelled"]);
+    const admin = (await getAllowedTransitions(db, await ctxOf("coAdmin"), job.id)).transitions;
+    expect(admin.map((t) => t.toStatus.key)).toEqual(["ready", "accepted", "in_progress", "cancelled"]);
+    expect(admin.find((t) => t.toStatus.key === "ready")?.label).toBe("Unassign editor");
   });
 });

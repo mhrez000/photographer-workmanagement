@@ -26,7 +26,7 @@ import type { AuthContext, BulkResult, Job } from "@/lib/types";
 import { AssignEditorInput, AssignInput, AssignPhotographerInput, BulkReassignInput, UnassignEditorInput } from "@/lib/validation/jobs";
 import { assertCan } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
-import { ValidationError } from "@/server/errors";
+import { RuleViolationError, ValidationError } from "@/server/errors";
 import { assertVersion, loadUserInOrg, parseInput } from "./_shared";
 import { notify } from "./notifications";
 import {
@@ -90,8 +90,8 @@ export async function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, us
   if (job.statusCategory === "cancelled") throw new ValidationError("Restore the cancelled job before changing its editor");
   if (userId) {
     const target = await loadUserInOrg(tx, ctx, userId);
-    if (!target.isActive) throw new ValidationError(`${target.name} is deactivated and cannot be assigned`);
-    if (target.role !== "editor") throw new ValidationError(`${target.name} is not an editor`);
+    if (!target.isActive) throw new RuleViolationError(`${target.name} is deactivated and cannot be assigned`);
+    if (target.role !== "editor") throw new RuleViolationError(`${target.name} is not an editor`, { formErrors: [], fieldErrors: { userId: ["Must be an editor"] } });
   }
   if (userId === job.editorId) return unchanged;
 
@@ -163,7 +163,12 @@ export interface AssignPhotographerResult {
   assignmentId: string | null;
 }
 
-/** Assigns / replaces / removes the job's photographer (owner, manager or photographer role targets). */
+/**
+ * Assigns / replaces / removes the job's photographer (`job.assign_photographer`:
+ * admins any job; an editor on their own draft job). Targets are allow-listed
+ * (§3.4): an active photographer of the organisation, else 422. Editors cannot
+ * remove the photographer (a job an editor creates always has one).
+ */
 export async function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignPhotographerResult> {
   const p = parseInput(AssignPhotographerInput, input);
   const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
@@ -173,8 +178,12 @@ export async function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknow
   const previous = loaded.photographerId;
   if (p.userId) {
     const target = await loadUserInOrg(tx, ctx, p.userId);
-    if (!target.isActive) throw new ValidationError(`${target.name} is deactivated and cannot be assigned`);
-    if (target.role === "editor") throw new ValidationError(`${target.name} is an editor; choose a photographer, manager or owner`);
+    if (!target.isActive) throw new RuleViolationError(`${target.name} is deactivated and cannot be assigned`);
+    if (target.role !== "photographer") {
+      throw new RuleViolationError(`${target.name} is not a photographer`, { formErrors: [], fieldErrors: { userId: ["Must be a photographer"] } });
+    }
+  } else if (ctx.role === "editor") {
+    throw new ValidationError("A job you created needs a photographer", { formErrors: [], fieldErrors: { userId: ["Required"] } });
   }
   if (p.userId === previous) return { job: loaded, changed: false, previousPhotographerId: previous, assignmentId: null };
 

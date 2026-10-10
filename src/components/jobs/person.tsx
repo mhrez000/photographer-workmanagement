@@ -2,12 +2,12 @@ import * as React from "react";
 import Link from "next/link";
 import { UserRound } from "lucide-react";
 import { Avatar, type AvatarSize } from "@/components/ui/avatar";
-import { ROLE_LABELS } from "@/lib/constants";
+import { roleBadgeLabel } from "@/lib/constants";
 import type { UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** Minimal person shape accepted by the chips (UserRef or a reduced projection). */
-export type PersonRef = Pick<UserRef, "id" | "name"> & Partial<Pick<UserRef, "role" | "avatarColour" | "isActive">>;
+export type PersonRef = Pick<UserRef, "id" | "name"> & Partial<Pick<UserRef, "role" | "avatarColour" | "isActive" | "isAdmin">>;
 
 export interface PersonChipProps {
   user: PersonRef | null;
@@ -42,7 +42,7 @@ export function PersonChip({ user, size = "sm", label, emptyLabel = "Unassigned"
   }
 
   const inactive = user.isActive === false;
-  const roleLabel = user.role ? ROLE_LABELS[user.role] : undefined;
+  const roleLabel = user.role ? roleBadgeLabel({ role: user.role, isAdmin: user.isAdmin }) : undefined;
   const title = [label, user.name, inactive ? "(deactivated)" : null].filter(Boolean).join(" · ");
 
   const body = (

@@ -7,17 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
+import { DEMO_ACCOUNTS, DEMO_PASSWORD } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
 const INITIAL_STATE: LoginFormState = { error: null, fieldErrors: {}, email: "", retryAfterSeconds: null };
 
-const DEMO_PASSWORD = "Password123!";
-const DEMO_ACCOUNTS = [
-  { email: "owner@studio.test", role: "Owner", note: "everything" },
-  { email: "manager1@studio.test", role: "Manager", note: "runs production" },
-  { email: "photographer01@studio.test", role: "Photographer", note: "own jobs" },
-  { email: "editor01@studio.test", role: "Editor", note: "assigned jobs" },
-] as const;
+
 
 export interface LoginFormProps {
   next?: string;
@@ -69,7 +64,14 @@ export function LoginForm({ next, expired = false }: LoginFormProps) {
                 )}
               >
                 <CircleAlert aria-hidden="true" className={cn("mt-0.5 size-4 shrink-0", throttled ? "text-attention" : "text-danger")} />
-                <span>{state.error}</span>
+                <span>
+                  {state.error}
+                  {!throttled ? (
+                    <span className="mt-1 block text-xs text-ink-muted">
+                      Client of a studio? If you can&apos;t sign in, your studio may have turned off portal access.
+                    </span>
+                  ) : null}
+                </span>
               </div>
             ) : null}
 
@@ -124,11 +126,11 @@ export function LoginForm({ next, expired = false }: LoginFormProps) {
               <button
                 type="button"
                 onClick={() => fillDemo(account.email)}
-                className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-surface focus-ring"
+                className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-surface focus-ring sm:flex-row sm:items-center sm:justify-between sm:gap-3"
               >
                 <span className="min-w-0 truncate font-mono text-xs text-ink">{account.email}</span>
-                <span className="shrink-0 text-xs text-ink-muted">
-                  {account.role} · {account.note}
+                <span className="min-w-0 text-xs text-ink-muted sm:shrink-0 sm:text-right">
+                  <span className="font-medium text-ink-secondary">{account.shownAs}</span> · {account.note}
                 </span>
               </button>
             </li>

@@ -13,19 +13,235 @@
 /*  Roles                                                              */
 /* ------------------------------------------------------------------ */
 
-export const ROLES = ["owner", "manager", "photographer", "editor"] as const;
+/**
+ * Roles v2 (docs/ROLES.md §0, §1.1). Exactly three roles. "Admin" is a
+ * property of a photographer (`users.is_admin`), not a role; the persona
+ * (admin / member / editor / client) is derived and never stored.
+ */
+export const ROLES = ["photographer", "editor", "client"] as const;
 export type Role = (typeof ROLES)[number];
 
-export const MANAGEMENT_ROLES: readonly Role[] = ["owner", "manager"];
+/** Roles that use the staff app shell. */
+export const STAFF_ROLES = ["photographer", "editor"] as const;
+export type StaffRole = (typeof STAFF_ROLES)[number];
+
+export const PERSONAS = ["admin", "member", "editor", "client"] as const;
+export type Persona = (typeof PERSONAS)[number];
+
+export const PERSONA_LABELS: Record<Persona, string> = {
+  admin: "Owner / Photographer",
+  member: "Photographer (team member)",
+  editor: "Editor",
+  client: "Client",
+};
+
+/** Short names used by the Roles page columns and compact badges. */
+export const PERSONA_SHORT_LABELS: Record<Persona, string> = {
+  admin: "Owner",
+  member: "Team member",
+  editor: "Editor",
+  client: "Client",
+};
+
+/** Persona of a user row (or anything shaped like one). */
+export function personaOfUser(user: { role: Role; isAdmin?: boolean | null }): Persona {
+  if (user.role === "photographer") return user.isAdmin ? "admin" : "member";
+  return user.role;
+}
+
+/** "Owner / Photographer", "Photographer (team member)", "Editor", "Client". */
+export function personaLabel(user: { role: Role; isAdmin?: boolean | null }): string {
+  return PERSONA_LABELS[personaOfUser(user)];
+}
+
+/**
+ * Role badge text with the optional job title: "Photographer (team member) · Studio manager"
+ * (docs/ROLES.md §6.1, §11).
+ */
+export function displayRoleLabel(user: { role: Role; isAdmin?: boolean | null; title?: string | null }): string {
+  const base = personaLabel(user);
+  const title = user.title?.trim();
+  return title ? `${base} · ${title}` : base;
+}
+
+/**
+ * Badge text for a person whose admin flag may not be loaded (older read models):
+ * the persona label when `isAdmin` is known, else the plain role name — never
+ * guesses "team member" for someone who may be the owner.
+ */
+export function roleBadgeLabel(user: { role: Role; isAdmin?: boolean | null }): string {
+  if (user.role === "photographer" && (user.isAdmin === undefined || user.isAdmin === null)) return "Photographer";
+  return personaLabel(user);
+}
+
+/**
+ * @deprecated roles-v2: use `personaLabel(user)` / `PERSONA_LABELS`. Kept only so
+ * not-yet-ported UI keeps rendering; it cannot tell an admin from a team member.
+ */
+export const ROLE_LABELS: Record<Role, string> = {
+  photographer: "Photographer",
+  editor: "Editor",
+  client: "Client",
+};
+
 export const ASSIGNMENT_ROLES = ["photographer", "editor"] as const;
 export type AssignmentRole = (typeof ASSIGNMENT_ROLES)[number];
 
-export const ROLE_LABELS: Record<Role, string> = {
-  owner: "Owner",
-  manager: "Manager",
-  photographer: "Photographer",
+/** Values allowed in workflow_transitions.allowed_roles (§5). "photographer" includes admins. */
+export const TRANSITION_ROLES = ["admin", "photographer", "editor"] as const;
+export type TransitionRole = (typeof TRANSITION_ROLES)[number];
+export const TRANSITION_ROLE_LABELS: Record<TransitionRole, string> = {
+  admin: "Owner / admins (on any job)",
+  photographer: "Photographers (admins, and team members on jobs they manage)",
+  editor: "Editor (the assigned editor)",
+};
+/** Workflow editor chip text per transition role. */
+export const TRANSITION_ROLE_CHIPS: Record<TransitionRole, string> = {
+  admin: "Owner / admins",
+  photographer: "Photographers",
   editor: "Editor",
 };
+
+/* ------------------------------------------------------------------ */
+/*  Permission switches (docs/ROLES.md §2.2)                           */
+/* ------------------------------------------------------------------ */
+
+/** Team-member (non-admin photographer) switches, in the order the UI lists them. */
+export const MEMBER_FLAGS = [
+  "canCreateJobs",
+  "canAssignEditors",
+  "canReviewSubmissions",
+  "canViewTeamWorkloads",
+  "canViewAllJobs",
+  "canViewAnalytics",
+] as const;
+export type MemberFlag = (typeof MEMBER_FLAGS)[number];
+
+/** Editor switches. `canCreateJobs` is the same column as the member switch. */
+export const EDITOR_FLAGS = ["canCreateJobs", "canViewTeamJobs"] as const;
+export type EditorFlag = (typeof EDITOR_FLAGS)[number];
+
+export type PermissionFlag = MemberFlag | EditorFlag;
+export const PERMISSION_FLAGS = ["canCreateJobs", "canAssignEditors", "canReviewSubmissions", "canViewTeamWorkloads", "canViewAllJobs", "canViewAnalytics", "canViewTeamJobs"] as const satisfies readonly PermissionFlag[];
+
+export interface PermissionFlagMeta {
+  key: PermissionFlag;
+  /** users.<column> */
+  column: string;
+  label: string;
+  /** Plain-English description shown under the checkbox. */
+  description: string;
+  /** Default for a new invite. */
+  inviteDefault: boolean;
+  /** Default the 0003 migration gives existing users (members: v1 behaviour). */
+  migratedDefault: boolean;
+  /** Short tag used in the Roles page matrix ("needs: …"). */
+  short: string;
+}
+
+export const MEMBER_FLAG_META: Record<MemberFlag, PermissionFlagMeta> = {
+  canCreateJobs: {
+    key: "canCreateJobs",
+    column: "can_create_jobs",
+    label: "Create jobs",
+    description: "Can create jobs, clients and projects. They are the photographer on jobs they create.",
+    inviteDefault: true,
+    migratedDefault: true,
+    short: "create",
+  },
+  canAssignEditors: {
+    key: "canAssignEditors",
+    column: "can_assign_editors",
+    label: "Assign editors",
+    description: "Can assign, reassign or unassign editors on their jobs.",
+    inviteDefault: true,
+    migratedDefault: true,
+    short: "assign",
+  },
+  canReviewSubmissions: {
+    key: "canReviewSubmissions",
+    column: "can_review_submissions",
+    label: "Review submissions",
+    description:
+      "Can approve edits, request revisions, deliver, complete and reopen their jobs, share them with the client and reply to client feedback. Also lets them cancel or re-date jobs you assigned to them.",
+    inviteDefault: false,
+    migratedDefault: true,
+    short: "review",
+  },
+  canViewTeamWorkloads: {
+    key: "canViewTeamWorkloads",
+    column: "can_view_team_workloads",
+    label: "View team workload",
+    description: "Can see every editor's current workload and capacity.",
+    inviteDefault: false,
+    migratedDefault: false,
+    short: "workloads",
+  },
+  canViewAllJobs: {
+    key: "canViewAllJobs",
+    column: "can_view_all_jobs",
+    label: "See all jobs",
+    description:
+      "Can see every job in the business, comment on it and switch to the Whole business view. They can change only their own jobs.",
+    inviteDefault: false,
+    migratedDefault: false,
+    short: "all",
+  },
+  canViewAnalytics: {
+    key: "canViewAnalytics",
+    column: "can_view_analytics",
+    label: "See analytics and reports",
+    description: "Can open Insights (analytics, bottlenecks, reports, turnaround), team performance, per-person statistics and CSV exports.",
+    inviteDefault: false,
+    migratedDefault: false,
+    short: "analytics",
+  },
+};
+
+export const EDITOR_FLAG_META: Record<EditorFlag, PermissionFlagMeta> = {
+  canCreateJobs: {
+    key: "canCreateJobs",
+    column: "can_create_jobs",
+    label: "Create jobs",
+    description: "Can create jobs (with a photographer) and pick up jobs they created.",
+    inviteDefault: true,
+    migratedDefault: true,
+    short: "create",
+  },
+  canViewTeamJobs: {
+    key: "canViewTeamJobs",
+    column: "can_view_team_jobs",
+    label: "See other editors' jobs",
+    description:
+      "Read-only access to jobs assigned to other editors, including your own shoots that are being edited. They still can't change them or see editors' workloads.",
+    inviteDefault: false,
+    migratedDefault: false,
+    short: "teamJobs",
+  },
+};
+
+/** The two locked "Always on" rows shown with the member switches (§2.2). */
+export const MEMBER_ALWAYS_ON_ROWS: readonly { label: string; description: string }[] = [
+  { label: "View their own jobs", description: "Always on: jobs they created." },
+  { label: "View jobs assigned to them", description: "Always on: jobs where they are the photographer." },
+];
+
+/** Invite defaults for a new team member (review ✗ → the owner reviews their work). */
+export const MEMBER_INVITE_DEFAULTS: Readonly<Record<MemberFlag, boolean>> = Object.fromEntries(
+  MEMBER_FLAGS.map((f) => [f, MEMBER_FLAG_META[f].inviteDefault]),
+) as Record<MemberFlag, boolean>;
+export const EDITOR_INVITE_DEFAULTS: Readonly<Record<EditorFlag, boolean>> = Object.fromEntries(
+  EDITOR_FLAGS.map((f) => [f, EDITOR_FLAG_META[f].inviteDefault]),
+) as Record<EditorFlag, boolean>;
+
+/* ------------------------------------------------------------------ */
+/*  Personal vs business view (docs/ROLES.md §8)                       */
+/* ------------------------------------------------------------------ */
+
+export const VIEW_SCOPES = ["mine", "business"] as const;
+export type ViewScope = (typeof VIEW_SCOPES)[number];
+export const VIEW_SCOPE_COOKIE = "pwm_scope";
+export const VIEW_SCOPE_LABELS: Record<ViewScope, string> = { mine: "My shoots", business: "Whole business" };
 
 /* ------------------------------------------------------------------ */
 /*  Status categories (semantic keys every workflow status maps to)    */
@@ -128,6 +344,36 @@ export const CATEGORY_GROUPS = {
   EDITOR_WORKING: ["accepted", "in_progress", "revision"] as readonly StatusCategory[],
 } as const;
 
+/** Categories after which the editor's work is frozen and only reviewers act (docs/ROLES.md §3.3 †, §5.2). */
+export const REVIEW_GATED_CATEGORIES: readonly StatusCategory[] = [...CATEGORY_GROUPS.REVIEWER_HOLDS, "approved", "delivered", "completed"];
+
+/** Editor creator draft window categories (docs/ROLES.md §2.1 `isEditorDraft`). */
+export const DRAFT_CATEGORIES: readonly StatusCategory[] = ["new", "ready", "assigned", "accepted"];
+
+/* ------------------------------------------------------------------ */
+/*  Client portal milestones (docs/ROLES.md §7.4)                      */
+/* ------------------------------------------------------------------ */
+
+export const CLIENT_MILESTONES = ["booked", "shot", "editing", "delivered"] as const;
+export type ClientMilestone = (typeof CLIENT_MILESTONES)[number];
+export const CLIENT_MILESTONE_LABELS: Record<ClientMilestone, string> = {
+  booked: "Booked",
+  shot: "Shot",
+  editing: "Editing",
+  delivered: "Delivered",
+};
+/** Category groups the milestone mapping (`clientMilestone` in src/lib/portal.ts) keys on. */
+export const CLIENT_MILESTONE_CATEGORIES = {
+  /** Booked / Shot (decided by the shoot day in the org timezone). */
+  preEditing: ["new", "ready", "assigned", "accepted"] as readonly StatusCategory[],
+  editing: ["in_progress", "submitted", "review", "revision", "resubmitted", "approved"] as readonly StatusCategory[],
+  delivered: ["delivered", "completed"] as readonly StatusCategory[],
+} as const;
+export const CLIENT_MILESTONE_UPDATING_LABEL = "Updating your delivery";
+export const CLIENT_MILESTONE_CANCELLED_LABEL = "Cancelled";
+/** A cancelled shared job stays visible in the portal (as Cancelled) for this many days. */
+export const PORTAL_CANCELLED_VISIBLE_DAYS = 30;
+
 export const KANBAN_COLUMN_META: Record<KanbanColumn, { label: string; categories: readonly StatusCategory[] }> = {
   new: { label: "New", categories: ["new", "ready"] },
   assigned: { label: "Assigned", categories: ["assigned", "accepted"] },
@@ -169,25 +415,44 @@ export const LINK_KIND_META: Record<LinkKind, { label: string; finishedWork: boo
   other: { label: "Other", finishedWork: false },
 };
 
-/** Link kinds an editor may add (photographers/managers may add any kind). */
+/** Link kinds an editor may add while working (photographers may add any kind; draft also allows raw_files, §3.3). */
 export const EDITOR_LINK_KINDS: readonly LinkKind[] = ["editing_workspace", "finished_files", "gallery", "reference", "other"];
 
 /** URL protocols accepted for external links (rejects javascript:, data:, …). */
 export const ALLOWED_URL_PROTOCOLS = ["http:", "https:"] as const;
 
-export const NOTE_KINDS = ["photographer", "editor", "internal", "revision", "client"] as const;
+export const NOTE_KINDS = ["photographer", "editor", "internal", "revision", "client", "delivery"] as const;
 export type NoteKind = (typeof NOTE_KINDS)[number];
 
-export const NOTE_KIND_META: Record<NoteKind, { label: string; managementOnly: boolean }> = {
-  photographer: { label: "Photographer notes", managementOnly: false },
-  editor: { label: "Editor notes", managementOnly: false },
-  internal: { label: "Internal notes", managementOnly: true },
-  revision: { label: "Revision notes", managementOnly: false },
-  client: { label: "Client notes", managementOnly: false },
+export interface NoteKindMeta {
+  label: string;
+  /** Admin-only to write (and to read on jobs a member does not manage). */
+  managementOnly: boolean;
+  /** Shown to the client in the portal (only `delivery`). */
+  clientVisible: boolean;
+  /** Editors may read it on jobs they can see (§2.4: never `internal` / `client`). */
+  editorReadable: boolean;
+}
+
+export const NOTE_KIND_META: Record<NoteKind, NoteKindMeta> = {
+  photographer: { label: "Photographer notes", managementOnly: false, clientVisible: false, editorReadable: true },
+  editor: { label: "Editor notes", managementOnly: false, clientVisible: false, editorReadable: true },
+  internal: { label: "Internal notes", managementOnly: true, clientVisible: false, editorReadable: false },
+  revision: { label: "Revision notes", managementOnly: false, clientVisible: false, editorReadable: true },
+  /** Internal notes ABOUT the client — never shown to the client or to editors. */
+  client: { label: "Client notes", managementOnly: false, clientVisible: false, editorReadable: false },
+  delivery: { label: "Delivery notes (visible to the client)", managementOnly: false, clientVisible: true, editorReadable: true },
 };
 
-export const COMMENT_KINDS = ["comment", "question", "clarification_request", "revision_response"] as const;
+/** Automations can never publish client-visible text (§6.3). */
+export const AUTOMATION_NOTE_KINDS = ["photographer", "editor", "internal", "revision", "client"] as const satisfies readonly NoteKind[];
+
+export const COMMENT_KINDS = ["comment", "question", "clarification_request", "revision_response", "client_feedback"] as const;
 export type CommentKind = (typeof COMMENT_KINDS)[number];
+/** Comment kinds staff may start a thread with (`client_feedback` threads are started by clients, §7.5). */
+export const STAFF_COMMENT_KINDS = ["comment", "question", "clarification_request", "revision_response"] as const satisfies readonly CommentKind[];
+/** Kinds that count as an editor question (§6.4). */
+export const QUESTION_COMMENT_KINDS = ["question", "clarification_request"] as const satisfies readonly CommentKind[];
 
 /** Minutes after posting during which the author may still edit a comment. */
 export const COMMENT_EDIT_WINDOW_MINUTES = 15;
@@ -267,6 +532,9 @@ export const EVENT_TYPES = [
   "automation.ran",
   // settings / personalisation
   "settings.updated", "notification.sent",
+  // roles v2: sharing, portal, admin
+  "job.client_sharing_changed", "project.client_sharing_changed", "link.client_sharing_changed",
+  "client.portal_updated", "user.admin_changed", "settings.primary_owner_changed",
   "saved_view.created", "saved_view.updated", "saved_view.deleted", "dashboard.updated",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -293,6 +561,10 @@ export const NOTIFICATION_TYPES = [
   "comment_added", "mentioned", "revision_requested", "work_submitted", "work_resubmitted", "work_approved",
   "job_overdue", "review_overdue", "job_completed", "job_reopened", "job_cancelled", "job_paused",
   "workload_threshold", "editor_unavailable", "automation",
+  // roles v2 (§7.5, §7.6): staff + client types
+  "client_feedback", "client_work_shared", "client_work_delivered", "client_feedback_reply",
+  // roles v2 (§4.3): an editor created a job and left it without an editor
+  "job_created",
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
@@ -318,7 +590,16 @@ export const NOTIFICATION_TYPE_META: Record<NotificationType, { label: string; /
   workload_threshold: { label: "Editor workload threshold", mandatory: false },
   editor_unavailable: { label: "Editor unavailable", mandatory: false },
   automation: { label: "Automation notices", mandatory: false },
+  client_feedback: { label: "Client left feedback", mandatory: false },
+  client_work_shared: { label: "Work shared with you", mandatory: false },
+  client_work_delivered: { label: "Your work is ready", mandatory: false },
+  client_feedback_reply: { label: "The studio replied", mandatory: false },
+  job_created: { label: "Editor created a job that needs an editor", mandatory: false },
 };
+
+/** The only notification types client users receive (and staff never do). */
+export const CLIENT_NOTIFICATION_TYPES = ["client_work_shared", "client_work_delivered", "client_feedback_reply"] as const satisfies readonly NotificationType[];
+export type ClientNotificationType = (typeof CLIENT_NOTIFICATION_TYPES)[number];
 
 /* ------------------------------------------------------------------ */
 /*  Automations                                                        */
@@ -391,6 +672,8 @@ export type QuickFilter = (typeof QUICK_FILTERS)[number];
 export const DASHBOARD_WIDGET_TYPES = [
   "kpis", "my_workload", "team_workload", "due_today", "overdue", "recent_activity", "editor_performance",
   "completion_rate", "revision_rate", "bottlenecks", "calendar", "recent_completed", "my_performance",
+  // roles v2 (§9)
+  "my_shoots", "awaiting_review", "revisions", "upcoming_deadlines", "questions", "turnaround",
 ] as const;
 export type DashboardWidgetType = (typeof DASHBOARD_WIDGET_TYPES)[number];
 
@@ -435,14 +718,18 @@ export interface DefaultTransitionDef {
   from: string;
   to: string;
   label: string;
-  allowedRoles: readonly Role[];
+  allowedRoles: readonly TransitionRole[];
   requiresAssignedEditor?: boolean;
   assigneeOnly?: boolean;
   isReopen?: boolean;
 }
 
-const OMP: readonly Role[] = ["owner", "manager", "photographer"];
-const OME: readonly Role[] = ["owner", "manager", "editor"];
+/** Reviewer-side edges: photographers (admins any job, members on jobs they manage). */
+const OMP: readonly TransitionRole[] = ["photographer"];
+/** Editor-side edges: the assigned editor, or an admin on their behalf. */
+const OME: readonly TransitionRole[] = ["admin", "editor"];
+/** Generated `→ cancelled` edges (seed, insertDefaultWorkflow, generateCancelEdges). */
+export const CANCEL_EDGE_ROLES: readonly TransitionRole[] = ["photographer"];
 
 /**
  * Default transition table (ARCHITECTURE.md §4.2). `cancelled` is reachable
@@ -457,7 +744,7 @@ export const DEFAULT_WORKFLOW_TRANSITIONS: readonly DefaultTransitionDef[] = [
   { from: "ready", to: "new", label: "Back to draft", allowedRoles: OMP },
   { from: "assigned", to: "accepted", label: "Accept", allowedRoles: OME, assigneeOnly: true },
   { from: "assigned", to: "in_progress", label: "Start", allowedRoles: OME, assigneeOnly: true },
-  { from: "assigned", to: "ready", label: "Decline / unassign", allowedRoles: ["owner", "manager", "photographer", "editor"], assigneeOnly: true },
+  { from: "assigned", to: "ready", label: "Decline / unassign", allowedRoles: ["photographer", "editor"], assigneeOnly: true },
   { from: "accepted", to: "in_progress", label: "Start", allowedRoles: OME, assigneeOnly: true },
   { from: "accepted", to: "assigned", label: "Reassigned", allowedRoles: OMP },
   { from: "accepted", to: "ready", label: "Unassign", allowedRoles: OMP },
@@ -504,117 +791,189 @@ export const DEFAULT_JOB_TYPES: readonly { name: string; colour: string; default
 ];
 
 /* ------------------------------------------------------------------ */
-/*  Permissions: action → roles that can EVER perform it               */
-/*  Ownership / scope conditions live in src/server/auth/permissions.ts */
+/*  Permissions: action → personas that can EVER perform it            */
+/*  Scope conditions live in src/server/auth/permissions.ts (POLICY)   */
 /* ------------------------------------------------------------------ */
 
 /**
- * Scope legend (documented per action in ARCHITECTURE.md §3):
- *   any      — every resource in the organisation
- *   own      — job where photographerId = me or createdByUserId = me
- *   assigned — job where editorId = me (current editor)
- *   past     — job where I appear in job_assignments history (read-only)
- *   team     — job whose photographer/editor shares an active team with me (gated by org/user flags)
- *   self     — my own row / notification / view / layout
+ * docs/ROLES.md §3.3. A member/editor is listed when a switch can enable the
+ * action. Scope legend (§3.2): any · managed · controls · assigned · working ·
+ * past · created · draft · teamView · visible · shared (client) · self · ⚑flag.
  */
+const A = "admin";
+const M = "member";
+const E = "editor";
+const C = "client";
+const STAFF_P = [A, M, E] as const;
+const AM = [A, M] as const;
+const AE = [A, E] as const;
+const ONLY_A = [A] as const;
+const ALL_P = [A, M, E, C] as const;
+
 export const PERMISSIONS = {
-  "job.create": ["owner", "manager", "photographer"],
-  "job.view": ["owner", "manager", "photographer", "editor"],
-  "job.view_history": ["owner", "manager", "photographer", "editor"],
-  "job.edit_fields": ["owner", "manager", "photographer"],
-  "job.edit_completion_percent": ["owner", "manager", "photographer", "editor"],
-  "job.set_due_date": ["owner", "manager", "photographer"],
-  "job.set_review_due_date": ["owner", "manager", "photographer"],
-  "job.set_delivery_due_date": ["owner", "manager", "photographer"],
-  "job.set_priority": ["owner", "manager", "photographer"],
-  "job.assign_photographer": ["owner", "manager", "photographer"],
-  "job.assign_editor": ["owner", "manager", "photographer"],
-  "job.bulk_reassign": ["owner", "manager"],
-  "job.transition": ["owner", "manager", "photographer", "editor"],
-  "job.transition_override": ["owner", "manager"],
-  "job.accept": ["owner", "manager", "editor"],
-  "job.decline": ["editor"],
-  "job.start": ["owner", "manager", "editor"],
-  "job.pause": ["owner", "manager", "editor"],
-  "job.submit": ["owner", "manager", "editor"],
-  "job.begin_review": ["owner", "manager", "photographer"],
-  "job.approve": ["owner", "manager", "photographer"],
-  "job.deliver": ["owner", "manager", "photographer"],
-  "job.complete": ["owner", "manager", "photographer"],
-  "job.cancel": ["owner", "manager", "photographer"],
-  "job.reopen": ["owner", "manager", "photographer"],
-  "job.restore": ["owner", "manager", "photographer"],
-  "job.migrate_workflow": ["owner", "manager"],
-  "revision.request": ["owner", "manager", "photographer"],
-  "revision.withdraw": ["owner", "manager", "photographer"],
-  "revision.resolve": ["owner", "manager", "editor"],
-  "link.add": ["owner", "manager", "photographer", "editor"],
-  "link.replace": ["owner", "manager", "photographer", "editor"],
-  "link.remove": ["owner", "manager", "photographer", "editor"],
-  "note.read": ["owner", "manager", "photographer", "editor"],
-  "note.add": ["owner", "manager", "photographer", "editor"],
-  "note.edit": ["owner", "manager", "photographer", "editor"],
-  "note.archive": ["owner", "manager", "photographer", "editor"],
-  "comment.add": ["owner", "manager", "photographer", "editor"],
-  "comment.edit": ["owner", "manager", "photographer", "editor"],
-  "comment.delete": ["owner", "manager", "photographer", "editor"],
-  "comment.mention": ["owner", "manager", "photographer", "editor"],
-  "timer.use": ["owner", "manager", "photographer", "editor"],
-  "timer.view_others": ["owner", "manager", "photographer"],
-  "analytics.view": ["owner", "manager", "photographer"],
-  "analytics.view_self": ["owner", "manager", "photographer", "editor"],
-  "workloads.view_team": ["owner", "manager", "photographer", "editor"],
-  "workloads.view_self": ["owner", "manager", "photographer", "editor"],
-  "performance.view": ["owner", "manager"],
-  "bottlenecks.view": ["owner", "manager", "photographer"],
-  "reports.view": ["owner", "manager", "photographer"],
-  "export.csv": ["owner", "manager", "photographer"],
-  "team.view_members": ["owner", "manager", "photographer", "editor"],
-  "activity.view_global": ["owner", "manager", "photographer", "editor"],
-  "activity.view_management_events": ["owner", "manager"],
-  "client.view": ["owner", "manager", "photographer", "editor"],
-  "client.create": ["owner", "manager", "photographer"],
-  "client.edit": ["owner", "manager", "photographer"],
-  "client.archive": ["owner", "manager"],
-  "project.view": ["owner", "manager", "photographer", "editor"],
-  "project.create": ["owner", "manager", "photographer"],
-  "project.edit": ["owner", "manager", "photographer"],
-  "project.archive": ["owner", "manager"],
-  "user.view": ["owner", "manager", "photographer", "editor"],
-  "user.invite": ["owner", "manager"],
-  "user.edit": ["owner", "manager", "photographer", "editor"],
-  "user.change_role": ["owner", "manager"],
-  "user.deactivate": ["owner", "manager"],
-  "user.reactivate": ["owner", "manager"],
-  "user.set_capacity": ["owner", "manager"],
-  "user.set_visibility_flags": ["owner", "manager"],
-  "user.reset_password": ["owner", "manager", "photographer", "editor"],
-  "user.anonymise": ["owner"],
-  "team.manage": ["owner", "manager"],
-  "settings.view": ["owner", "manager"],
-  "settings.manage": ["owner"],
-  "workflow.view": ["owner", "manager"],
-  "workflow.manage": ["owner"],
-  "job_type.manage": ["owner", "manager"],
-  "automation.manage": ["owner", "manager"],
-  "automation.view_runs": ["owner", "manager"],
-  "notification.read": ["owner", "manager", "photographer", "editor"],
-  "notification.prefs": ["owner", "manager", "photographer", "editor"],
-  "saved_view.manage": ["owner", "manager", "photographer", "editor"],
-  "saved_view.share": ["owner", "manager"],
-  "dashboard.customise": ["owner", "manager", "photographer", "editor"],
-  "search.global": ["owner", "manager", "photographer", "editor"],
-  "system.sweep": ["owner", "manager"],
-  "system.integrity": ["owner"],
-} as const satisfies Record<string, readonly Role[]>;
+  // gates
+  "app.access": STAFF_P,
+  "portal.access": [C],
+  // jobs
+  "job.create": STAFF_P,
+  "job.view": STAFF_P,
+  "job.view_history": STAFF_P,
+  "job.edit_fields": STAFF_P,
+  "job.change_client": STAFF_P,
+  "job.edit_completion_percent": STAFF_P,
+  "job.set_due_date": STAFF_P,
+  "job.set_review_due_date": STAFF_P,
+  "job.set_delivery_due_date": STAFF_P,
+  "job.set_priority": STAFF_P,
+  "job.assign_photographer": AE,
+  "job.assign_editor": AM,
+  "job.claim": [E],
+  "job.bulk_reassign": ONLY_A,
+  "job.transition": STAFF_P,
+  "job.transition_override": ONLY_A,
+  "job.accept": AE,
+  "job.decline": [E],
+  "job.start": AE,
+  "job.pause": AE,
+  "job.submit": AE,
+  "job.begin_review": AM,
+  "job.approve": AM,
+  "job.deliver": AM,
+  "job.complete": AM,
+  "job.cancel": AM,
+  "job.reopen": AM,
+  "job.restore": AM,
+  "job.migrate_workflow": ONLY_A,
+  "job.share_with_client": AM,
+  "revision.request": AM,
+  "revision.withdraw": AM,
+  "revision.resolve": AE,
+  // links
+  "link.add": STAFF_P,
+  "link.replace": STAFF_P,
+  "link.remove": STAFF_P,
+  "link.share_with_client": AM,
+  // notes
+  "note.read": STAFF_P,
+  "note.add": STAFF_P,
+  "note.edit": STAFF_P,
+  "note.archive": STAFF_P,
+  // comments
+  "comment.add": STAFF_P,
+  "comment.mention": STAFF_P,
+  "comment.edit": ALL_P,
+  "comment.delete": ALL_P,
+  "client_feedback.reply": AM,
+  "client_feedback.to_revision": AM,
+  // time
+  "timer.use": STAFF_P,
+  "timer.view_others": AM,
+  // insights
+  "analytics.view": AM,
+  "analytics.view_self": STAFF_P,
+  "workloads.view_team": AM,
+  "workloads.view_self": STAFF_P,
+  "performance.view": AM,
+  "bottlenecks.view": AM,
+  "reports.view": AM,
+  "export.csv": AM,
+  "team.view_members": AM,
+  "activity.view_global": STAFF_P,
+  "activity.view_management_events": ONLY_A,
+  // clients & projects
+  "client.view": STAFF_P,
+  "client.create": AM,
+  "client.edit": AM,
+  "client.archive": ONLY_A,
+  "client.manage_portal": ONLY_A,
+  "project.view": STAFF_P,
+  "project.create": STAFF_P,
+  "project.edit": AM,
+  "project.archive": ONLY_A,
+  "project.share_with_client": ONLY_A,
+  // users
+  "user.view": STAFF_P,
+  "user.invite": ONLY_A,
+  "user.edit": ALL_P,
+  "user.change_email": ONLY_A,
+  "user.change_role": ONLY_A,
+  "user.deactivate": ONLY_A,
+  "user.reactivate": ONLY_A,
+  "user.set_capacity": ONLY_A,
+  "user.set_permissions": ONLY_A,
+  "user.set_admin": ONLY_A,
+  "user.reset_password": ALL_P,
+  "user.anonymise": ONLY_A,
+  "org.transfer_primary_owner": ONLY_A,
+  // admin
+  "team.manage": ONLY_A,
+  "settings.view": ONLY_A,
+  "settings.manage": ONLY_A,
+  "workflow.view": ONLY_A,
+  "workflow.manage": ONLY_A,
+  "job_type.manage": ONLY_A,
+  "automation.manage": ONLY_A,
+  "automation.view_runs": ONLY_A,
+  // personal
+  "notification.read": ALL_P,
+  "notification.prefs": ALL_P,
+  "saved_view.manage": STAFF_P,
+  "saved_view.share": ONLY_A,
+  "dashboard.customise": STAFF_P,
+  "search.global": STAFF_P,
+  "view.business_scope": AM,
+  // portal
+  "portal.view_job": [C],
+  "portal.give_feedback": [C],
+  // system
+  "system.sweep": ONLY_A,
+  "system.integrity": ONLY_A,
+} as const satisfies Record<string, readonly Persona[]>;
 
 export type Action = keyof typeof PERMISSIONS;
 export const ACTIONS = Object.keys(PERMISSIONS) as readonly Action[];
 
-/** True when the role can ever perform the action (scope conditions still apply). */
-export function roleMayEver(role: Role, action: Action): boolean {
-  return (PERMISSIONS[action] as readonly Role[]).includes(role);
+/** True when the persona can ever perform the action (scope conditions still apply). */
+export function personaMayEver(persona: Persona, action: Action): boolean {
+  return (PERMISSIONS[action] as readonly Persona[]).includes(persona);
 }
+
+/** Actions denied to anyone who edited the job (hard self-review rule, §3.4). */
+export const SELF_REVIEW_ACTIONS = [
+  "job.begin_review",
+  "job.approve",
+  "job.deliver",
+  "job.complete",
+  "revision.request",
+  "revision.withdraw",
+  "client_feedback.to_revision",
+] as const satisfies readonly Action[];
+
+/** Actions on the primary owner only the primary owner may perform on themselves (§3.4). */
+export const PRIMARY_OWNER_PROTECTED_ACTIONS = [
+  "user.set_admin",
+  "user.change_role",
+  "user.deactivate",
+  "user.change_email",
+  "user.reset_password",
+  "user.edit",
+  "user.anonymise",
+] as const satisfies readonly Action[];
+
+/* ------------------------------------------------------------------ */
+/*  Login page demo accounts (docs/ROLES.md §13)                       */
+/* ------------------------------------------------------------------ */
+
+export const DEMO_ACCOUNTS: readonly { email: string; shownAs: string; note: string }[] = [
+  { email: "owner@studio.test", shownAs: "Owner / Photographer", note: "runs the business, shoots, reviews" },
+  { email: "photographer01@studio.test", shownAs: "Photographer (team member)", note: "sees all jobs, workloads & analytics" },
+  { email: "photographer02@studio.test", shownAs: "Photographer (team member)", note: "own jobs; reviews their own shoots" },
+  { email: "photographer12@studio.test", shownAs: "Photographer (team member)", note: "junior: the owner reviews her work" },
+  { email: "editor01@studio.test", shownAs: "Editor", note: "assigned jobs; can create jobs" },
+  { email: "editor02@studio.test", shownAs: "Editor", note: "+ sees other editors' jobs" },
+  { email: "client@studio.test", shownAs: "Client", note: "Harbourline Realty portal" },
+];
+export const DEMO_PASSWORD = "Password123!";
 
 /* ------------------------------------------------------------------ */
 /*  Keyboard shortcuts (spec §26)                                      */
@@ -661,8 +1020,12 @@ export const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#22c55e", "#f59
 /* ------------------------------------------------------------------ */
 
 /** Why an event was written; recorded in every activity_events.metadata (ARCHITECTURE.md §5). */
-export const EVENT_CAUSES = ["user", "automation", "sweep", "seed", "recompute"] as const;
+export const EVENT_CAUSES = ["user", "automation", "sweep", "seed", "recompute", "migration"] as const;
 export type EventCause = (typeof EVENT_CAUSES)[number];
+
+/** Business reason of a sharing event (`metadata.reason`); the cause stays the actor cause (§1.1). */
+export const SHARING_REASONS = ["manual", "delivered", "client_changed", "project_client_changed"] as const;
+export type SharingReason = (typeof SHARING_REASONS)[number];
 
 /* ------------------------------------------------------------------ */
 /*  External link providers (job_links.provider, derived from host)    */

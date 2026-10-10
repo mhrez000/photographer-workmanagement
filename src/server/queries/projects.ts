@@ -1,17 +1,19 @@
 /**
  * Projects list + detail (ARCHITECTURE.md §10 `/projects`, `/projects/[id]`).
  *
- * project.view: O/M/P any project of the org; editors only projects that
- * have at least one job visible to them (others look missing → 404).
- * Job counts and job rows always go through `visibleJobsWhere(ctx)` for
- * photographers/editors, and are org-wide for management.
+ * project.view: admins and team members any project of the org; editors only
+ * projects that have at least one job visible to them (others look missing →
+ * 404); clients never (403 — the portal has its own reads). Job counts and
+ * job rows always go through `visibleJobsWhere(ctx)` (admins and ⚑all members
+ * see every job; the view-scope switch does not apply, docs/ROLES.md §8).
  */
 import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { first, type DbLike } from "@/db/index";
 import { clients, jobs, projects } from "@/db/schema";
 import type { AuthContext, ProjectDetail, ProjectListItem } from "@/lib/types";
-import { assertCan, can, isManagement, visibleJobsWhere } from "@/server/auth/permissions";
+import { assertCan, can, visibleJobsWhere } from "@/server/auth/permissions";
+import { resolveMetricScope } from "@/server/view-scope";
 import { NotFoundError } from "@/server/errors";
 import { loadProjectInOrg, parseInput, userRef } from "@/server/services/_shared";
 import { binaryAsc, EMPTY_COUNTS, jobCountsBy, loadUserRefs } from "./metrics";
@@ -47,6 +49,7 @@ const PROJECT_FIELDS = {
   createdByUserId: projects.createdByUserId,
   createdAt: projects.createdAt,
   version: projects.version,
+  sharedWithClient: projects.sharedWithClient,
   clientName: clients.name,
 };
 
@@ -65,7 +68,7 @@ export async function listProjects(db: DbLike, ctx: AuthContext, input: unknown 
     .innerJoin(clients, eq(clients.id, projects.clientId))
     .where(and(...parts))
     .orderBy(binaryAsc(projects.name), asc(projects.id));
-  const counts = await jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible" });
+  const counts = await jobCountsBy(db, ctx, "projectId", { scope: resolveMetricScope(ctx, null).metric });
   return rows.map((r) => toItem(r, counts.get(r.id)));
 }
 
@@ -78,6 +81,7 @@ function toItem(row: ProjectSelectRow, counts = EMPTY_COUNTS): ProjectListItem {
 
 /** `GET /api/projects/:id` → ProjectDetail with the visible jobs table. Foreign / not visible → 404. */
 export async function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: string): Promise<ProjectDetail> {
+  assertCan(ctx, "project.view");
   const project = await loadProjectInOrg(db, ctx, projectId);
   const hasVisibleJob =
     ctx.role === "editor"
@@ -88,7 +92,7 @@ export async function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: 
     assertCan(ctx, "project.view");
   }
   const client = await first(db.select({ id: clients.id, name: clients.name }).from(clients).where(eq(clients.id, project.clientId)));
-  const counts = await jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible", where: eq(jobs.projectId, project.id) });
+  const counts = await jobCountsBy(db, ctx, "projectId", { scope: resolveMetricScope(ctx, null).metric, where: eq(jobs.projectId, project.id) });
   const createdBy = project.createdByUserId ? ((await loadUserRefs(db, ctx, [project.createdByUserId])).get(project.createdByUserId) ?? null) : null;
   const jobRows = await selectJobRows(db, ctx, { where: eq(jobs.projectId, project.id), limit: DETAIL_JOB_LIMIT });
   return {
@@ -103,6 +107,7 @@ export async function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: 
       createdByUserId: project.createdByUserId,
       createdAt: project.createdAt,
       version: project.version,
+      sharedWithClient: project.sharedWithClient,
     },
     client: { id: project.clientId, name: client?.name ?? "" },
     counts: { ...(counts.get(project.id) ?? EMPTY_COUNTS) },

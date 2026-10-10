@@ -65,27 +65,32 @@ import {
   RestoreInput,
   TransitionInput,
   optionalDeadlineToIso,
+  type DeliveryInputValue,
   type RevisionInputValue,
 } from "@/lib/validation/jobs";
 import {
   EDITOR_REQUIRED_CATEGORIES,
-  actionForMove,
+  EDITOR_REQUIRED_REASON,
+  actionsForMove,
   allowedKanbanColumns,
   allowedMoves,
   availableActions,
+  deniedMoveAction,
   edgeDenialReason,
   findEdge,
   generateCancelEdges,
   isActiveCategory,
   isEditorWorking,
   isLateral,
+  moveDeniedMessage,
   resolveTargetStatus,
   restoreTargetOf,
   type AllowedMove,
   type EdgeLike,
   type WorkflowJobLike,
 } from "@/lib/workflow";
-import { assertCan, can } from "@/server/auth/permissions";
+import { assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
+import { loadJobRef } from "@/server/auth/job-ref";
 import { recordEvent } from "@/server/audit";
 import {
   AmbiguousTargetError,
@@ -95,13 +100,13 @@ import {
   ForbiddenError,
   InvalidTransitionError,
   NotFoundError,
+  RuleViolationError,
   ValidationError,
 } from "@/server/errors";
 import {
   assertVersion,
   jobPermissionRef,
-  loadJobInOrg,
-  loadPastEditorIds,
+  loadCommentInOrg,
   loadStatusInWorkflow,
   loadUserInOrg,
   loadWorkflowInOrg,
@@ -110,7 +115,8 @@ import {
   statusRef,
   withTx,
 } from "./_shared";
-import { managersOf, notify } from "./notifications";
+import { adminsOf, notify } from "./notifications";
+import { runDeliveryStep } from "./sharing";
 import { closeRunningSessionForUser, closeSessionsForJob, startTimer, type WorkSessionClosedBy } from "./timeTracking";
 
 /* ------------------------------------------------------------------ */
@@ -225,12 +231,36 @@ export interface VisibleJob {
   ref: JobPermissionRef;
 }
 
-/** Job in the actor's org that the actor may view; otherwise 404 (existence never leaks). */
+/**
+ * Job in the actor's org that the actor may view; otherwise 404 (existence
+ * never leaks). The ref carries every fact (`loadJobRef`: past editors for the
+ * self-review rule, `draftClosed`, project sharing).
+ */
 export async function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): Promise<VisibleJob> {
-  const job = await loadJobInOrg(db, ctx, jobId);
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
+  const { job, ref } = await loadJobRef(db, ctx, jobId);
   if (!can(ctx, "job.view", ref)) throw new NotFoundError("Job");
   return { job, ref };
+}
+
+/**
+ * Actor gate for every user-initiated status move, run right after the job is
+ * loaded and BEFORE the target resolution, the `expectedVersion` check and the
+ * state preconditions (§5.2 steps 3-6 before step 2): `job.transition` on the
+ * job is necessary for every move (cancel / restore / reopen and the editor
+ * actions are all narrower), so a reader without it — a ⚑teamJobs editor, a
+ * member with ⚑all on a job they do not manage — always gets 403, never a 409
+ * carrying the row or a 422 about the job's state. System contexts pass
+ * (their edges are checked per move).
+ */
+export function assertMayMoveJob(ctx: AuthContext, ref: JobPermissionRef): void {
+  if (ctx.isSystem || can(ctx, "job.transition", ref)) return;
+  throw new ForbiddenError("job.transition", moveDeniedMessage(ctx));
+}
+
+/** Full ref of `job` (an in-memory row of this transaction) with the facts re-read from the ledgers. */
+export async function freshJobRef(db: DbLike, ctx: AuthContext, job: Job): Promise<JobPermissionRef> {
+  const { ref } = await loadJobRef(db, ctx, job.id);
+  return jobRefFromRow(job, { pastEditorIds: ref.pastEditorIds ?? [], draftClosed: ref.draftClosed, projectSharedWithClient: ref.projectSharedWithClient });
 }
 
 /** The job shape the pure workflow helpers need. */
@@ -284,7 +314,7 @@ function systemMoves(ctx: AuthContext, job: WorkflowJobLike, graph: WorkflowGrap
     if (edge.archivedAt !== null || edge.fromStatusId !== current.id) continue;
     const to = graph.statuses.find((s) => s.id === edge.toStatusId);
     if (!to || to.archivedAt !== null || seen.has(to.id)) continue;
-    if (actionForMove(ctx, current.category, to.category, edge.isReopen) === null) continue;
+    if (actionsForMove(ctx, current.category, to.category, edge.isReopen, job) === null) continue;
     if (edgeDenialReason(ctx, job, edge) !== null) continue;
     const isReopen = edge.isReopen || (current.category === "completed" && to.category !== "completed");
     seen.add(to.id);
@@ -339,7 +369,7 @@ export async function resolveTransitionTarget(
   }
   const category = target.toCategory;
   if (!category) throw new NotFoundError("Status");
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
+  const ref = await freshJobRef(db, ctx, job);
   const candidates = movesFor(ctx, await toWorkflowJob(db, job, ref), graph).filter((m) => m.toStatus.category === category);
   if (candidates.length === 1) return statusIn(graph, candidates[0].toStatus.id);
   if (candidates.length > 1) {
@@ -740,6 +770,8 @@ export interface ApplyMoveOptions {
   resolutionNote?: string | null;
   /** System contexts only: `metadata.cause` on the events. */
   cause?: EventCause;
+  /** Delivery step payload (docs/ROLES.md §7.3); only on a delivering move, else 422. */
+  delivery?: DeliveryInputValue | null;
 }
 
 export interface TransitionResult {
@@ -757,6 +789,8 @@ export interface TransitionResult {
   revisionId: string | null;
   /** Non-blocking guard messages (e.g. submitted without a finished-files link). */
   warnings: string[];
+  /** Delivery step outcome (delivering moves only). */
+  delivery?: { jobShared: boolean; sharedLinkIds: string[]; clientVisible: boolean; visibleLinkCount: number };
 }
 
 const EDITOR_SIDE_TARGETS: readonly StatusCategory[] = ["accepted", "in_progress", "submitted", "resubmitted"];
@@ -765,21 +799,29 @@ function deniedError(ctx: AuthContext, job: WorkflowJobLike, current: WorkflowSt
   const edge = findEdge(graph.edges, current.id, target.id);
   const lateral = isLateral(current, target);
   const isCancel = target.category === "cancelled";
+  // Actor before state (§5.2): without `job.transition` on this job every move is 403, whatever the graph says.
+  if (!ctx.isSystem && !can(ctx, "job.transition", job)) return new ForbiddenError("job.transition", moveDeniedMessage(ctx));
   if (current.category === "cancelled") {
     return new InvalidTransitionError(current.name, target.name, "A cancelled job can only be restored to the status it was cancelled from");
   }
   if (!edge && !lateral && !isCancel) return new InvalidTransitionError(current.name, target.name);
   if (edge) {
     const reason = edgeDenialReason(ctx, job, edge);
-    if (reason === "Assign an active editor first") return new EditorRequiredError();
-    if (reason) return new ForbiddenError("job.transition", reason);
-    const action = actionForMove(ctx, current.category, target.category, edge.isReopen);
-    if (action === null) {
+    if (reason && reason !== EDITOR_REQUIRED_REASON) return new ForbiddenError("job.transition", reason);
+    if (actionsForMove(ctx, current.category, target.category, edge.isReopen, job) === null) {
       return new InvalidTransitionError(current.name, target.name, `"${target.name}" is set by assigning or unassigning an editor`);
     }
-    return new ForbiddenError(action);
+    // The move's own permission (job.reopen, job.approve, …) before the requires-editor precondition.
+    const denied = deniedMoveAction(ctx, job, current.category, target.category, edge.isReopen);
+    if (denied) return new ForbiddenError(denied);
+    if (reason === EDITOR_REQUIRED_REASON) return new EditorRequiredError();
+    return new ForbiddenError("job.transition");
   }
-  if (isCancel) return isActiveCategory(current.category) ? new ForbiddenError("job.cancel") : new InvalidTransitionError(current.name, target.name);
+  if (isCancel) {
+    return isActiveCategory(current.category)
+      ? new ForbiddenError(deniedMoveAction(ctx, job, current.category, "cancelled", false) ?? "job.cancel")
+      : new InvalidTransitionError(current.name, target.name);
+  }
   return new ForbiddenError("job.transition");
 }
 
@@ -796,7 +838,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
   if (target.workflowId !== job.workflowId) throw new NotFoundError("Status");
   if (target.id === current.id) throw new InvalidTransitionError(current.name, target.name, `The job is already in "${current.name}"`);
 
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(tx, job.id) : undefined);
+  const ref = await freshJobRef(tx, ctx, job);
   const wjob = await toWorkflowJob(tx, job, ref);
 
   let isOverride = false;
@@ -833,6 +875,14 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
   }
 
   // ---- step 5: guards ----
+  // Delivery payload: only on a delivering move (-> delivered, or -> completed never delivered).
+  const delivering = opts.mode === "user" && (target.category === "delivered" || (target.category === "completed" && before.deliveredAt === null));
+  if (opts.delivery && !delivering) {
+    throw new RuleViolationError("Delivery options are only allowed when delivering the job", {
+      formErrors: [],
+      fieldErrors: { delivery: ["Only allowed when delivering"] },
+    });
+  }
   const reason = opts.reason?.trim() || opts.revision?.reason?.trim() || null;
   const needsReason = isOverride || isReopen || (opts.mode === "user" && target.category === "cancelled");
   if (needsReason && !reason) {
@@ -846,13 +896,22 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
     });
   }
 
+  // "Turn into revision request" (docs/ROLES.md §7.5): the quoted client thread must be on this job.
+  let fromFeedbackCommentId: string | null = null;
+  if (entersRevision && opts.revision?.fromFeedbackCommentId) {
+    const feedback = await loadCommentInOrg(tx, ctx, opts.revision.fromFeedbackCommentId);
+    if (feedback.jobId !== job.id || feedback.kind !== "client_feedback") throw new NotFoundError("Comment");
+    assertCan(ctx, "client_feedback.to_revision", ref);
+    fromFeedbackCommentId = feedback.rootCommentId ?? feedback.id;
+  }
+
   // Revision payload naming another editor → reassign first (same tx).
   const requestedAssignee = entersRevision ? (opts.revision?.assigneeUserId ?? null) : null;
   if (requestedAssignee && requestedAssignee !== job.editorId) {
     assertCan(ctx, "job.assign_editor", ref);
     const editor = await loadUserInOrg(tx, ctx, requestedAssignee);
-    if (!editor.isActive) throw new ValidationError("The revision assignee is deactivated");
-    if (editor.role !== "editor") throw new ValidationError("The revision assignee must be an editor");
+    if (!editor.isActive) throw new RuleViolationError("The revision assignee is deactivated");
+    if (editor.role !== "editor") throw new RuleViolationError("The revision assignee must be an editor");
     job = (await swapEditor(tx, ctx, job, editor.id, { reason: "Revision assignee", batchId: opts.batchId })).job;
   }
 
@@ -860,6 +919,8 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
   let declined = false;
   if (CATEGORY_GROUPS.UNASSIGNED.includes(target.category) && job.editorId && opts.mode !== "internal") {
     declined = ctx.userId !== null && ctx.userId === job.editorId && current.category === "assigned";
+    // Defence in depth (docs/ROLES.md §5.2 step 7): a move that drops someone else's editor is an unassignment.
+    if (!declined && opts.mode === "user") assertCan(ctx, "job.assign_editor", ref);
     job = (
       await swapEditor(tx, ctx, job, null, {
         unassignReason: declined ? "declined" : "unassigned",
@@ -1072,7 +1133,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
 
   // ---- step 8: events ----
   const onBehalfOf =
-    (ctx.role === "owner" || ctx.role === "manager") && !ctx.isSystem && EDITOR_SIDE_TARGETS.includes(target.category) && job.editorId && job.editorId !== ctx.userId
+    isAdmin(ctx) && !ctx.isSystem && EDITOR_SIDE_TARGETS.includes(target.category) && job.editorId && job.editorId !== ctx.userId
       ? job.editorId
       : undefined;
   const causeMeta = ctx.isSystem && opts.cause ? { cause: opts.cause } : {};
@@ -1151,7 +1212,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
         dueDate: optionalDeadlineToIso(p.dueDate, tz) ?? null,
         assigneeUserId: job.editorId,
       },
-      metadata: meta({ revisionId, transitionId, revisionNumber }),
+      metadata: meta({ revisionId, transitionId, revisionNumber, ...(fromFeedbackCommentId ? { fromFeedbackCommentId } : {}) }),
     });
     await tx.update(jobRevisions).set({ activityEventId: revEvent }).where(eq(jobRevisions.id, revisionId));
     if (p.instructions) {
@@ -1190,13 +1251,14 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
       await sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId], `${job.jobNumber} was restored`, evt);
     } else if (isReopen) {
       const evt = await milestone("job.reopened", "reopened", { reason, ...released }, { completedAt: before.completedAt }, { statusId: target.id, category: target.category });
-      const extra = ctx.role === "photographer" ? await managersOf(tx, ctx.organisationId) : [];
+      // A team member reopened: admins hear about it too (docs/ROLES.md §6.2).
+      const extra = ctx.role === "photographer" && !isAdmin(ctx) ? await adminsOf(tx, ctx.organisationId) : [];
       await sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId, ...extra], `${job.jobNumber} was reopened`, evt);
     }
     if (declined) {
       const evt = await milestone("job.declined", "declined", { reason, previousEditorId: before.editorId });
-      const managers = await managersOf(tx, ctx.organisationId);
-      await sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...managers], `${job.jobNumber} was declined by the editor`, evt);
+      const admins = await adminsOf(tx, ctx.organisationId);
+      await sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...admins], `${job.jobNumber} was declined by the editor`, evt);
     }
     switch (target.category) {
       case "accepted":
@@ -1266,6 +1328,15 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
     }
   }
 
+  // ---- delivery step (docs/ROLES.md §7.3): share the job / links, tell the client ----
+  let deliveryOutcome: TransitionResult["delivery"];
+  if (delivering) {
+    const step = await runDeliveryStep(tx, ctx, job, ref, opts.delivery, transitionId);
+    job = step.job;
+    deliveryOutcome = { jobShared: step.jobShared, sharedLinkIds: step.sharedLinkIds, clientVisible: step.clientVisible, visibleLinkCount: step.visibleLinkCount };
+    if (step.clientVisible && step.visibleLinkCount === 0) warnings.push("The client will see Delivered with nothing to open");
+  }
+
   // ---- optional timer ----
   if (
     opts.startTimer &&
@@ -1289,6 +1360,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
     isLateral: lateral,
     revisionId: revisionId ?? resolved?.revisionId ?? null,
     warnings,
+    ...(deliveryOutcome ? { delivery: deliveryOutcome } : {}),
   };
 }
 
@@ -1299,7 +1371,8 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
 /** §4.3 — the only public writer of `jobs.status_id`. */
 export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(TransitionInput, input);
-  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertMayMoveJob(ctx, ref);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const target = await resolveTransitionTarget(tx, ctx, job, graph, p);
   assertVersion(job, p.expectedVersion);
@@ -1309,6 +1382,7 @@ export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unkno
     override: p.override,
     revision: p.revision ?? null,
     startTimer: p.startTimer,
+    delivery: p.delivery ?? null,
     cause: ctx.isSystem ? p.cause : undefined,
   });
 }
@@ -1324,7 +1398,8 @@ export async function transitionLoadedJob(
   target: { toStatusId?: string | null; toCategory?: StatusCategory | null },
   opts: Omit<ApplyMoveOptions, "mode"> = {},
 ): Promise<TransitionResult> {
-  const { job } = await loadVisibleJob(tx, ctx, jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, jobId);
+  assertMayMoveJob(ctx, ref);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const status = await resolveTransitionTarget(tx, ctx, job, graph, target);
   return applyMove(tx, ctx, job, status, graph, { ...opts, mode: "user" });
@@ -1390,7 +1465,8 @@ export async function getAvailableActions(db: DbLike, ctx: AuthContext, jobId: s
 /** Restore a cancelled job to the status it was cancelled from (initial status if archived). */
 export async function restoreJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(RestoreInput, input);
-  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertMayMoveJob(ctx, ref);
   assertVersion(job, p.expectedVersion);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const current = statusIn(graph, job.statusId);
@@ -1487,11 +1563,12 @@ export async function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown):
 async function moveToCategory(
   tx: Tx,
   ctx: AuthContext,
-  p: { jobId: string; expectedVersion: number; toStatusId?: string; reason?: string | null; startTimer?: boolean },
+  p: { jobId: string; expectedVersion: number; toStatusId?: string; reason?: string | null; startTimer?: boolean; delivery?: DeliveryInputValue },
   category: StatusCategory,
   extra: { revision?: RevisionInputValue | null } = {},
 ): Promise<TransitionResult> {
-  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertMayMoveJob(ctx, ref);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: category });
   if (target.category !== category) {
@@ -1503,6 +1580,7 @@ async function moveToCategory(
     reason: p.reason,
     startTimer: p.startTimer,
     revision: extra.revision ?? null,
+    delivery: p.delivery ?? null,
   });
 }
 

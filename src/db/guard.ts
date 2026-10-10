@@ -1,8 +1,10 @@
 /**
- * DB-level integrity guards — thin view over the custom migration
- * `drizzle/0001_guards.sql`, which is the SINGLE source of truth (PL/pgSQL
- * functions + triggers, applied by every migrate: PGlite auto-migrate,
- * makeTestDb(), `npm run db:migrate`, `npm run db:migrate:remote`).
+ * DB-level integrity guards — thin view over the custom migrations
+ * `drizzle/0001_guards.sql` and `drizzle/0003_roles_v2_data.sql` (roles v2:
+ * users_keep_admin, users_client_link, org_primary_owner), which are the
+ * SINGLE source of truth (PL/pgSQL functions + triggers, applied by every
+ * migrate: PGlite auto-migrate, makeTestDb(), `npm run db:migrate`,
+ * `npm run db:migrate:remote`).
  *
  * Layers of protection (ARCHITECTURE.md §5.4):
  *   1. append-only ledgers: activity_events (no UPDATE, no DELETE at all)
@@ -22,25 +24,28 @@ import path from "node:path";
 import { sql } from "drizzle-orm";
 import { execRows, type DbLike } from "./index";
 
-export const GUARD_MIGRATION_FILE = "0001_guards.sql";
+/** Custom migrations that install guard triggers, in apply order. */
+export const GUARD_MIGRATION_FILES = ["0001_guards.sql", "0003_roles_v2_data.sql"] as const;
+/** @deprecated use GUARD_MIGRATION_FILES (roles v2 added a second guards file). */
+export const GUARD_MIGRATION_FILE = GUARD_MIGRATION_FILES[0];
 
 export interface GuardDefinition {
   /** Trigger name (unique per table in Postgres; unique overall here). */
   name: string;
   table: string;
-  /** "row" = the 28 row-level guards ported from SQLite; "truncate" = statement-level TRUNCATE guards. */
+  /** "row" = the 31 row-level guards (28 ported from SQLite + 3 roles v2); "truncate" = statement-level TRUNCATE guards. */
   level: "row" | "truncate";
 }
 
-/** Path of the guards migration (DRIZZLE_MIGRATIONS_DIR or ./drizzle). */
-export function guardMigrationPath(): string {
+/** Path of a guards migration (DRIZZLE_MIGRATIONS_DIR or ./drizzle); default the first one. */
+export function guardMigrationPath(file: string = GUARD_MIGRATION_FILES[0]): string {
   const dir = process.env.DRIZZLE_MIGRATIONS_DIR?.trim() || "drizzle";
-  return path.resolve(process.cwd(), dir, GUARD_MIGRATION_FILE);
+  return path.resolve(process.cwd(), dir, file);
 }
 
-/** The guard migration's SQL text. */
+/** Every guard migration's SQL text, concatenated in apply order. */
 export function guardSql(): string {
-  return fs.readFileSync(guardMigrationPath(), "utf8");
+  return GUARD_MIGRATION_FILES.map((f) => fs.readFileSync(guardMigrationPath(f), "utf8")).join(String.fromCharCode(10));
 }
 
 /** Every trigger the guards migration creates, in file order. */
@@ -53,10 +58,10 @@ export function parseGuards(text: string = guardSql()): GuardDefinition[] {
   return out;
 }
 
-/** All guard triggers (28 row-level + the TRUNCATE guards). */
+/** All guard triggers (31 row-level + the TRUNCATE guards). */
 export const GUARDS: readonly GuardDefinition[] = parseGuards();
 
-/** The 28 row-level integrity rules (parity with the former SQLite triggers). */
+/** The 31 row-level integrity rules (28 from the former SQLite triggers + 3 roles v2 user/org guards). */
 export const ROW_GUARDS: readonly GuardDefinition[] = GUARDS.filter((g) => g.level === "row");
 
 /** Tables that carry at least one guard. */

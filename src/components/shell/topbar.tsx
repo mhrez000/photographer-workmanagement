@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
+import type { ViewScope } from "@/lib/constants";
+import { ScopeSwitch } from "./scope-switch";
 import { UserMenu } from "./user-menu";
 import type { ShellUser } from "./types";
 
@@ -26,6 +28,11 @@ export interface TopbarProps {
   onOpenSearch: () => void;
   primaryAction?: QuickAction;
   logoutAction: string;
+  /**
+   * Personal vs business view (docs/ROLES.md §8): the resolved scope for viewers
+   * who may switch (`view.business_scope`), else null/undefined (no switch).
+   */
+  viewScope?: ViewScope | null;
 }
 
 function formatCount(count: number): string {
@@ -45,6 +52,7 @@ export function Topbar({
   onOpenSearch,
   primaryAction,
   logoutAction,
+  viewScope = null,
 }: TopbarProps) {
   const resolved = heading ?? (match ? { title: match.item.label, eyebrow: match.group.label } : null);
   const eyebrow = resolved?.eyebrow;
@@ -54,7 +62,7 @@ export function Topbar({
   return (
     <header
       className={cn(
-        "sticky top-0 z-20 flex h-(--topbar-height) shrink-0 items-center gap-2 border-b border-border px-3 sm:px-4 lg:px-6",
+        "sticky top-0 z-(--z-topbar) flex h-(--topbar-height) shrink-0 items-center gap-2 border-b border-border px-3 sm:px-4 lg:px-6",
         "bg-canvas/85 backdrop-blur supports-[backdrop-filter]:bg-canvas/75",
       )}
     >
@@ -76,6 +84,7 @@ export function Topbar({
       </div>
 
       <div className="flex items-center gap-1 sm:gap-1.5">
+        {viewScope ? <ScopeSwitch scope={viewScope} className="mr-1 hidden md:inline-flex" /> : null}
         <button
           type="button"
           onClick={onOpenSearch}
@@ -83,6 +92,8 @@ export function Topbar({
           aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
           className={cn(
             "hidden h-9 w-56 items-center gap-2 rounded-md border border-border bg-surface px-3 text-sm text-ink-muted shadow-xs md:flex xl:w-72",
+            // Leave room for the scope switch on tablet widths.
+            viewScope && "w-40 lg:w-48",
             "transition-[border-color,box-shadow] duration-(--motion-fast) hover:border-border-hover hover:text-ink focus-ring",
           )}
         >
@@ -128,7 +139,7 @@ export function Topbar({
           </>
         ) : null}
 
-        <UserMenu user={user} logoutAction={logoutAction} className="ml-0.5" />
+        <UserMenu user={user} logoutAction={logoutAction} viewScope={viewScope} nameFrom={viewScope ? "xl" : "sm"} className="ml-0.5" />
       </div>
     </header>
   );

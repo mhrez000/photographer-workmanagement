@@ -250,6 +250,8 @@ async function collectReport(tx: Tx, organisationId?: string): Promise<Integrity
     else structural.push({ check: "job_has_events", jobId: j.id, detail: "no activity_events for job" });
   }
 
+  structural.push(...(await rolesV2Invariants(tx, organisationId)));
+
   return {
     checkedAt: new Date().toISOString(),
     jobsChecked: jobs.length,
@@ -257,6 +259,78 @@ async function collectReport(tx: Tx, organisationId?: string): Promise<Integrity
     structural,
     ok: drift.length === 0 && structural.length === 0,
   };
+}
+
+/**
+ * Roles v2 invariants (docs/ROLES.md §1.4). Org-level rows carry `jobId: null`.
+ * The CHECK constraints and the users_keep_admin / users_client_link /
+ * org_primary_owner triggers enforce most of these; this is the belt and braces
+ * report (and the only check for rows loaded with guards off by db:seed:remote).
+ */
+async function rolesV2Invariants(tx: Tx, organisationId?: string): Promise<IntegrityReport["structural"]> {
+  const out: IntegrityReport["structural"] = [];
+  const org = (alias: string): SQL => (organisationId ? sql`AND ${sql.raw(alias)}.organisation_id = ${organisationId}` : sql``);
+
+  const noAdmin = await execRows<{ id: string }>(
+    tx,
+    sql`SELECT o.id FROM organisations o WHERE NOT EXISTS (
+          SELECT 1 FROM users a WHERE a.organisation_id = o.id AND a.role = 'photographer' AND a.is_admin AND a.is_active) ${organisationId ? sql`AND o.id = ${organisationId}` : sql``}`,
+  );
+  for (const r of noAdmin) out.push({ check: "org_has_active_admin", jobId: null, detail: `organisation ${r.id} has no active admin` });
+
+  const badPrimary = await execRows<{ organisation_id: string; primary_owner_user_id: string | null }>(
+    tx,
+    sql`SELECT s.organisation_id, s.primary_owner_user_id FROM organisation_settings s
+         WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.primary_owner_user_id AND u.organisation_id = s.organisation_id
+                             AND u.role = 'photographer' AND u.is_admin AND u.is_active) ${org("s")}`,
+  );
+  for (const r of badPrimary) {
+    out.push({ check: "org_primary_owner_valid", jobId: null, detail: `organisation ${r.organisation_id}: primary owner ${r.primary_owner_user_id ?? "null"} is not an active admin` });
+  }
+
+  const badDefault = await execRows<{ organisation_id: string; default_photographer_user_id: string }>(
+    tx,
+    sql`SELECT s.organisation_id, s.default_photographer_user_id FROM organisation_settings s
+         WHERE s.default_photographer_user_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.default_photographer_user_id AND u.organisation_id = s.organisation_id
+                             AND u.role = 'photographer') ${org("s")}`,
+  );
+  for (const r of badDefault) {
+    out.push({ check: "org_default_photographer_valid", jobId: null, detail: `organisation ${r.organisation_id}: default photographer ${r.default_photographer_user_id} is not a photographer of the organisation` });
+  }
+
+  const badClientUsers = await execRows<{ id: string }>(
+    tx,
+    sql`SELECT u.id FROM users u WHERE u.role = 'client'
+          AND NOT EXISTS (SELECT 1 FROM clients c WHERE c.id = u.client_id AND c.organisation_id = u.organisation_id) ${org("u")}`,
+  );
+  for (const r of badClientUsers) out.push({ check: "client_user_client_in_org", jobId: null, detail: `client user ${r.id} is not linked to a client of their organisation` });
+
+  const badEdges = await execRows<{ id: string; allowed_roles: unknown }>(
+    tx,
+    sql`SELECT t.id, t.allowed_roles FROM workflow_transitions t
+         WHERE (jsonb_typeof(t.allowed_roles) <> 'array' OR jsonb_array_length(t.allowed_roles) = 0
+                OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.allowed_roles) = 'array' THEN t.allowed_roles ELSE '[]'::jsonb END) r
+                            WHERE r #>> '{}' NOT IN ('admin', 'photographer', 'editor'))) ${org("t")}`,
+  );
+  for (const r of badEdges) out.push({ check: "transition_roles_valid", jobId: null, detail: `transition ${r.id} allowed_roles ${JSON.stringify(r.allowed_roles)}` });
+
+  const legacy = await execRows<{ id: string; role: string }>(
+    tx,
+    sql`SELECT u.id, u.role FROM users u WHERE u.role NOT IN ('photographer', 'editor', 'client') ${org("u")}`,
+  );
+  for (const r of legacy) out.push({ check: "no_legacy_roles", jobId: null, detail: `user ${r.id} has role ${r.role}` });
+
+  const roleMismatch = await execRows<{ id: string; created_by_role: string; creator_role: string }>(
+    tx,
+    sql`SELECT j.id, j.created_by_role, e.metadata->>'creatorRole' AS creator_role FROM jobs j
+          JOIN activity_events e ON e.job_id = j.id AND e.event_type = 'job.created'
+         WHERE e.metadata ? 'creatorRole' AND e.metadata->>'creatorRole' <> j.created_by_role ${org("j")}`,
+  );
+  for (const r of roleMismatch) {
+    out.push({ check: "job_created_by_role_matches", jobId: r.id, detail: `jobs.created_by_role=${r.created_by_role} job.created creatorRole=${r.creator_role}` });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */

@@ -21,7 +21,7 @@ export const BOTTLENECK_META: Record<BottleneckKind, BottleneckMeta> = {
     label: "Review bottleneck",
     icon: Hourglass,
     rule: (s) => `${plural(s.reviewBottleneckMinJobs, "job")} or more waiting for review longer than ${h(s.reviewBottleneckHours)}.`,
-    fix: "Clear the review queue, or delegate reviews to another manager.",
+    fix: "Clear the review queue, or turn on Review submissions for the job's photographer.",
   },
   editor_overloaded: {
     label: "Editing bottleneck",

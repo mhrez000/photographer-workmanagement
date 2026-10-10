@@ -181,7 +181,7 @@ describe("timeline query slow stages", () => {
         organisationId: ids.organisationId,
         jobId: j.job.id,
         revisionNumber: 1,
-        requestedByUserId: ids.users.manager,
+        requestedByUserId: ids.users.coAdmin,
         reason: "Colour",
         description: "warmer",
         dueDate: ago(H),

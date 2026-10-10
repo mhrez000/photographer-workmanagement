@@ -250,7 +250,7 @@ function PersonCard({ person: p, role, href, showStats }: { person: DirectoryPer
           )}
         </dl>
       ) : (
-        <p className="text-sm text-ink-muted">{showStats ? "No activity yet." : "Workload figures are visible to managers."}</p>
+        <p className="text-sm text-ink-muted">{showStats ? "No activity yet." : "Workload figures are visible to the owner and admins."}</p>
       )}
 
       {p.workload ? (

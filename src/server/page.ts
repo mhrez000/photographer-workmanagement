@@ -24,10 +24,19 @@ export interface PageContext {
   db: DbLike;
 }
 
-/** Current user context, or redirect to /login. */
+/** Current STAFF context, or redirect to /login (signed out) or /portal (client users, docs/ROLES.md §7.8). */
 export async function pageContext(): Promise<PageContext> {
   const ctx = await getOptionalContext();
   if (!ctx) redirect("/login?expired=1");
+  if (ctx.role === "client") redirect("/portal");
+  return { ctx, db: getDb() };
+}
+
+/** Current CLIENT context for /portal pages, or redirect to /login (signed out) or /dashboard (staff). */
+export async function portalPageContext(): Promise<PageContext> {
+  const ctx = await getOptionalContext();
+  if (!ctx) redirect("/login?expired=1");
+  if (ctx.role !== "client") redirect("/dashboard");
   return { ctx, db: getDb() };
 }
 

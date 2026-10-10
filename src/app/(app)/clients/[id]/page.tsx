@@ -10,6 +10,7 @@ import { EditClientDialog } from "@/components/production/client-form";
 import { JobsDoneBar, CountsInline } from "@/components/production/counts";
 import { ProductionJobsTable } from "@/components/production/jobs-table";
 import { PageContainer } from "@/components/shell";
+import { ClientPortalSection } from "@/components/sharing/sections";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -201,6 +202,8 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
               </div>
             </dl>
           </SectionCard>
+
+          <ClientPortalSection ctx={ctx} db={db} clientId={client.id} />
 
           {activity ? (
             <SectionCard

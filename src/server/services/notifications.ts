@@ -28,7 +28,7 @@ import { and, asc, count, eq, inArray, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, type DbLike, type Tx } from "@/db/index";
 import { jobComments, jobs, notifications, userNotificationPrefs, users } from "@/db/schema";
-import { MANAGEMENT_ROLES, NOTIFICATION_TYPE_META, type NotificationType } from "@/lib/constants";
+import { CLIENT_NOTIFICATION_TYPES, NOTIFICATION_TYPE_META, type NotificationType } from "@/lib/constants";
 import type { AuthContext, Notification, User } from "@/lib/types";
 import { assertCan } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
@@ -154,13 +154,18 @@ export async function notify(tx: Tx, ctx: AuthContext, input: NotifyInput): Prom
   if (candidates.length === 0) return empty;
 
   // Active users of this organisation only (id order — what SQLite's PK lookup returned).
+  // Roles v2 hard filter (docs/ROLES.md §6.2): client users receive only CLIENT_NOTIFICATION_TYPES and
+  // staff never receive them; anyone else is skipped silently.
+  const clientType = (CLIENT_NOTIFICATION_TYPES as readonly NotificationType[]).includes(input.type);
   let eligible = (
     await tx
-      .select({ id: users.id })
+      .select({ id: users.id, role: users.role })
       .from(users)
       .where(and(inArray(users.id, candidates), eq(users.organisationId, ctx.organisationId), eq(users.isActive, true)))
       .orderBy(asc(users.id))
-  ).map((r) => r.id);
+  )
+    .filter((r) => (r.role === "client") === clientType)
+    .map((r) => r.id);
   if (eligible.length === 0) return empty;
 
   // Preferences (missing row = enabled; mandatory types ignore prefs).
@@ -242,22 +247,23 @@ export async function notify(tx: Tx, ctx: AuthContext, input: NotifyInput): Prom
 /*  Recipient helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-/** Active owners + managers of the organisation. */
-export async function managersOf(db: DbLike, organisationId: string): Promise<string[]> {
+/** Active admins (owner / co-owners) of the organisation (roles v2 §6.2). */
+export async function adminsOf(db: DbLike, organisationId: string): Promise<string[]> {
   const rows = await db
     .select({ id: users.id })
     .from(users)
-    .where(and(eq(users.organisationId, organisationId), eq(users.isActive, true), inArray(users.role, [...MANAGEMENT_ROLES])));
+    .where(and(eq(users.organisationId, organisationId), eq(users.isActive, true), eq(users.role, "photographer"), eq(users.isAdmin, true)));
   return rows.map((r) => r.id);
 }
 
-/** Active owners of the organisation. */
+/** @deprecated roles-v2: there are no managers; use `adminsOf` (kept so not-yet-ported callers run). */
+export async function managersOf(db: DbLike, organisationId: string): Promise<string[]> {
+  return adminsOf(db, organisationId);
+}
+
+/** @deprecated roles-v2: use `adminsOf` (kept so not-yet-ported callers run). */
 export async function ownersOf(db: DbLike, organisationId: string): Promise<string[]> {
-  const rows = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(eq(users.organisationId, organisationId), eq(users.isActive, true), eq(users.role, "owner")));
-  return rows.map((r) => r.id);
+  return adminsOf(db, organisationId);
 }
 
 export interface JobParticipants {

@@ -1,7 +1,7 @@
 /**
  * Automation rules — CRUD (ARCHITECTURE.md §7, events §5 `automation.*`).
  *
- * `automation.manage` = owner / manager (the system context is refused).
+ * `automation.manage` = admins (the system context is refused).
  * Every mutation: permission → Zod parse → org-scoped loads (404 for foreign
  * ids) → cross-field rules (`automationDefinitionProblems`, 400) → one write
  * → `automation.*` event (management visibility) in the same tx.
@@ -13,6 +13,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray } from "drizzle-orm";
 import { automations, clients, jobTypes, type AutomationAction, type AutomationCondition, type AutomationTrigger } from "@/db/schema";
+import { STAFF_ROLES } from "@/lib/constants";
 import type { AuthContext, Automation, AutomationDryRunResult } from "@/lib/types";
 import {
   ArchiveAutomationInput,
@@ -22,7 +23,7 @@ import {
   UpdateAutomationInput,
   automationDefinitionProblems,
 } from "@/lib/validation/automations";
-import { AutomationActionsSchema, AutomationConditionsSchema, AutomationTriggerSchema, parseJsonColumn } from "@/lib/validation/json";
+import { AutomationActionsReadSchema, AutomationConditionsSchema, AutomationTriggerSchema, parseJsonColumn } from "@/lib/validation/json";
 import { recordEvent } from "@/server/audit";
 import { assertCan } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
@@ -58,7 +59,7 @@ function definitionOf(row: Automation): Definition {
   return {
     trigger: parseJsonColumn(AutomationTriggerSchema, row.trigger, row.trigger),
     conditions: parseJsonColumn(AutomationConditionsSchema, row.conditions, []),
-    actions: parseJsonColumn(AutomationActionsSchema, row.actions, []),
+    actions: parseJsonColumn(AutomationActionsReadSchema, row.actions, []),
   };
 }
 
@@ -73,8 +74,12 @@ async function assertDefinition(db: DbLike, ctx: AuthContext, def: Definition): 
 
   const userIds = new Set<string>();
   const editorTargets = new Set<string>();
+  const notifyTargets = new Set<string>();
   for (const action of def.actions) {
-    if (action.type === "notify" && action.target === "user" && action.userId) userIds.add(action.userId);
+    if (action.type === "notify" && action.target === "user" && action.userId) {
+      userIds.add(action.userId);
+      notifyTargets.add(action.userId);
+    }
     if (action.type === "assign_editor" && action.target === "user" && action.userId) {
       userIds.add(action.userId);
       editorTargets.add(action.userId);
@@ -92,6 +97,10 @@ async function assertDefinition(db: DbLike, ctx: AuthContext, def: Definition): 
   for (const user of people) {
     if (editorTargets.has(user.id) && (user.role !== "editor" || !user.isActive)) {
       throw ruleViolation(`${user.name} is not an active editor`, {}, "actions");
+    }
+    // Allow-list (docs/ROLES.md §3.4): automations only ever name staff (never client users).
+    if (notifyTargets.has(user.id) && (!(STAFF_ROLES as readonly string[]).includes(user.role) || !user.isActive)) {
+      throw ruleViolation(`${user.name} is not an active studio member`, {}, "actions");
     }
   }
   if (jobTypeIds.size > 0) {

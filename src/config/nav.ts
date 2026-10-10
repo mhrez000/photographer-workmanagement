@@ -34,6 +34,7 @@ import {
   Zap,
   Plus,
   FolderPlus,
+  Images,
   type LucideProps,
 } from "lucide-react";
 
@@ -41,10 +42,36 @@ import {
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
-export type RoleKey = "owner" | "manager" | "photographer" | "editor";
+/**
+ * Roles v2 (docs/ROLES.md §10): items no longer carry role lists. Each entry
+ * takes an optional `gate`; the (app) layout computes `NavGates` server-side
+ * with `can()` (src/server/nav-gates.ts → `navGatesFor(ctx)`) and the shell
+ * filters with `navigationFor(gates)` etc. No gate = every staff persona.
+ * Clients never get this navigation: the portal uses `portalNavigation`.
+ */
+export const NAV_GATES = ["admin", "createJobs", "createClients", "teamWork", "directory", "teamWorkloads", "analytics"] as const;
+/**
+ *   admin          isAdmin (settings items, Invite, Settings quick action)
+ *   createJobs     job.create (admin; members / editors with "Create jobs")
+ *   createClients  client.create (admin; members with "Create jobs")
+ *   teamWork       admin ∨ member ⚑all ∨ editor ⚑teamJobs
+ *   directory      team.view_members (admin, members)
+ *   teamWorkloads  workloads.view_team
+ *   analytics      analytics.view (also gates Performance)
+ */
+export type NavGate = (typeof NAV_GATES)[number];
+export type NavGates = Record<NavGate, boolean>;
 
-export const ALL_ROLES: readonly RoleKey[] = ["owner", "manager", "photographer", "editor"];
-export const MANAGEMENT_ROLES: readonly RoleKey[] = ["owner", "manager"];
+/** Every gate closed (a staff persona with no extras sees only ungated items). */
+export const NO_NAV_GATES: NavGates = {
+  admin: false,
+  createJobs: false,
+  createClients: false,
+  teamWork: false,
+  directory: false,
+  teamWorkloads: false,
+  analytics: false,
+};
 
 export interface NavItem {
   /** Stable id (used for keys and analytics). */
@@ -52,10 +79,8 @@ export interface NavItem {
   label: string;
   href: string;
   icon: LucideIcon;
-  /** Allow-list. Omitted = visible to every role. */
-  roles?: readonly RoleKey[];
-  /** Also visible to roles outside `roles` when the viewer holds this per-user/org grant. */
-  grant?: NavGrant;
+  /** Visible only when this gate is open. Omitted = every staff persona. */
+  gate?: NavGate;
   /** Match only the exact pathname (default: prefix match). */
   exact?: boolean;
   /** Optional short description for the command palette / tooltips. */
@@ -64,21 +89,13 @@ export interface NavItem {
   shortcut?: string;
 }
 
-/**
- * Permission grants that open a page to roles outside its default allow-list
- * (ARCHITECTURE §3.2): e.g. a photographer with `can_view_analytics` sees the
- * Insights pages. Computed server-side in the (app) layout from `can()`.
- */
-export type NavGrant = "analytics" | "teamWorkloads" | "teamWork";
-export type NavGrants = Partial<Record<NavGrant, boolean>>;
-
 export interface NavGroup {
   id: string;
   /** Group heading. Omitted for the top-level Dashboard entry. */
   label?: string;
   items: NavItem[];
-  /** Allow-list applied to the whole group. */
-  roles?: readonly RoleKey[];
+  /** Gate applied to the whole group. */
+  gate?: NavGate;
 }
 
 export interface QuickAction {
@@ -86,7 +103,7 @@ export interface QuickAction {
   label: string;
   href: string;
   icon: LucideIcon;
-  roles?: readonly RoleKey[];
+  gate?: NavGate;
   description?: string;
   /** Marks the primary action (rendered as the topbar button). */
   primary?: boolean;
@@ -137,8 +154,7 @@ export const navigation: NavGroup[] = [
         label: "Team Work",
         href: "/workspace/team",
         icon: UsersRound,
-        roles: MANAGEMENT_ROLES,
-        grant: "teamWork",
+        gate: "teamWork",
         description: "What everyone on the team is working on",
       },
       {
@@ -203,6 +219,7 @@ export const navigation: NavGroup[] = [
         label: "Photographers",
         href: "/team/photographers",
         icon: Camera,
+        gate: "directory",
         description: "Photographers and the jobs they own",
       },
       {
@@ -210,6 +227,7 @@ export const navigation: NavGroup[] = [
         label: "Editors",
         href: "/team/editors",
         icon: WandSparkles,
+        gate: "directory",
         description: "Editors, capacity and current queue",
       },
       {
@@ -217,8 +235,7 @@ export const navigation: NavGroup[] = [
         label: "Workloads",
         href: "/team/workloads",
         icon: Gauge,
-        roles: MANAGEMENT_ROLES,
-        grant: "teamWorkloads",
+        gate: "teamWorkloads",
         description: "Who is healthy, near capacity or overloaded",
       },
       {
@@ -226,7 +243,7 @@ export const navigation: NavGroup[] = [
         label: "Performance",
         href: "/team/performance",
         icon: BarChart3,
-        roles: MANAGEMENT_ROLES,
+        gate: "analytics",
         description: "Turnaround, on-time rate and revision rate per person",
       },
     ],
@@ -240,8 +257,7 @@ export const navigation: NavGroup[] = [
         label: "Analytics",
         href: "/insights/analytics",
         icon: Activity,
-        roles: MANAGEMENT_ROLES,
-        grant: "analytics",
+        gate: "analytics",
         description: "Volume, throughput and trends",
       },
       {
@@ -249,8 +265,7 @@ export const navigation: NavGroup[] = [
         label: "Bottlenecks",
         href: "/insights/bottlenecks",
         icon: Funnel,
-        roles: MANAGEMENT_ROLES,
-        grant: "analytics",
+        gate: "analytics",
         description: "Where jobs are getting stuck",
       },
       {
@@ -258,8 +273,7 @@ export const navigation: NavGroup[] = [
         label: "Reports",
         href: "/insights/reports",
         icon: ClipboardList,
-        roles: MANAGEMENT_ROLES,
-        grant: "analytics",
+        gate: "analytics",
         description: "Production, editor, photographer and business reports",
       },
     ],
@@ -287,7 +301,7 @@ export const navigation: NavGroup[] = [
         label: "Organisation",
         href: "/settings/organisation",
         icon: Building2,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "Studio name, timezone and defaults",
       },
       {
@@ -295,7 +309,7 @@ export const navigation: NavGroup[] = [
         label: "Users",
         href: "/settings/users",
         icon: Users,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "Invite people and manage access",
       },
       {
@@ -303,7 +317,7 @@ export const navigation: NavGroup[] = [
         label: "Roles",
         href: "/settings/roles",
         icon: KeyRound,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "What each role can see and do",
       },
       {
@@ -311,7 +325,7 @@ export const navigation: NavGroup[] = [
         label: "Teams",
         href: "/settings/teams",
         icon: UsersRound,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "Groups, leads and memberships",
       },
       {
@@ -319,7 +333,7 @@ export const navigation: NavGroup[] = [
         label: "Workflows",
         href: "/settings/workflows",
         icon: Workflow,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "Statuses and the transitions between them",
       },
       {
@@ -327,7 +341,7 @@ export const navigation: NavGroup[] = [
         label: "Job Types",
         href: "/settings/job-types",
         icon: Tag,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "Real estate, portrait, commercial, …",
       },
       {
@@ -335,7 +349,7 @@ export const navigation: NavGroup[] = [
         label: "Automations",
         href: "/settings/automations",
         icon: Zap,
-        roles: MANAGEMENT_ROLES,
+        gate: "admin",
         description: "When X happens, do Y",
       },
       {
@@ -366,7 +380,7 @@ export const quickActions: QuickAction[] = [
     label: "New job",
     href: "/jobs/new",
     icon: Plus,
-    roles: ["owner", "manager", "photographer"],
+    gate: "createJobs",
     description: "Create a job and assign it",
     primary: true,
   },
@@ -375,7 +389,7 @@ export const quickActions: QuickAction[] = [
     label: "New project",
     href: "/projects/new",
     icon: FolderPlus,
-    roles: MANAGEMENT_ROLES,
+    gate: "createClients",
     description: "Group upcoming jobs for a client",
   },
   {
@@ -383,21 +397,21 @@ export const quickActions: QuickAction[] = [
     label: "New client",
     href: "/clients/new",
     icon: Building2,
-    roles: MANAGEMENT_ROLES,
+    gate: "createClients",
   },
   {
     id: "invite-user",
     label: "Invite a user",
     href: "/settings/users?invite=1",
     icon: UserPlus,
-    roles: MANAGEMENT_ROLES,
+    gate: "admin",
   },
   {
     id: "open-settings",
     label: "Settings",
     href: "/settings/organisation",
     icon: Settings,
-    roles: MANAGEMENT_ROLES,
+    gate: "admin",
   },
 ];
 
@@ -408,7 +422,7 @@ export interface MobileTab {
   icon: LucideIcon;
   href?: string;
   action?: "search" | "more";
-  roles?: readonly RoleKey[];
+  gate?: NavGate;
 }
 
 export const mobileTabs: MobileTab[] = [
@@ -423,30 +437,48 @@ export const mobileTabs: MobileTab[] = [
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-export function isRoleKey(value: string): value is RoleKey {
-  return (ALL_ROLES as readonly string[]).includes(value);
+/** True when the entry has no gate or its gate is open. */
+export function canAccess(entry: { gate?: NavGate }, gates: NavGates): boolean {
+  return entry.gate === undefined || gates[entry.gate] === true;
 }
 
-export function canAccess(entry: { roles?: readonly RoleKey[]; grant?: NavGrant }, role: RoleKey, grants?: NavGrants): boolean {
-  if (!entry.roles || entry.roles.includes(role)) return true;
-  return entry.grant !== undefined && grants?.[entry.grant] === true;
-}
-
-/** The navigation tree with groups/items the role (plus its grants) cannot see removed. */
-export function navigationForRole(role: RoleKey, grants?: NavGrants): NavGroup[] {
+/** The staff navigation tree with the groups/items whose gate is closed removed. */
+export function navigationFor(gates: NavGates): NavGroup[] {
   return navigation
-    .filter((group) => canAccess(group, role, grants))
-    .map((group) => ({ ...group, items: group.items.filter((item) => canAccess(item, role, grants)) }))
+    .filter((group) => canAccess(group, gates))
+    .map((group) => ({ ...group, items: group.items.filter((item) => canAccess(item, gates)) }))
     .filter((group) => group.items.length > 0);
 }
 
-export function quickActionsForRole(role: RoleKey): QuickAction[] {
-  return quickActions.filter((action) => canAccess(action, role));
+export function quickActionsFor(gates: NavGates): QuickAction[] {
+  return quickActions.filter((action) => canAccess(action, gates));
 }
 
-export function mobileTabsForRole(role: RoleKey): MobileTab[] {
-  return mobileTabs.filter((tab) => canAccess(tab, role));
+export function mobileTabsFor(gates: NavGates): MobileTab[] {
+  return mobileTabs.filter((tab) => canAccess(tab, gates));
 }
+
+/** Ids of every visible nav item + quick action (tests, command palette). */
+export function visibleNavIds(gates: NavGates): { nav: string[]; quick: string[]; tabs: string[] } {
+  return {
+    nav: navigationFor(gates).flatMap((g) => g.items.map((i) => i.id)),
+    quick: quickActionsFor(gates).map((a) => a.id),
+    tabs: mobileTabsFor(gates).map((t) => t.id),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Client portal navigation (docs/ROLES.md §10: Your work · Notifications · Account · Log out) */
+/* ------------------------------------------------------------------ */
+
+export const portalNavigation: NavItem[] = [
+  { id: "portal-work", label: "Your work", href: "/portal", icon: Images, exact: true, description: "Work your studio has shared with you" },
+  { id: "portal-notifications", label: "Notifications", href: "/portal/notifications", icon: Bell },
+  { id: "portal-account", label: "Account", href: "/portal/account", icon: CircleUser, description: "Your name, password and notifications" },
+];
+
+/** Logout target shared by the staff shell and the portal header. */
+export const LOGOUT_ACTION = "/api/auth/logout";
 
 /** Whether `pathname` is "inside" the nav item. */
 export function isNavItemActive(pathname: string, item: Pick<NavItem, "href" | "exact">): boolean {

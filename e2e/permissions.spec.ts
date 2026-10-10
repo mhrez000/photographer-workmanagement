@@ -1,13 +1,11 @@
 import { uniq, type JobRow } from "./api";
-import { expect, jobHeading, test } from "./fixtures";
+import { FORBIDDEN_TEXT, JOB_NOT_FOUND_TEXT, expect, jobHeading, test } from "./fixtures";
 
 /**
- * Permissions (spec §40; ARCHITECTURE §3). Pages a role may not open are a real
- * 403; records outside the viewer's org or visibility are a 404 (no existence leak).
+ * Permissions (spec §40; docs/ROLES.md §2–§3). Pages a persona may not open are a
+ * real 403; records outside the viewer's org or visibility are a 404 (no existence
+ * leak). Per-persona journeys live in roles-*.spec.ts and client-portal.spec.ts.
  */
-
-const FORBIDDEN_TEXT = "You don't have access to this";
-const JOB_NOT_FOUND_TEXT = "We can't find that job";
 
 async function listByName(api: { get: <T>(u: string) => Promise<T> }, name: string): Promise<JobRow[]> {
   const res = await api.get<{ rows: JobRow[] }>(`/api/jobs?q=${encodeURIComponent(name)}&limit=50`);
@@ -80,13 +78,16 @@ test.describe("tenant isolation", () => {
   });
 });
 
-test.describe("photographer without flags", () => {
+test.describe("team photographer without See all jobs", () => {
+  // photographer02: migrated defaults (create, assign, review on; See all jobs, workloads, analytics off).
   test.use({ role: "photographer-noflags" });
 
   test("sees their own job but not another photographer's", async ({ page, api, apiAs }) => {
     const p02 = await apiAs("photographer-noflags");
     const me = await p02.me();
-    // A brand-new photographer is in no team, so team visibility cannot apply.
+    expect(me.user.persona).toBe("member");
+    expect(me.user.canViewAllJobs).toBe(false);
+    // Roles v2 visibility is per person (§2.3): teams no longer widen it.
     const stranger = await api.inviteUser("photographer", "Perm");
 
     const { projectId } = await api.createClientAndProject("Perm");

@@ -27,7 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
-import { CATEGORY_GROUPS, ROLE_LABELS } from "@/lib/constants";
+import { CATEGORY_GROUPS, roleBadgeLabel } from "@/lib/constants";
 import { formatDuration } from "@/lib/dates";
 import { formatPercent, pluralise } from "@/lib/utils";
 import { loadOrgSettings } from "@/server/queries/metrics";
@@ -73,7 +73,7 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
     <PageHeader
       eyebrow={[
         { label: "Team", href: isPhotographer ? "/team/photographers" : "/team/editors" },
-        { label: isPhotographer ? "Photographers" : ref.role === "editor" ? "Editors" : ROLE_LABELS[ref.role], href: isPhotographer ? "/team/photographers" : "/team/editors" },
+        { label: isPhotographer ? "Photographers" : ref.role === "editor" ? "Editors" : roleBadgeLabel(ref), href: isPhotographer ? "/team/photographers" : "/team/editors" },
         { label: ref.name },
       ]}
       title={
@@ -86,7 +86,7 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
       }
       description={
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span>{profile?.title ?? ROLE_LABELS[ref.role]}</span>
+          <span>{profile?.title ?? roleBadgeLabel(ref)}</span>
           {teams.length ? (
             <span className="inline-flex items-center gap-1">
               <Users aria-hidden="true" className="size-3.5 text-ink-subtle" />
@@ -124,7 +124,7 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
         {header}
         <AccessDenied
           title="Workload details are private"
-          description={`Only managers and ${ref.name.split(" ")[0]} can see their jobs, workload and performance.`}
+          description={`Only the owner, admins and ${ref.name.split(" ")[0]} can see their jobs, workload and performance.`}
           action={<Button variant="outline" href={isPhotographer ? "/team/photographers" : "/team/editors"}>Back to the directory</Button>}
         />
       </PageContainer>
@@ -137,8 +137,8 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
         {header}
         <EmptyState
           icon={ShieldCheck}
-          title={`${ROLE_LABELS[ref.role]}s don't carry a production workload`}
-          description="Workload, stage times and on-time figures are tracked for editors and photographers. Managers' review activity shows up in Insights."
+          title={`${roleBadgeLabel(ref)}s don't carry a production workload`}
+          description="Workload, stage times and on-time figures are tracked for editors and photographers. The owner's review activity shows up in Insights."
           action={<Button href="/insights/analytics">Open analytics</Button>}
           bordered
         />

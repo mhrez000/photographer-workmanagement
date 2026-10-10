@@ -1,5 +1,5 @@
 import { forbidden } from "next/navigation";
-import type { JobPermissionRef } from "@/lib/types";
+import { loadJobRef } from "@/server/auth/job-ref";
 import { allowed, load, pageContext } from "@/server/page";
 import { getJobDetail } from "@/server/queries/jobDetail";
 
@@ -11,17 +11,14 @@ export default async function EditJobLayout({ children, params }: LayoutProps<"/
   const { id } = await params;
   const { ctx, db } = await pageContext();
   const { job, actions } = await load(() => getJobDetail(db, ctx, decodeURIComponent(id)));
-  const ref: JobPermissionRef = {
-    id: job.id,
-    organisationId: ctx.organisationId,
-    photographerId: job.photographer?.id ?? null,
-    editorId: job.editor?.id ?? null,
-    createdByUserId: job.createdBy.id,
-    statusCategory: job.statusCategory,
-    isPaused: job.isPaused,
-  };
+  // Full ref (draft window, project sharing, past editors) — docs/ROLES.md §2.1.
+  const { ref } = await loadJobRef(db, ctx, job.id);
   const canEdit =
-    actions.canEditFields || actions.canEditDeadlines || actions.canSetPriority || allowed(ctx, "job.edit_completion_percent", ref);
+    actions.canEditFields ||
+    actions.canEditDeadlines ||
+    actions.canSetPriority ||
+    allowed(ctx, "job.change_client", ref) ||
+    allowed(ctx, "job.edit_completion_percent", ref);
   if (!canEdit) forbidden();
   return children;
 }

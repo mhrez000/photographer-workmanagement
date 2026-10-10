@@ -8,29 +8,43 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { PageHeader } from "@/components/ui/page-header";
-import { DEFAULT_WORKFLOW_STATUSES, KEYBOARD_SHORTCUTS, ROLES, ROLE_LABELS, type Role } from "@/lib/constants";
+import { DEFAULT_WORKFLOW_STATUSES, KEYBOARD_SHORTCUTS, PERSONAS, PERSONA_LABELS, type Persona } from "@/lib/constants";
+import { personaOf } from "@/server/auth/permissions";
 import { allowed, pageContext } from "@/server/page";
 
 export const metadata: Metadata = { title: "Help & shortcuts" };
 
 const SCOPE_LABEL = { global: "Anywhere", list: "Lists & tables", job: "On a job" } as const;
 
-const ROLE_HELP: Record<Role, { summary: string; can: string[] }> = {
-  owner: {
-    summary: "Runs the studio. Sees and changes everything.",
-    can: ["Organisation settings, workflows and job types", "Invite, deactivate and anonymise anyone", "All jobs, workloads, analytics and the full audit log"],
+/** One card per persona (docs/ROLES.md §0): three roles, admin is a switch on a photographer. */
+const ROLE_HELP: Record<Persona, { summary: string; can: string[] }> = {
+  admin: {
+    summary: "Runs the business and shoots. A photographer with admin.",
+    can: [
+      "Every job, person, number and setting — switch between My shoots and Whole business",
+      "Create jobs for any photographer, assign editors, review, approve and deliver",
+      "Invite photographers, editors and client users; set each person's switches",
+    ],
   },
-  manager: {
-    summary: "Runs production day to day.",
-    can: ["Every job: assign, reassign, approve, override", "Teams, automations and photographer/editor accounts", "Workloads, performance, analytics and reports"],
-  },
-  photographer: {
-    summary: "Shoots, briefs and reviews their own jobs.",
-    can: ["Create jobs and add links and notes", "Assign editors, review, request revisions, approve", "Team jobs or analytics when the studio allows it"],
+  member: {
+    summary: "Another photographer on the team. The owner chooses what else they can do.",
+    can: [
+      "Always: their own jobs and jobs where they are the photographer",
+      "With switches: create jobs, assign editors, review submissions",
+      "With switches: see all jobs, team workload, analytics",
+    ],
   },
   editor: {
     summary: "A focused queue of assigned work.",
-    can: ["Accept, start, pause and submit assigned jobs", "Add finished-work links, notes and comments", "Resolve revisions and track time"],
+    can: [
+      "Accept, start, pause, submit and resubmit assigned jobs",
+      "Add finished-work links, notes, comments and questions",
+      "Create jobs for a photographer (when the studio allows it)",
+    ],
+  },
+  client: {
+    summary: "Optional portal for the studio's clients.",
+    can: ["Sees only work shared with their client", "Milestones, delivered links and delivery notes", "Leaves feedback when the studio allows it"],
   },
 };
 
@@ -58,6 +72,7 @@ export default async function HelpPage() {
   const { ctx } = await pageContext();
   const scopes = (["global", "list", "job"] as const).map((scope) => ({ scope, items: KEYBOARD_SHORTCUTS.filter((s) => s.scope === scope) }));
   const canSeeRoles = allowed(ctx, "settings.view");
+  const me = personaOf(ctx);
 
   return (
     <PageContainer width="narrow">
@@ -147,13 +162,18 @@ export default async function HelpPage() {
         </ol>
       </SectionCard>
 
-      <SectionCard id="roles" title="Roles" description="Who can do what, in short." actions={<BookOpen aria-hidden="true" className="size-4 text-ink-subtle" />}>
+      <SectionCard
+        id="roles"
+        title="Roles"
+        description="Three roles — Photographer, Editor and Client. The studio owner is a photographer with admin; other photographers are team members."
+        actions={<BookOpen aria-hidden="true" className="size-4 text-ink-subtle" />}
+      >
         <div className="grid gap-4 sm:grid-cols-2">
-          {ROLES.map((r) => (
+          {PERSONAS.map((r) => (
             <div key={r} className="rounded-lg border border-border bg-surface-sunken/60 p-4">
               <div className="flex items-center gap-2">
-                <Badge variant={r === ctx.role ? "accent" : "outline"}>{ROLE_LABELS[r]}</Badge>
-                {r === ctx.role ? <span className="text-xs text-ink-muted">You</span> : null}
+                <Badge variant={r === me ? "accent" : "outline"}>{PERSONA_LABELS[r]}</Badge>
+                {r === me ? <span className="text-xs text-ink-muted">You</span> : null}
               </div>
               <p className="mt-2 text-sm font-medium text-ink">{ROLE_HELP[r].summary}</p>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-ink-secondary">

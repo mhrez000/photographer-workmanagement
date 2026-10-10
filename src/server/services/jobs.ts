@@ -16,7 +16,7 @@
  * Every function is async (Postgres); callers await them inside one `withTx`.
  */
 import { and, asc, count, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { first, one, type Db, type Tx } from "@/db/index";
+import { first, one, type Db, type DbLike, type Tx } from "@/db/index";
 import {
   activityEvents,
   jobAssignments,
@@ -25,14 +25,17 @@ import {
   jobs,
   organisationSettings,
   organisations,
+  projects,
+  users,
   workflowStatuses,
 } from "@/db/schema";
 import { CATEGORY_GROUPS, DEFAULT_JOB_NUMBER_PREFIX, JOB_NUMBER_PAD, type Action, type Priority } from "@/lib/constants";
 import { newId } from "@/lib/ids";
-import type { AuthContext, BulkResult, Job, JobPermissionRef } from "@/lib/types";
+import type { AuthContext, BulkResult, Job, JobPermissionRef, Project, User } from "@/lib/types";
 import {
   BulkPriorityInput,
   BulkTransitionInput,
+  ClaimJobInput,
   CreateJobInput,
   JobIdInput,
   PauseInput,
@@ -43,10 +46,10 @@ import {
   optionalDeadlineToIso,
   type JobFieldsValue,
 } from "@/lib/validation/jobs";
-import { assertCan, can, isManagement } from "@/server/auth/permissions";
+import { assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
 import { systemContext } from "@/server/auth/session";
 import { recordEvent } from "@/server/audit";
-import { NotFoundError, ValidationError } from "@/server/errors";
+import { ForbiddenError, NotFoundError, RuleViolationError, ValidationError } from "@/server/errors";
 import {
   assertVersion,
   loadClientInOrg,
@@ -57,7 +60,8 @@ import {
   parseInput,
 } from "./_shared";
 import { assignEditorToJob, type AssignEditorResult } from "./assignments";
-import { notify } from "./notifications";
+import { adminsOf, notify } from "./notifications";
+import { isClientVisible, resetSharingForClientChange, type ClientChangeResetResult } from "./sharing";
 import {
   closeRunningSessions,
   emitAutomationEvent,
@@ -102,6 +106,112 @@ async function nextJobNumber(tx: Tx, organisationId: string): Promise<string> {
   return `${settings?.prefix ?? DEFAULT_JOB_NUMBER_PREFIX}-${String(seq.n).padStart(JOB_NUMBER_PAD, "0")}`;
 }
 
+/** 422 with one field error (assignee / target validation is allow-list only, §3.4). */
+function fieldError(message: string, field: string, detail: string): ValidationError {
+  return new RuleViolationError(message, { formErrors: [], fieldErrors: { [field]: [detail] } });
+}
+
+/** An active photographer of the actor's organisation (allow-list, §3.4); else 422 / 404 (foreign). */
+async function loadActivePhotographer(tx: Tx, ctx: AuthContext, userId: string, field = "photographerId"): Promise<User> {
+  const user = await loadUserInOrg(tx, ctx, userId);
+  if (!user.isActive) throw fieldError(`${user.name} is deactivated`, field, "Deactivated");
+  if (user.role !== "photographer") throw fieldError(`${user.name} is not a photographer`, field, "Must be a photographer");
+  return user;
+}
+
+/**
+ * Photographer pre-filled for jobs editors create (§4.3): the org's
+ * `default_photographer_user_id` when it is an active photographer, else the
+ * primary owner. Null only if neither resolves (never on a valid org).
+ */
+export async function defaultPhotographerId(db: DbLike, organisationId: string): Promise<string | null> {
+  const settings = await first(
+    db
+      .select({ defaultId: organisationSettings.defaultPhotographerUserId, ownerId: organisationSettings.primaryOwnerUserId })
+      .from(organisationSettings)
+      .where(eq(organisationSettings.organisationId, organisationId)),
+  );
+  if (!settings) return null;
+  for (const id of [settings.defaultId, settings.ownerId]) {
+    if (!id) continue;
+    const row = await first(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, id), eq(users.organisationId, organisationId), eq(users.role, "photographer"), eq(users.isActive, true))),
+    );
+    if (row) return row.id;
+  }
+  return null;
+}
+
+/**
+ * Who the photographer of a new job is (§3.3 job.create, §4.1–§4.3):
+ * - admin: any active photographer; omitted → self; null → none
+ * - team member: always themselves (another id → 403 job.assign_photographer)
+ * - editor: required; omitted → the default photographer; null → 422
+ */
+async function resolveCreatePhotographer(tx: Tx, ctx: AuthContext, requested: string | null | undefined, creatorId: string): Promise<string | null> {
+  if (ctx.role === "editor") {
+    if (requested === null) throw fieldError("Choose the photographer of this job", "photographerId", "Required");
+    const id = requested ?? (await defaultPhotographerId(tx, ctx.organisationId));
+    if (!id) throw fieldError("Choose the photographer of this job", "photographerId", "Required");
+    return (await loadActivePhotographer(tx, ctx, id)).id;
+  }
+  if (isAdmin(ctx)) {
+    if (requested === null) return null;
+    return (await loadActivePhotographer(tx, ctx, requested ?? creatorId)).id;
+  }
+  // Team member: the photographer is forced to self.
+  if (requested !== undefined && requested !== creatorId) throw new ForbiddenError("job.assign_photographer", "Team members are the photographer on jobs they create");
+  return (await loadActivePhotographer(tx, ctx, creatorId)).id;
+}
+
+/**
+ * The inline "New project" of the New job form (§4.3): `project.create` with
+ * `inlineFromJobCreate` (editors may create projects only this way), under an
+ * existing non-archived client of the org; event `project.created` (actor =
+ * creator) before `job.created`. Never shared with the client.
+ */
+async function createInlineProject(tx: Tx, ctx: AuthContext, clientId: string, input: { name: string; address?: string | null }): Promise<Project> {
+  assertCan(ctx, "project.create", { organisationId: ctx.organisationId, inlineFromJobCreate: true });
+  const client = await loadClientInOrg(tx, ctx, clientId);
+  if (client.archivedAt) throw fieldError("That client is archived", "clientId", "Archived");
+  const now = ctx.now();
+  const project = await one(
+    tx
+      .insert(projects)
+      .values({
+        organisationId: ctx.organisationId,
+        clientId: client.id,
+        name: input.name,
+        address: input.address ?? null,
+        createdByUserId: ctx.userId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+    "project",
+  );
+  await recordEvent(tx, ctx, {
+    entityType: "project",
+    entityId: project.id,
+    eventType: "project.created",
+    action: "created",
+    previousValue: null,
+    newValue: {
+      clientId: project.clientId,
+      name: project.name,
+      address: project.address,
+      description: project.description,
+      startDate: project.startDate,
+      endDate: project.endDate,
+    },
+    metadata: { projectId: project.id, clientName: client.name, inlineFromJobCreate: true },
+  });
+  return project;
+}
+
 export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<CreateJobResult> {
   assertCan(ctx, "job.create");
   const p = parseInput(CreateJobInput, input);
@@ -109,18 +219,26 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
   if (!creatorId) throw new ValidationError("Jobs are created by a person");
   const tz = ctx.settings.timezone;
 
-  const project = await loadProjectInOrg(tx, ctx, p.projectId);
-  if (project.archivedAt) throw new ValidationError("That project is archived", { formErrors: [], fieldErrors: { projectId: ["Archived"] } });
-  if (p.clientId !== undefined) {
-    await loadClientInOrg(tx, ctx, p.clientId);
-    if (p.clientId !== project.clientId) {
-      throw new ValidationError("The project belongs to a different client", { formErrors: [], fieldErrors: { clientId: ["Does not match the project"] } });
+  // Editors: the initial editor is themselves ("Assign to me", checked with job.claim below) or nobody.
+  if (ctx.role === "editor" && p.editorId && p.editorId !== creatorId) {
+    throw new ForbiddenError("job.assign_editor", "Editors can only assign a job they create to themselves");
+  }
+
+  let project: Project;
+  if (p.newProject) {
+    project = await createInlineProject(tx, ctx, p.clientId as string, p.newProject);
+  } else {
+    project = await loadProjectInOrg(tx, ctx, p.projectId as string);
+    if (project.archivedAt) throw fieldError("That project is archived", "projectId", "Archived");
+    if (p.clientId !== undefined) {
+      await loadClientInOrg(tx, ctx, p.clientId);
+      if (p.clientId !== project.clientId) throw fieldError("The project belongs to a different client", "clientId", "Does not match the project");
     }
   }
   const client = await loadClientInOrg(tx, ctx, project.clientId);
-  if (client.archivedAt) throw new ValidationError("That client is archived", { formErrors: [], fieldErrors: { clientId: ["Archived"] } });
+  if (client.archivedAt) throw fieldError("That client is archived", "clientId", "Archived");
   const jobType = await loadJobTypeInOrg(tx, ctx, p.jobTypeId);
-  if (jobType.archivedAt) throw new ValidationError("That job type is archived", { formErrors: [], fieldErrors: { jobTypeId: ["Archived"] } });
+  if (jobType.archivedAt) throw fieldError("That job type is archived", "jobTypeId", "Archived");
   const workflow = await loadWorkflowInOrg(tx, ctx, jobType.workflowId);
   if (workflow.archivedAt) throw new ValidationError("The job type's workflow is archived");
   const initial = await first(
@@ -133,14 +251,8 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
   );
   if (!initial) throw new ValidationError("The job type's workflow has no initial status");
 
-  const photographerId = p.photographerId !== undefined ? p.photographerId : ctx.role === "photographer" ? creatorId : null;
-  if (photographerId) {
-    const photographer = await loadUserInOrg(tx, ctx, photographerId);
-    if (!photographer.isActive) throw new ValidationError(`${photographer.name} is deactivated`, { formErrors: [], fieldErrors: { photographerId: ["Deactivated"] } });
-    if (photographer.role === "editor") {
-      throw new ValidationError(`${photographer.name} is an editor`, { formErrors: [], fieldErrors: { photographerId: ["Must be a photographer, manager or owner"] } });
-    }
-  }
+  const photographerId = await resolveCreatePhotographer(tx, ctx, p.photographerId, creatorId);
+  const createdByRole: "photographer" | "editor" = ctx.role === "editor" ? "editor" : "photographer";
 
   const jobNumber = await nextJobNumber(tx, ctx.organisationId);
   const now = ctx.now();
@@ -169,6 +281,8 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
     estimatedHours: p.estimatedHours ?? null,
     lastActivityAt: now,
     createdByUserId: creatorId,
+    // roles v2 (docs/ROLES.md §1.2, §4.3): role of the creator AT CREATION, never updated.
+    createdByRole,
     createdAt: now,
     updatedAt: now,
   } satisfies typeof jobs.$inferInsert;
@@ -236,45 +350,84 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
       editorId: p.editorId ?? null,
       estimatedHours: values.estimatedHours,
     },
-    metadata: jobEventMeta(values, { transitionId }),
+    metadata: jobEventMeta(values, { transitionId, creatorRole: createdByRole, ...(p.newProject ? { newProjectId: project.id } : {}) }),
   });
   await tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId));
+  const assignedPhotographer = photographerAssignmentId !== null && photographerId !== null && photographerId !== creatorId ? photographerId : null;
   if (photographerAssignmentId) {
     await tx.update(jobAssignments).set({ activityEventId: eventId }).where(eq(jobAssignments.id, photographerAssignmentId));
-    if (photographerId !== creatorId) {
-      await notify(tx, ctx, {
-        userIds: [photographerId],
-        type: "job_assigned",
-        title: `You are the photographer on ${jobNumber}`,
-        body: values.name,
-        jobId,
-        activityEventId: eventId,
-        linkPath: jobLinkPath(jobId),
-      });
-    }
+  }
+  if (assignedPhotographer) {
+    await notify(tx, ctx, {
+      userIds: [assignedPhotographer],
+      type: "job_assigned",
+      title: `You are the photographer on ${jobNumber}`,
+      body: values.name,
+      jobId,
+      activityEventId: eventId,
+      linkPath: jobLinkPath(jobId),
+    });
   }
   await emitAutomationEvent(tx, ctx, { eventId, eventType: "job.created", jobId });
 
   let job: Job = await one(tx.select().from(jobs).where(eq(jobs.id, jobId)), "job");
   let editorAssignment: AssignEditorResult | null = null;
   if (p.editorId) {
-    assertCan(ctx, "job.assign_editor", permissionRefOf(job));
-    editorAssignment = await assignEditorToJob(tx, ctx, job, p.editorId, { reason: "Assigned at creation" });
+    if (ctx.role === "editor") {
+      // "Assign to me" (§4.3): the creator's claim on the just-inserted draft.
+      assertCan(ctx, "job.claim", permissionRefOf(job));
+      editorAssignment = await assignEditorToJob(tx, ctx, job, creatorId, { reason: "Self-assigned at creation" });
+    } else {
+      assertCan(ctx, "job.assign_editor", permissionRefOf(job));
+      editorAssignment = await assignEditorToJob(tx, ctx, job, p.editorId, { reason: "Assigned at creation" });
+    }
     job = editorAssignment.job;
+  } else if (createdByRole === "editor") {
+    // Left unassigned by an editor: admins (and the photographer when they may assign editors)
+    // learn it needs an editor. The photographer already got job_assigned → one notice each.
+    const recipients = new Set(await adminsOf(tx, ctx.organisationId));
+    if (photographerId) {
+      const photographer = await loadUserInOrg(tx, ctx, photographerId);
+      if (!photographer.isAdmin && photographer.canAssignEditors) recipients.add(photographerId);
+    }
+    if (assignedPhotographer) recipients.delete(assignedPhotographer);
+    const creator = await loadUserInOrg(tx, ctx, creatorId);
+    await notify(tx, ctx, {
+      userIds: [...recipients],
+      type: "job_created",
+      title: `${creator.name} created ${jobNumber} and it needs an editor`,
+      body: values.name,
+      jobId,
+      activityEventId: eventId,
+      linkPath: jobLinkPath(jobId),
+    });
   }
   return { job, transitionId, eventId, editorAssignment };
 }
 
+/** Ref of a job just created in this transaction: never started/cancelled, no editor removed (draft window open). */
 function permissionRefOf(job: Job): JobPermissionRef {
-  return {
-    id: job.id,
-    organisationId: job.organisationId,
-    photographerId: job.photographerId,
-    editorId: job.editorId,
-    createdByUserId: job.createdByUserId,
-    statusCategory: job.statusCategory,
-    isPaused: job.isPaused,
-  };
+  return jobRefFromRow(job, { draftClosed: false, pastEditorIds: [] });
+}
+
+/* ------------------------------------------------------------------ */
+/*  claimJob                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `POST /api/jobs/:id/claim { expectedVersion }` — an editor takes an
+ * unassigned job they created, later (§4.3). Requires the draft window
+ * (`job.claim`): never started, never cancelled, nobody else removed an
+ * editor — so an admin's unassign can never be overridden by a claim.
+ */
+export async function claimJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignEditorResult> {
+  const p = parseInput(ClaimJobInput, input);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertCan(ctx, "job.claim", ref);
+  assertVersion(job, p.expectedVersion);
+  const me = ctx.userId;
+  if (!me) throw new ValidationError("Jobs are claimed by a person");
+  return assignEditorToJob(tx, ctx, job, me, { reason: "Claimed by the editor who created it" });
 }
 
 /* ------------------------------------------------------------------ */
@@ -284,8 +437,9 @@ function permissionRefOf(job: Job): JobPermissionRef {
 const FIELD_ACTIONS: Record<keyof JobFieldsValue, Action> = {
   name: "job.edit_fields",
   description: "job.edit_fields",
-  clientId: "job.edit_fields",
-  projectId: "job.edit_fields",
+  // roles v2: client / project moves are their own action (controls / draft, §3.3 ◊).
+  clientId: "job.change_client",
+  projectId: "job.change_client",
   jobTypeId: "job.edit_fields",
   shootDate: "job.edit_fields",
   estimatedHours: "job.edit_fields",
@@ -311,6 +465,25 @@ export interface UpdateJobResult {
   job: Job;
   /** Field names that actually changed (one event each). */
   changed: string[];
+  /** Present when the job moved to another client (§4.5 sharing reset). */
+  clientChangeReset?: ClientChangeResetResult;
+}
+
+/** Whether `fields[key]` differs from the job's stored value (dates compared as stored instants). */
+function fieldChanges(job: Job, key: keyof JobFieldsValue, fields: JobFieldsValue, tz: string): boolean {
+  switch (key) {
+    case "dueDate":
+    case "reviewDueDate":
+    case "deliveryDueDate":
+    case "shootDate":
+      return (optionalDeadlineToIso(fields[key], tz) ?? null) !== job[key];
+    case "description": {
+      const next = fields.description === null || fields.description === "" ? null : fields.description;
+      return next !== job.description;
+    }
+    default:
+      return fields[key] !== job[key];
+  }
 }
 
 /**
@@ -326,13 +499,16 @@ export async function applyJobFieldChanges(
   fields: JobFieldsValue,
   opts: { batchId?: string | null } = {},
 ): Promise<UpdateJobResult> {
-  const present = (Object.keys(fields) as (keyof JobFieldsValue)[]).filter((k) => fields[k] !== undefined);
+  const tz = ctx.settings.timezone;
+  // Only fields that actually change are permission-checked: forms send every field, and an
+  // unchanged date or project must not need the (narrower) permission of changing it.
+  const present = (Object.keys(fields) as (keyof JobFieldsValue)[]).filter((k) => fields[k] !== undefined && fieldChanges(jobIn, k, fields, tz));
   for (const action of new Set(present.map((k) => FIELD_ACTIONS[k]))) assertCan(ctx, action, ref);
 
-  const tz = ctx.settings.timezone;
   const job = jobIn;
   const patch: JobPatch = {};
   const plain: { field: PlainField; from: unknown; to: unknown; fromLabel?: string | null; toLabel?: string | null }[] = [];
+  let clientChanged = false;
   const dates: { field: DateField; from: string | null; to: string | null }[] = [];
 
   if (fields.name !== undefined && fields.name !== job.name) {
@@ -362,6 +538,9 @@ export async function applyJobFieldChanges(
       }
     }
     if (projectChanged) {
+      // §4.5 ◊: a move that could publish (the job is client-visible now, or the target project is
+      // shared) also needs the share permission.
+      if (isClientVisible(job, ref) || project.sharedWithClient) assertCan(ctx, "job.share_with_client", ref);
       const oldProject = await loadProjectInOrg(tx, ctx, job.projectId);
       patch.projectId = project.id;
       plain.push({ field: "projectId", from: job.projectId, to: project.id, fromLabel: oldProject.name, toLabel: project.name });
@@ -369,6 +548,9 @@ export async function applyJobFieldChanges(
         const oldClient = await loadClientInOrg(tx, ctx, job.clientId);
         const newClient = await loadClientInOrg(tx, ctx, project.clientId);
         patch.clientId = project.clientId;
+        // A new client never inherits the old client's view of this job (§4.5 step 2).
+        if (job.sharedWithClient) patch.sharedWithClient = false;
+        clientChanged = true;
         plain.push({ field: "clientId", from: job.clientId, to: project.clientId, fromLabel: oldClient.name, toLabel: newClient.name });
       }
     }
@@ -410,7 +592,7 @@ export async function applyJobFieldChanges(
   const now = ctx.now();
   const meta = (extra: Record<string, unknown>) => jobEventMeta(updated, extra, opts.batchId);
   const changed: string[] = [];
-  const managementActor = isManagement(ctx) && !ctx.isSystem;
+  const managementActor = isAdmin(ctx) && !ctx.isSystem;
 
   for (const c of plain) {
     await recordEvent(tx, ctx, {
@@ -478,13 +660,26 @@ export async function applyJobFieldChanges(
     changed.push(d.field);
   }
 
-  return { job: updated, changed };
+  const clientChangeReset = clientChanged ? await resetSharingForClientChange(tx, ctx, job, updated) : undefined;
+  return { job: updated, changed, ...(clientChangeReset ? { clientChangeReset } : {}) };
+}
+
+/**
+ * Coarse write gate run BEFORE the version check: an actor holding none of the
+ * field actions on this job (a read-only viewer) gets 403, never a 409 that
+ * carries the stored row. The per-field checks in `applyJobFieldChanges` stay.
+ */
+function assertMayEditSomeField(ctx: AuthContext, ref: JobPermissionRef): void {
+  const actions = [...new Set(Object.values(FIELD_ACTIONS))];
+  if (actions.some((a) => can(ctx, a, ref))) return;
+  assertCan(ctx, "job.edit_fields", ref);
 }
 
 /** `PATCH /api/jobs/:id` — any subset of fields, each with its own permission. */
 export async function updateJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(UpdateJobInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertMayEditSomeField(ctx, ref);
   assertVersion(job, p.expectedVersion);
   const { jobId: _jobId, expectedVersion: _version, ...fields } = p;
   void _jobId;
@@ -494,6 +689,7 @@ export async function updateJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
 
 async function updateOne(tx: Tx, ctx: AuthContext, jobId: string, expectedVersion: number, fields: JobFieldsValue): Promise<UpdateJobResult> {
   const { job, ref } = await loadVisibleJob(tx, ctx, jobId);
+  assertMayEditSomeField(ctx, ref);
   assertVersion(job, expectedVersion);
   return await applyJobFieldChanges(tx, ctx, job, ref, fields);
 }
@@ -540,7 +736,7 @@ export interface PauseResult {
   closedSessionIds: string[];
 }
 
-/** Editor (or O/M on behalf) pauses work while in an EDITOR_WORKING status; closes the running timer. */
+/** Editor (or an admin on behalf) pauses work while in an EDITOR_WORKING status; closes the running timer. */
 export async function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<PauseResult> {
   const p = parseInput(PauseInput, input);
   const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
@@ -549,7 +745,7 @@ export async function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): Promis
   if (loaded.isPaused) throw new ValidationError("Work on this job is already paused");
   const closedSessionIds = await closeRunningSessions(tx, ctx, { jobId: loaded.id }, "paused", "user");
   const job = await updateJobRow(tx, ctx, loaded, { isPaused: true, pausedAt: ctx.now() });
-  const onBehalfOf = isManagement(ctx) && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
+  const onBehalfOf = isAdmin(ctx) && !ctx.isSystem && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
   const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
@@ -579,7 +775,7 @@ export async function resumeJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
   assertVersion(loaded, p.expectedVersion);
   if (!loaded.isPaused) throw new ValidationError("Work on this job is not paused");
   const job = await updateJobRow(tx, ctx, loaded, { isPaused: false, pausedAt: null });
-  const onBehalfOf = isManagement(ctx) && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
+  const onBehalfOf = isAdmin(ctx) && !ctx.isSystem && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
   const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,

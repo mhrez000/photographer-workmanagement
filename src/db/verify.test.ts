@@ -88,7 +88,7 @@ async function seedSmallOrg(): Promise<Record<string, string>> {
   later(60);
   await act("photographer1", approveJob, { jobId: full, expectedVersion: await v(full) });
   later(60);
-  await act("manager", completeJob, { jobId: full, expectedVersion: await v(full) });
+  await act("coAdmin", completeJob, { jobId: full, expectedVersion: await v(full) });
   later(600);
   await act("photographer1", reopenJob, { jobId: full, expectedVersion: await v(full), reason: "Missing room", toCategory: "in_progress" });
   later(120);
@@ -106,15 +106,15 @@ async function seedSmallOrg(): Promise<Record<string, string>> {
   await act("editor1", startTimer, { jobId: moved });
   later(45);
   await act("photographer1", addComment, { jobId: moved, body: "Can you lift the sky?", mentionUserIds: [ids.users.editor1] });
-  await assign(moved, "editor2", "manager");
+  await assign(moved, "editor2", "coAdmin");
 
   // 3. Cancelled and restored.
   const restored = await newJob("9 Shellcove Road · Drone stills");
   await assign(restored, "editor1");
   later();
-  await act("manager", cancelJob, { jobId: restored, expectedVersion: await v(restored), reason: "Vendor paused" });
+  await act("coAdmin", cancelJob, { jobId: restored, expectedVersion: await v(restored), reason: "Vendor paused" });
   later(600);
-  await act("manager", restoreJob, { jobId: restored, expectedVersion: await v(restored), reason: "Back on" });
+  await act("coAdmin", restoreJob, { jobId: restored, expectedVersion: await v(restored), reason: "Back on" });
 
   // 4. Held by an editor who is deactivated without a hand-over (flagged "kept").
   const kept = await newJob("27 Glenmore Road · Floor plan");

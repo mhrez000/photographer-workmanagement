@@ -8,8 +8,9 @@ import { users } from "@/db/schema";
 import type { AuthContext, Job, JobPermissionRef, UserRef } from "@/lib/types";
 import { can } from "@/server/auth/permissions";
 import { buildContextFromDb } from "@/server/auth/session";
+import { loadJobRef } from "@/server/auth/job-ref";
 import { NotFoundError } from "@/server/errors";
-import { jobPermissionRef, loadJobInOrg, loadPastEditorIds, userRef } from "./_shared";
+import { userRef } from "./_shared";
 
 /** A job row plus its full permission ref (pastEditorIds always loaded). */
 export interface LoadedJob {
@@ -28,8 +29,7 @@ export interface LoadedJob {
  * still answer 403 for a VISIBLE job where that specific action is denied.
  */
 export async function loadJobWithRef(db: DbLike, ctx: AuthContext, jobId: string): Promise<LoadedJob> {
-  const job = await loadJobInOrg(db, ctx, jobId);
-  const ref = jobPermissionRef(job, await loadPastEditorIds(db, job.id));
+  const { job, ref } = await loadJobRef(db, ctx, jobId);
   if (!can(ctx, "job.view", ref)) throw new NotFoundError("Job");
   return { job, ref };
 }

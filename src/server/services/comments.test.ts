@@ -53,12 +53,12 @@ describe("addComment threading", () => {
     expect(reply.comment.parentCommentId).toBe(root.comment.id);
     expect(reply.comment.rootCommentId).toBe(root.comment.id);
 
-    const nested = await run(ids.users.manager, (tx, ctx) =>
+    const nested = await run(ids.users.coAdmin, (tx, ctx) =>
       addComment(tx, ctx, { jobId, body: "Agreed", parentCommentId: reply.comment.id, kind: "question" }),
     );
     expect(nested.comment.rootCommentId).toBe(root.comment.id);
 
-    const tree = await listComments(db, await contextFor(db, ids.users.manager), jobId);
+    const tree = await listComments(db, await contextFor(db, ids.users.coAdmin), jobId);
     expect(tree).toHaveLength(1);
     expect(tree[0].id).toBe(root.comment.id);
     expect(tree[0].replies.map((r) => r.id)).toEqual([reply.comment.id]);
@@ -71,25 +71,25 @@ describe("addComment threading", () => {
   });
 
   it("notifies photographer, editor, creator and prior thread commenters (never the author)", async () => {
-    const root = await run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId, body: "Please check the sky" }));
+    const root = await run(ids.users.coAdmin, (tx, ctx) => addComment(tx, ctx, { jobId, body: "Please check the sky" }));
     expect(new Set(root.notifiedUserIds)).toEqual(new Set([ids.users.photographer1, ids.users.editor1]));
-    expect(await notificationsFor(ids.users.manager)).toHaveLength(0);
+    expect(await notificationsFor(ids.users.coAdmin)).toHaveLength(0);
 
     const reply = await run(ids.users.editor1, (tx, ctx) => addComment(tx, ctx, { jobId, body: "On it", parentCommentId: root.comment.id }));
     // manager is a prior commenter in the thread; editor (author) is skipped.
-    expect(new Set(reply.notifiedUserIds)).toEqual(new Set([ids.users.photographer1, ids.users.manager]));
-    const forManager = await notificationsFor(ids.users.manager, "comment_added");
+    expect(new Set(reply.notifiedUserIds)).toEqual(new Set([ids.users.photographer1, ids.users.coAdmin]));
+    const forManager = await notificationsFor(ids.users.coAdmin, "comment_added");
     expect(forManager).toHaveLength(1);
     expect(forManager[0].linkPath).toContain(reply.comment.id);
   });
 
   it("rejects replies to comments of another job and unknown jobs with 404", async () => {
     const otherJob = (await insertJobFixture(db, ids, { statusKey: "in_progress" })).job.id;
-    const root = await run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId: otherJob, body: "x" }));
+    const root = await run(ids.users.coAdmin, (tx, ctx) => addComment(tx, ctx, { jobId: otherJob, body: "x" }));
     await expect(
-      run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId, body: "y", parentCommentId: root.comment.id })),
+      run(ids.users.coAdmin, (tx, ctx) => addComment(tx, ctx, { jobId, body: "y", parentCommentId: root.comment.id })),
     ).rejects.toThrow(NotFoundError);
-    await expect(run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId: "nope", body: "y" }))).rejects.toThrow(NotFoundError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => addComment(tx, ctx, { jobId: "nope", body: "y" }))).rejects.toThrow(NotFoundError);
   });
 
   it("returns 404 for a job of another organisation", async () => {
@@ -107,23 +107,23 @@ describe("addComment threading", () => {
 describe("@mentions", () => {
   it("writes mention rows, one comment.mentioned event each and a mandatory mentioned notification", async () => {
     const res = await run(ids.users.photographer1, (tx, ctx) =>
-      addComment(tx, ctx, { jobId, body: "@Eve can you look?", mentionUserIds: [ids.users.editor1, ids.users.editor1, ids.users.manager] }),
+      addComment(tx, ctx, { jobId, body: "@Eve can you look?", mentionUserIds: [ids.users.editor1, ids.users.editor1, ids.users.coAdmin] }),
     );
-    expect(new Set(res.mentionUserIds)).toEqual(new Set([ids.users.editor1, ids.users.manager]));
+    expect(new Set(res.mentionUserIds)).toEqual(new Set([ids.users.editor1, ids.users.coAdmin]));
     const rows = await db.select().from(commentMentions).where(eq(commentMentions.commentId, res.comment.id));
     expect(rows).toHaveLength(2);
 
     const mentioned = await events("comment.mentioned");
     expect(mentioned).toHaveLength(2);
     expect(mentioned.map((e) => (e.newValue as { mentionedUserId: string }).mentionedUserId).sort()).toEqual(
-      [ids.users.editor1, ids.users.manager].sort(),
+      [ids.users.editor1, ids.users.coAdmin].sort(),
     );
     expect(await notificationsFor(ids.users.editor1, "mentioned")).toHaveLength(1);
     // A mentioned user is not also sent comment_added.
     expect(await notificationsFor(ids.users.editor1, "comment_added")).toHaveLength(0);
 
     const tree = await listComments(db, await contextFor(db, ids.users.editor1), jobId);
-    expect(tree[0].mentions.map((m) => m.id).sort()).toEqual([ids.users.editor1, ids.users.manager].sort());
+    expect(tree[0].mentions.map((m) => m.id).sort()).toEqual([ids.users.editor1, ids.users.coAdmin].sort());
   });
 
   it("rejects (422) a mention target who cannot view the job, listing the name, and writes nothing", async () => {
@@ -147,7 +147,7 @@ describe("@mentions", () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
     let err: InvalidMentionError | undefined;
     try {
-      await run(ids.users.manager, (tx, ctx) =>
+      await run(ids.users.coAdmin, (tx, ctx) =>
         addComment(tx, ctx, { jobId, body: "hey", mentionUserIds: [ids.users.inactiveEditor, other.users.owner] }),
       );
     } catch (e) {
@@ -177,7 +177,7 @@ describe("editComment", () => {
 
   it("refuses edits after the window and by anyone but the author", async () => {
     const { comment } = await run(ids.users.editor1, (tx, ctx) => addComment(tx, ctx, { jobId, body: "Draft" }));
-    await expect(run(ids.users.manager, (tx, ctx) => editComment(tx, ctx, { commentId: comment.id, body: "x" }))).rejects.toThrow(
+    await expect(run(ids.users.coAdmin, (tx, ctx) => editComment(tx, ctx, { commentId: comment.id, body: "x" }))).rejects.toThrow(
       ForbiddenError,
     );
     fakeClock.advanceMinutes(16);
@@ -219,16 +219,16 @@ describe("deleteComment", () => {
     await expect(run(ids.users.photographer1, (tx, ctx) => deleteComment(tx, ctx, { commentId: comment.id }))).rejects.toThrow(
       ForbiddenError,
     );
-    const res = await run(ids.users.manager, (tx, ctx) => deleteComment(tx, ctx, { commentId: comment.id }));
-    expect(res.deletedByUserId).toBe(ids.users.manager);
+    const res = await run(ids.users.coAdmin, (tx, ctx) => deleteComment(tx, ctx, { commentId: comment.id }));
+    expect(res.deletedByUserId).toBe(ids.users.coAdmin);
   });
 });
 
 describe("listComments", () => {
   it("requires job.view", async () => {
-    await run(ids.users.manager, (tx, ctx) => addComment(tx, ctx, { jobId, body: "hello" }));
+    await run(ids.users.coAdmin, (tx, ctx) => addComment(tx, ctx, { jobId, body: "hello" }));
     await expect(listComments(db, await contextFor(db, ids.users.editor2), jobId)).rejects.toThrow(NotFoundError); // invisible job → 404
     expect((await listComments(db, await contextFor(db, ids.users.photographer1), jobId))[0].canEdit).toBe(false);
-    expect((await listComments(db, await contextFor(db, ids.users.manager), jobId))[0].canEdit).toBe(true);
+    expect((await listComments(db, await contextFor(db, ids.users.coAdmin), jobId))[0].canEdit).toBe(true);
   });
 });

@@ -80,7 +80,7 @@ describe("verifyDerived (fixtures)", () => {
         organisationId: ids.organisationId,
         jobId: job.id,
         revisionNumber: 1,
-        requestedByUserId: ids.users.manager,
+        requestedByUserId: ids.users.coAdmin,
         assigneeUserId: ids.users.editor1,
         reason: "Colour",
         description: "Too warm",

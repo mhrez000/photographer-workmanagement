@@ -3,7 +3,7 @@
  * that touches the DB; never imported by app code. Everything is async.
  *
  *   const db = await makeTestDb();               // fresh in-memory PGlite: schema + guard triggers
- *   const ids = await seedMinimalOrg(db);        // org, settings, 7 users, default workflow, job types, client, project
+ *   const ids = await seedMinimalOrg(db);        // org, settings, 10 users (roles v2 personas), default workflow, job types, 2 clients, 2 projects
  *   const job = await insertJobFixture(db, ids, { statusKey: "in_progress" });
  *   const ctx = await contextFor(db, ids.users.editor1);
  *   await withTx((tx) => someService(tx, ctx, input), { db });
@@ -29,6 +29,7 @@ import * as schema from "./schema";
 import { guardRootDb, migratePgliteClient, PGLITE_PARSERS, type Db, type DbLike } from "./index";
 import { rootErrorMessage } from "./errors";
 import {
+  CANCEL_EDGE_ROLES,
   CATEGORY_GROUPS,
   DEFAULT_JOB_NUMBER_PREFIX,
   DEFAULT_JOB_TYPES,
@@ -37,7 +38,9 @@ import {
   DEFAULT_WORKFLOW_STATUSES,
   DEFAULT_WORKFLOW_TRANSITIONS,
   JOB_NUMBER_PAD,
+  MEMBER_INVITE_DEFAULTS,
   STATUS_CATEGORY_META,
+  type PermissionFlag,
   type Priority,
   type Role,
   type StatusCategory,
@@ -152,16 +155,66 @@ export function testPasswordHash(): string {
   return cachedHash;
 }
 
-export type FixtureUserKey = "owner" | "manager" | "photographer1" | "photographer2" | "editor1" | "editor2" | "inactiveEditor";
+/**
+ * Roles v2 fixture personas (docs/ROLES.md §12.1):
+ *   owner          primary owner (admin photographer)
+ *   coAdmin        second admin photographer (ported from v1 tests that used `manager` as "another management user")
+ *   lead           team member with every switch on (= a migrated v1 manager)
+ *   photographer1/2 team members with the MIGRATED defaults (create ✓, assign ✓, review ✓; workloads/all/analytics ✗)
+ *   editor1/2      editors at defaults (create ✓, see other editors' jobs ✗)
+ *   inactiveEditor deactivated editor
+ *   client         client user of `clientId` (portal ✓, feedback ✓)
+ *   client2        client user of `clientId2` (portal ✓, feedback ✗) — isolation
+ * Use `setUserFlags()` / `inviteDefaultsMember()` for other switch combinations.
+ */
+export type FixtureUserKey =
+  | "owner"
+  | "coAdmin"
+  | "lead"
+  | "photographer1"
+  | "photographer2"
+  | "editor1"
+  | "editor2"
+  | "inactiveEditor"
+  | "client"
+  | "client2";
 
-const FIXTURE_USERS: readonly { key: FixtureUserKey; local: string; name: string; role: Role; active: boolean; colour: string }[] = [
-  { key: "owner", local: "owner", name: "Olivia Owner", role: "owner", active: true, colour: "#6366f1" },
-  { key: "manager", local: "manager1", name: "Max Manager", role: "manager", active: true, colour: "#0ea5e9" },
+/** Raw users.* switch columns (camelCase = AuthContext field names). */
+export type FixtureFlags = Partial<Record<PermissionFlag, boolean>>;
+
+interface FixtureUserDef {
+  key: FixtureUserKey;
+  local: string;
+  name: string;
+  role: Role;
+  active: boolean;
+  colour: string;
+  isAdmin?: boolean;
+  flags?: FixtureFlags;
+  /** Client users: which fixture client. */
+  client?: "client" | "client2";
+}
+
+const ALL_MEMBER_FLAGS_ON: FixtureFlags = {
+  canCreateJobs: true,
+  canAssignEditors: true,
+  canReviewSubmissions: true,
+  canViewTeamWorkloads: true,
+  canViewAllJobs: true,
+  canViewAnalytics: true,
+};
+
+const FIXTURE_USERS: readonly FixtureUserDef[] = [
+  { key: "owner", local: "owner", name: "Olivia Owner", role: "photographer", isAdmin: true, active: true, colour: "#6366f1" },
+  { key: "coAdmin", local: "coadmin", name: "Cora Co-Admin", role: "photographer", isAdmin: true, active: true, colour: "#0ea5e9" },
+  { key: "lead", local: "lead", name: "Leo Lead", role: "photographer", active: true, colour: "#8b5cf6", flags: ALL_MEMBER_FLAGS_ON },
   { key: "photographer1", local: "photographer01", name: "Pia Photographer", role: "photographer", active: true, colour: "#14b8a6" },
   { key: "photographer2", local: "photographer02", name: "Paul Photographer", role: "photographer", active: true, colour: "#22c55e" },
   { key: "editor1", local: "editor01", name: "Eve Editor", role: "editor", active: true, colour: "#f59e0b" },
   { key: "editor2", local: "editor02", name: "Ed Editor", role: "editor", active: true, colour: "#f97316" },
   { key: "inactiveEditor", local: "editor99", name: "Iris Inactive", role: "editor", active: false, colour: "#64748b" },
+  { key: "client", local: "client", name: "Cleo Client", role: "client", active: true, colour: "#d97706", client: "client" },
+  { key: "client2", local: "client2", name: "Clay Client", role: "client", active: true, colour: "#0891b2", client: "client2" },
 ];
 
 export interface SeedMinimalOrgOptions {
@@ -190,11 +243,13 @@ export interface SeedIds {
   /** job type name → id. */
   jobTypes: Record<string, string>;
   defaultJobTypeId: string;
+  /** "Harbour Realty": portal ✓, feedback ✓; client user `client`. */
   clientId: string;
   projectId: string;
+  /** "Coastal Key Property": portal ✓, feedback ✗; client user `client2`. */
+  clientId2: string;
+  projectId2: string;
 }
-
-const OMP: Role[] = ["owner", "manager", "photographer"];
 
 /**
  * Inserts the default workflow (DEFAULT_WORKFLOW_STATUSES / _TRANSITIONS
@@ -245,7 +300,7 @@ export async function insertDefaultWorkflow(
       from: s.key,
       to: "cancelled",
       label: "Cancel",
-      allowedRoles: OMP,
+      allowedRoles: CANCEL_EDGE_ROLES,
       requiresAssignedEditor: false,
       assigneeOnly: false,
       isReopen: false,
@@ -275,10 +330,12 @@ export async function insertDefaultWorkflow(
 
 /**
  * One organisation with known ids/emails (`<slug>-owner`, `owner@<domain>` …):
- * owner, manager, photographer×2, editor×2 and an inactive editor (all with
- * password TEST_PASSWORD), settings, the default workflow, DEFAULT_JOB_TYPES,
- * one client and one project. Call twice with different slugs for
- * cross-organisation tests.
+ * the ten roles-v2 personas of `FixtureUserKey` (all with password
+ * TEST_PASSWORD; `owner` is the primary owner), settings, the default
+ * workflow, DEFAULT_JOB_TYPES, two portal-enabled clients with one project
+ * each and one client user each. Insert order is trigger-safe: org → settings
+ * (no primary owner yet) → staff → clients/projects → client users → primary
+ * owner. Call twice with different slugs for cross-organisation tests.
  */
 export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = {}): Promise<SeedIds> {
   const slug = overrides.slug ?? "studio";
@@ -297,7 +354,9 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
 
     const users = {} as Record<FixtureUserKey, string>;
     const emails = {} as Record<FixtureUserKey, string>;
-    const userRows = FIXTURE_USERS.map((u) => {
+    const clientId = `${slug}-client`;
+    const clientId2 = `${slug}-client2`;
+    const userRow = (u: FixtureUserDef) => {
       const id = `${slug}-${u.key}`;
       const email = `${u.local}@${domain}`;
       users[u.key] = id;
@@ -309,14 +368,17 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
         passwordHash: hash,
         name: u.name,
         role: u.role,
+        isAdmin: u.isAdmin ?? false,
+        ...u.flags,
+        clientId: u.client === "client" ? clientId : u.client === "client2" ? clientId2 : null,
         isActive: u.active,
         deactivatedAt: u.active ? null : at,
         avatarColour: u.colour,
         createdAt: at,
         updatedAt: at,
       };
-    });
-    await tx.insert(schema.users).values(userRows);
+    };
+    await tx.insert(schema.users).values(FIXTURE_USERS.filter((u) => u.role !== "client").map(userRow));
 
     const wf = await insertDefaultWorkflow(tx, organisationId, { createdByUserId: users.owner, at, idPrefix: slug });
 
@@ -338,21 +400,57 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
     });
     await tx.insert(schema.jobTypes).values(jobTypeRows);
 
-    const clientId = `${slug}-client`;
-    await tx
-      .insert(schema.clients)
-      .values({ id: clientId, organisationId, name: "Harbour Realty", createdByUserId: users.manager, createdAt: at, updatedAt: at });
+    await tx.insert(schema.clients).values([
+      {
+        id: clientId,
+        organisationId,
+        name: "Harbour Realty",
+        portalEnabled: true,
+        feedbackEnabled: true,
+        createdByUserId: users.owner,
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        id: clientId2,
+        organisationId,
+        name: "Coastal Key Property",
+        portalEnabled: true,
+        feedbackEnabled: false,
+        createdByUserId: users.owner,
+        createdAt: at,
+        updatedAt: at,
+      },
+    ]);
     const projectId = `${slug}-project`;
-    await tx.insert(schema.projects).values({
-      id: projectId,
-      organisationId,
-      clientId,
-      name: "123 Smith Street",
-      address: "123 Smith Street, Bondi NSW",
-      createdByUserId: users.manager,
-      createdAt: at,
-      updatedAt: at,
-    });
+    const projectId2 = `${slug}-project2`;
+    await tx.insert(schema.projects).values([
+      {
+        id: projectId,
+        organisationId,
+        clientId,
+        name: "123 Smith Street",
+        address: "123 Smith Street, Bondi NSW",
+        createdByUserId: users.owner,
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        id: projectId2,
+        organisationId,
+        clientId: clientId2,
+        name: "9 Beach Road",
+        address: "9 Beach Road, Coogee NSW",
+        createdByUserId: users.owner,
+        createdAt: at,
+        updatedAt: at,
+      },
+    ]);
+    await tx.insert(schema.users).values(FIXTURE_USERS.filter((u) => u.role === "client").map(userRow));
+    await tx
+      .update(schema.organisationSettings)
+      .set({ primaryOwnerUserId: users.owner })
+      .where(eq(schema.organisationSettings.organisationId, organisationId));
 
     return {
       organisationId,
@@ -367,8 +465,51 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
       defaultJobTypeId: jobTypes[DEFAULT_JOB_TYPES[0].name],
       clientId,
       projectId,
+      clientId2,
+      projectId2,
     };
   });
+}
+
+/**
+ * Sets raw users.* switch columns (and optionally is_admin) directly — fixtures
+ * only; production writes go through `setPermissions` / `setAdmin`. Bumps version.
+ */
+export async function setUserFlags(db: DbLike, userId: string, flags: FixtureFlags & { isAdmin?: boolean }): Promise<void> {
+  await db
+    .update(schema.users)
+    .set({ ...flags, version: sql`${schema.users.version} + 1` })
+    .where(eq(schema.users.id, userId));
+}
+
+/**
+ * Adds a team member at the INVITE defaults (create ✓, assign ✓, review ✗,
+ * workloads / all jobs / analytics ✗): "photographer12-style" (the owner reviews
+ * their work). Returns the new user id (`<slug>-newMember`, `new.member@<domain>`).
+ */
+export async function inviteDefaultsMember(
+  db: DbLike,
+  ids: SeedIds,
+  opts: { key?: string; name?: string; email?: string; at?: string } = {},
+): Promise<string> {
+  const key = opts.key ?? "newMember";
+  const id = `${ids.slug}-${key}`;
+  const at = opts.at ?? nowIso();
+  const domain = ids.emails.owner.split("@")[1];
+  await db.insert(schema.users).values({
+    id,
+    organisationId: ids.organisationId,
+    email: opts.email ?? `${key.toLowerCase()}@${domain}`,
+    passwordHash: testPasswordHash(),
+    name: opts.name ?? "Nina Newmember",
+    role: "photographer",
+    isAdmin: false,
+    ...MEMBER_INVITE_DEFAULTS,
+    avatarColour: "#ec4899",
+    createdAt: at,
+    updatedAt: at,
+  });
+  return id;
 }
 
 /* ------------------------------------------------------------------ */
@@ -418,6 +559,10 @@ export interface JobFixtureOptions {
   /** null = no photographer. Default: photographer1. */
   photographerId?: string | null;
   createdByUserId?: string;
+  /** jobs.created_by_role. Default: "editor" when the creator is an editor, else "photographer". */
+  createdByRole?: "photographer" | "editor";
+  /** jobs.shared_with_client (default false). */
+  sharedWithClient?: boolean;
   name?: string;
   description?: string | null;
   priority?: Priority;
@@ -476,6 +621,8 @@ export async function insertJobFixture(db: Db, ids: SeedIds, opts: JobFixtureOpt
     const editorId = opts.editorId !== undefined ? opts.editorId : NEEDS_EDITOR.has(category) ? ids.users.editor1 : null;
     const photographerId = opts.photographerId !== undefined ? opts.photographerId : ids.users.photographer1;
     const createdByUserId = opts.createdByUserId ?? ids.users.photographer1;
+    const [creator] = await tx.select({ role: schema.users.role }).from(schema.users).where(eq(schema.users.id, createdByUserId));
+    const createdByRole = opts.createdByRole ?? (creator?.role === "editor" ? "editor" : "photographer");
 
     const [seq] = await tx
       .update(schema.organisations)
@@ -521,7 +668,7 @@ export async function insertJobFixture(db: Db, ids: SeedIds, opts: JobFixtureOpt
         firstSubmittedAt: AFTER_SUBMIT.has(category) ? at : null,
         lastSubmittedAt: AFTER_SUBMIT.has(category) ? at : null,
         approvedAt: APPROVED_LIKE.has(category) ? at : null,
-        approvedByUserId: APPROVED_LIKE.has(category) ? ids.users.manager : null,
+        approvedByUserId: APPROVED_LIKE.has(category) ? ids.users.owner : null,
         dueDateAtApproval: APPROVED_LIKE.has(category) ? (opts.dueDate ?? null) : null,
         wasOnTime: APPROVED_LIKE.has(category) && opts.dueDate ? at <= opts.dueDate : null,
         deliveredAt: category === "delivered" ? at : null,
@@ -530,6 +677,8 @@ export async function insertJobFixture(db: Db, ids: SeedIds, opts: JobFixtureOpt
         cancelledAt: category === "cancelled" ? at : null,
         lastActivityAt: at,
         createdByUserId,
+        createdByRole,
+        sharedWithClient: opts.sharedWithClient ?? false,
         createdAt: at,
         updatedAt: at,
       })
@@ -597,7 +746,7 @@ export async function insertJobFixture(db: Db, ids: SeedIds, opts: JobFixtureOpt
         editorId,
         estimatedHours: job.estimatedHours,
       },
-      metadata: { jobNumber, jobName: job.name, fixture: true },
+      metadata: { jobNumber, jobName: job.name, fixture: true, creatorRole: createdByRole },
     });
     await tx
       .update(schema.jobStatusTransitions)

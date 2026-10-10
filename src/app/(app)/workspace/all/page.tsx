@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import { FilterX, Info, LayoutList, Plus } from "lucide-react";
 import { FilterBar, JOB_FILTER_KEYS, SavedViewsBar } from "@/components/filters";
-import { PageContainer } from "@/components/shell";
+import { PageContainer, ScopeNotice } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { ColumnChooser, DEFAULT_ALL_WORK_COLUMNS, GroupByMenu, WorkTable, isWorkGroupBy, appliedSortOf, DEFAULT_WORK_SORT, toJobListInput, toQueryString } from "@/components/work-table";
 import { safeListJobs } from "@/components/work-table/server";
 import { pluralise } from "@/lib/utils";
-import { allowed, pageContext } from "@/server/page";
+import { allowed, pageContext, param } from "@/server/page";
+import { pageScope } from "@/server/page-scope";
 import { listSavedViews } from "@/server/queries/views";
 import { listJobTypes } from "@/server/queries/workflows";
 
@@ -30,7 +31,8 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
   const requested = toJobListInput(sp);
   // A saved view brings its own sort; otherwise default to workflow order.
   if (!requested.sort && !requested.viewId) requested.sort = DEFAULT_WORK_SORT;
-  const { result, input, notice } = await safeListJobs(db, ctx, requested);
+  const { scope, scopeCookie } = await pageScope(ctx, param(sp, "scope"));
+  const { result, input, notice } = await safeListJobs(db, ctx, requested, { scopeCookie });
   const jobTypes = (await listJobTypes(db, ctx)).map((t) => ({ id: t.id, name: t.name, colour: t.colour }));
   const savedViews = await safeSavedViews(() => listSavedViews(db, ctx, { scope: "all_work" }));
 
@@ -45,10 +47,12 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
 
   const description =
     ctx.role === "editor"
-      ? "Every job you hold or have worked on, in one table."
-      : ctx.role === "photographer"
-        ? "Your jobs and your team's, in one sortable, filterable table."
-        : "Every job in the studio — sort, filter, group and save views.";
+      ? "Every job you hold, have worked on or created, in one table."
+      : scope === "mine"
+        ? "Your own shoots — sort, filter, group and save views."
+        : scope === "business"
+          ? "Every job in the studio — sort, filter, group and save views."
+          : "Your jobs — the ones you shoot or created — in one sortable, filterable table.";
 
   return (
     <PageContainer>
@@ -57,8 +61,11 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
         title="All Work"
         description={description}
         meta={
-          <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs font-medium text-ink-secondary numeric" title="Matching jobs">
-            {result.total.toLocaleString("en-AU")}
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs font-medium text-ink-secondary numeric" title="Matching jobs">
+              {result.total.toLocaleString("en-AU")}
+            </span>
+            <ScopeNotice scope={scope} />
           </span>
         }
         actions={

@@ -9,11 +9,12 @@ import {
   viewRange,
 } from "@/components/calendar/calendar-utils";
 import { FilterBar } from "@/components/filters/filter-bar";
-import { PageContainer } from "@/components/shell";
+import { PageContainer, ScopeNotice } from "@/components/shell";
 import { PageHeader } from "@/components/ui/page-header";
 import { todayCivil } from "@/lib/dates";
 import type { CalendarEventKind } from "@/lib/types";
 import { load, pageContext, param, params } from "@/server/page";
+import { pageScope } from "@/server/page-scope";
 import { getCalendarEvents } from "@/server/queries/calendar";
 import { loadOrgSettingsRow } from "@/server/queries/scope";
 
@@ -39,8 +40,14 @@ export default async function CalendarPage({ searchParams }: PageProps<"/workspa
   const weekStartsOn = normaliseWeekStart((await load(() => loadOrgSettingsRow(db, ctx)))?.weekStartsOn);
   const range = viewRange(view, date, weekStartsOn);
 
+  // Personal vs business view (docs/ROLES.md §8): `?scope=` wins over the cookie.
+  const { scope, scopeCookie } = await pageScope(ctx, param(sp, "scope"));
   const events = await load(() =>
-    getCalendarEvents(db, ctx, {
+    getCalendarEvents(
+      db,
+      ctx,
+      {
+      scope: param(sp, "scope"),
       from: range.from,
       to: range.to,
       kinds,
@@ -49,7 +56,9 @@ export default async function CalendarPage({ searchParams }: PageProps<"/workspa
       photographerId: params(sp, "photographerId"),
       clientId: params(sp, "clientId"),
       priority: params(sp, "priority"),
-    }),
+      },
+      { scopeCookie },
+    ),
   );
 
   return (
@@ -58,6 +67,7 @@ export default async function CalendarPage({ searchParams }: PageProps<"/workspa
         eyebrow="Workspace"
         title="Calendar"
         description="Shoots, editing, review, delivery and revision deadlines in one place. Overdue items are flagged in red."
+        meta={<ScopeNotice scope={scope} />}
       >
         <FilterBar quickFilters={[]} facets={["editor", "photographer", "client", "priority"]} timeZone={ctx.settings.timezone} searchPlaceholder="Filter by job, client…" />
       </PageHeader>

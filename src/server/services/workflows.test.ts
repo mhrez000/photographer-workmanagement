@@ -39,13 +39,18 @@ async function run<T>(userId: string, fn: (tx: Tx, ctx: AuthContext) => Promise<
 const asOwner = <T>(fn: (tx: Tx, ctx: AuthContext) => Promise<T> | T) => run(ids.users.owner, fn);
 
 describe("workflow permissions", () => {
-  it("view = owner/manager, manage = owner only", async () => {
-    expect((await getWorkflowGraph(db, await contextFor(db, ids.users.manager), ids.workflowId)).problems).toEqual([]);
+  it("view and manage = admins only (a team member with every switch and photographers get 403)", async () => {
+    // v1 managers could view but not manage; v2 has no manager role. The nearest v2 rules (docs/ROLES.md §3.3
+    // workflow.view / workflow.manage = admin only): a co-admin views AND manages; `lead` (= a migrated manager,
+    // every member switch on) and other photographers are refused both.
+    expect((await getWorkflowGraph(db, await contextFor(db, ids.users.coAdmin), ids.workflowId)).problems).toEqual([]);
+    await expect(getWorkflowGraph(db, await contextFor(db, ids.users.lead), ids.workflowId)).rejects.toThrow(ForbiddenError);
     await expect(getWorkflowGraph(db, await contextFor(db, ids.users.photographer1), ids.workflowId)).rejects.toThrow(ForbiddenError);
-    await expect(run(ids.users.manager, (tx, ctx) => createWorkflow(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
-    await expect(run(ids.users.manager, (tx, ctx) => addStatus(tx, ctx, { workflowId: ids.workflowId, name: "Hold", category: "review" }))).rejects.toThrow(
+    await expect(run(ids.users.lead, (tx, ctx) => createWorkflow(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
+    await expect(run(ids.users.lead, (tx, ctx) => addStatus(tx, ctx, { workflowId: ids.workflowId, name: "Hold", category: "review" }))).rejects.toThrow(
       ForbiddenError,
     );
+    expect((await run(ids.users.coAdmin, (tx, ctx) => createWorkflow(tx, ctx, { name: "X" }))).problems).toEqual([]);
   });
 
   it("foreign workflows are 404", async () => {
@@ -94,9 +99,9 @@ describe("createWorkflow / updateWorkflow / archiveWorkflow", () => {
     await expect(asOwner((tx, ctx) => archiveWorkflow(tx, ctx, { workflowId: ids.workflowId }))).rejects.toThrow(/default/);
 
     const wf = await asOwner((tx, ctx) => createWorkflow(tx, ctx, { name: "Video" }));
-    const jt = await run(ids.users.manager, (tx, ctx) => createJobType(tx, ctx, { name: "Reels", workflowId: wf.workflow.id }));
+    const jt = await run(ids.users.coAdmin, (tx, ctx) => createJobType(tx, ctx, { name: "Reels", workflowId: wf.workflow.id }));
     await expect(asOwner((tx, ctx) => archiveWorkflow(tx, ctx, { workflowId: wf.workflow.id }))).rejects.toThrow(/job type/);
-    await run(ids.users.manager, (tx, ctx) => archiveJobType(tx, ctx, { jobTypeId: jt.id }));
+    await run(ids.users.coAdmin, (tx, ctx) => archiveJobType(tx, ctx, { jobTypeId: jt.id }));
 
     const archived = await asOwner((tx, ctx) => archiveWorkflow(tx, ctx, { workflowId: wf.workflow.id }));
     expect(archived.archivedAt).not.toBeNull();
@@ -174,29 +179,29 @@ describe("statuses", () => {
 describe("transitions", () => {
   it("adds, updates and revives edges; duplicates are rejected", async () => {
     const res = await asOwner((tx, ctx) =>
-      addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["owner"] }),
+      addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["admin"] }),
     );
-    expect(res.transition.allowedRoles).toEqual(["owner"]);
+    expect(res.transition.allowedRoles).toEqual(["admin"]);
     const ev = await db.select().from(activityEvents).where(eq(activityEvents.entityId, res.transition.id)).orderBy(activityEvents.rowid);
     expect(ev[0].summary).toContain("New → In Progress");
 
     await expect(
       asOwner((tx, ctx) =>
-        addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["owner"] }),
+        addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["admin"] }),
       ),
     ).rejects.toThrow(/already exists/);
 
     const upd = await asOwner((tx, ctx) =>
-      updateTransition(tx, ctx, { transitionId: res.transition.id, allowedRoles: ["owner", "manager"], label: "Fast track" }),
+      updateTransition(tx, ctx, { transitionId: res.transition.id, allowedRoles: ["admin", "editor"], label: "Fast track" }),
     );
-    expect(upd.transition).toMatchObject({ allowedRoles: ["owner", "manager"], label: "Fast track" });
+    expect(upd.transition).toMatchObject({ allowedRoles: ["admin", "editor"], label: "Fast track" });
 
     await asOwner((tx, ctx) => archiveTransition(tx, ctx, { transitionId: res.transition.id }));
     const revived = await asOwner((tx, ctx) =>
-      addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["manager"] }),
+      addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.in_progress, allowedRoles: ["photographer"] }),
     );
     expect(revived.transition.id).toBe(res.transition.id);
-    expect(revived.transition).toMatchObject({ archivedAt: null, allowedRoles: ["manager"] });
+    expect(revived.transition).toMatchObject({ archivedAt: null, allowedRoles: ["photographer"] });
   });
 
   it("validates roles and endpoints", async () => {
@@ -205,10 +210,23 @@ describe("transitions", () => {
         addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: ids.statuses.review, allowedRoles: [] }),
       ),
     ).rejects.toThrow(ValidationError);
+    // v1 role names and `client` are not transition roles any more (docs/ROLES.md §5.1).
+    for (const legacy of [["owner"], ["manager"], ["client"]]) {
+      await expect(
+        asOwner((tx, ctx) =>
+          addTransition(tx, ctx, {
+            workflowId: ids.workflowId,
+            fromStatusId: ids.statuses.new,
+            toStatusId: ids.statuses.review,
+            allowedRoles: legacy as unknown as ["admin"],
+          }),
+        ),
+      ).rejects.toThrow(ValidationError);
+    }
     const other = await seedMinimalOrg(db, { slug: "other" });
     await expect(
       asOwner((tx, ctx) =>
-        addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: other.statuses.review, allowedRoles: ["owner"] }),
+        addTransition(tx, ctx, { workflowId: ids.workflowId, fromStatusId: ids.statuses.new, toStatusId: other.statuses.review, allowedRoles: ["admin"] }),
       ),
     ).rejects.toThrow(NotFoundError);
   });
@@ -221,23 +239,24 @@ describe("transitions", () => {
 });
 
 describe("job types", () => {
-  it("managers manage job types bound to valid workflows; editors cannot", async () => {
-    const jt = await run(ids.users.manager, (tx, ctx) => createJobType(tx, ctx, { name: "Aerial", defaultEstimatedHours: 1.5 }));
+  it("admins manage job types bound to valid workflows; editors and team members cannot", async () => {
+    const jt = await run(ids.users.coAdmin, (tx, ctx) => createJobType(tx, ctx, { name: "Aerial", defaultEstimatedHours: 1.5 }));
     expect(jt.workflowId).toBe(ids.workflowId);
     await expect(run(ids.users.editor1, (tx, ctx) => createJobType(tx, ctx, { name: "Nope" }))).rejects.toThrow(ForbiddenError);
-    await expect(run(ids.users.manager, (tx, ctx) => createJobType(tx, ctx, { name: "aerial" }))).rejects.toThrow(/already exists/);
+    await expect(run(ids.users.lead, (tx, ctx) => createJobType(tx, ctx, { name: "Nope" }))).rejects.toThrow(ForbiddenError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => createJobType(tx, ctx, { name: "aerial" }))).rejects.toThrow(/already exists/);
 
     const blank = await asOwner((tx, ctx) => createWorkflow(tx, ctx, { name: "Blank", from: "blank" }));
-    await expect(run(ids.users.manager, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, workflowId: blank.workflow.id }))).rejects.toThrow(/problems/);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, workflowId: blank.workflow.id }))).rejects.toThrow(/problems/);
 
     const video = await asOwner((tx, ctx) => createWorkflow(tx, ctx, { name: "Video" }));
-    const moved = await run(ids.users.manager, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, workflowId: video.workflow.id, expectedVersion: 1 }));
+    const moved = await run(ids.users.coAdmin, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, workflowId: video.workflow.id, expectedVersion: 1 }));
     expect(moved).toMatchObject({ workflowId: video.workflow.id, version: 2 });
     const ev = await db.select().from(activityEvents).where(eq(activityEvents.eventType, "job_type.updated")).orderBy(activityEvents.rowid);
     expect(ev[0].metadata).toMatchObject({ fromLabel: "Standard Photography Workflow", toLabel: "Video" });
 
-    await run(ids.users.manager, (tx, ctx) => archiveJobType(tx, ctx, { jobTypeId: jt.id }));
-    await expect(run(ids.users.manager, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, name: "X" }))).rejects.toThrow(/archived/);
-    expect((await run(ids.users.manager, (tx, ctx) => restoreJobType(tx, ctx, { jobTypeId: jt.id }))).archivedAt).toBeNull();
+    await run(ids.users.coAdmin, (tx, ctx) => archiveJobType(tx, ctx, { jobTypeId: jt.id }));
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jt.id, name: "X" }))).rejects.toThrow(/archived/);
+    expect((await run(ids.users.coAdmin, (tx, ctx) => restoreJobType(tx, ctx, { jobTypeId: jt.id }))).archivedAt).toBeNull();
   });
 });

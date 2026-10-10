@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { organisationSettings, workSessions } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, inviteDefaultsMember, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { endOfCivilDayIso } from "@/lib/dates";
 import type { MyWorkQueue } from "@/lib/types";
 import { getMyWorkQueue } from "./myWork";
@@ -97,5 +97,31 @@ describe("getMyWorkQueue", () => {
     const q = await getMyWorkQueue(db, await contextFor(db, ids.users.editor1));
     expect(q.runningSession).toMatchObject({ isRunning: true, durationSeconds: 600, user: { id: ids.users.editor1 } });
     expect((await getMyWorkQueue(db, await contextFor(db, ids.users.editor2))).runningSession).toBeNull();
+  });
+});
+
+describe("getMyWorkQueue — roles v2", () => {
+  it("admins get their shoots plus reviews only an admin can do; never other members' reviewable jobs", async () => {
+    const junior = await inviteDefaultsMember(db, ids); // review ✗ → the owner reviews
+    await job({ name: "own-shoot", statusKey: "in_progress", photographerId: ids.users.owner, createdByUserId: ids.users.owner });
+    await job({ name: "junior-review", statusKey: "submitted", photographerId: junior, createdByUserId: junior });
+    await job({ name: "p1-review", statusKey: "submitted", photographerId: ids.users.photographer1 }); // photographer1 reviews their own
+    await job({ name: "for-p2", statusKey: "in_progress", photographerId: ids.users.photographer2, createdByUserId: ids.users.owner });
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.owner));
+    expect(Object.values(sections(q)).flat().sort()).toEqual(["for-p2", "junior-review", "own-shoot"]);
+    expect(q.waitingForReview.map((r) => r.name)).toEqual(["junior-review"]);
+    // a co-admin's queue has the junior's review too, but not the owner's shoot
+    const co = await getMyWorkQueue(db, await contextFor(db, ids.users.coAdmin));
+    expect(Object.values(sections(co)).flat()).toEqual(["junior-review"]);
+  });
+
+  it("editors: jobs they hold only (not jobs they created for someone else to edit); clients: nothing", async () => {
+    await job({ name: "held", statusKey: "in_progress" });
+    await job({ name: "created-unassigned", statusKey: "new", editorId: null, createdByUserId: ids.users.editor1, photographerId: ids.users.owner });
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.editor1));
+    expect(Object.values(sections(q)).flat()).toEqual(["held"]);
+    const client = await getMyWorkQueue(db, await contextFor(db, ids.users.client));
+    expect(Object.values(sections(client)).flat()).toEqual([]);
+    expect(client.runningSession).toBeNull();
   });
 });

@@ -1,14 +1,16 @@
 import { eq, sql } from "drizzle-orm";
 import { SignJWT } from "jose";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { organisationSettings, teamMemberships, users } from "@/db/schema";
-import { addTeamFixture, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
-import { buildContextFromDb, loadTeamUserIds, signSessionToken, systemContext, verifySessionToken } from "./session";
+import { clients, organisationSettings, teamMemberships, users } from "@/db/schema";
+import { addTeamFixture, fakeClock, inviteDefaultsMember, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { buildContextFromDb, effectiveFlags, loadTeamUserIds, signSessionToken, systemContext, verifySessionToken } from "./session";
 
 describe("session tokens", () => {
-  it("round-trips { sub, sv }", async () => {
+  it("round-trips { sub, sv, k } (a missing kind claim reads as staff)", async () => {
     const token = await signSessionToken({ sub: "user-1", sv: 3 });
-    expect(await verifySessionToken(token)).toEqual({ sub: "user-1", sv: 3 });
+    expect(await verifySessionToken(token)).toEqual({ sub: "user-1", sv: 3, k: "staff" });
+    const client = await signSessionToken({ sub: "user-2", sv: 1, k: "client" });
+    expect(await verifySessionToken(client)).toEqual({ sub: "user-2", sv: 1, k: "client" });
   });
 
   it("rejects tampered, foreign-key and malformed tokens", async () => {
@@ -45,23 +47,31 @@ describe("buildContextFromDb", () => {
   beforeEach(async () => {
     fakeClock.set("2026-10-08T00:00:00.000Z");
     db = await makeTestDb();
-    ids = await seedMinimalOrg(db, { settings: { timeTrackingEnabled: true, editorsSeeTeamJobs: true } });
+    ids = await seedMinimalOrg(db, { settings: { timeTrackingEnabled: true } });
   });
   afterEach(() => fakeClock.reset());
 
   it("builds a context for an active user from the fresh row + org settings", async () => {
-    const ctx = await buildContextFromDb(db, ids.users.manager, { sessionVersion: 1, requestId: "req-1" });
+    const ctx = await buildContextFromDb(db, ids.users.coAdmin, { sessionVersion: 1, requestId: "req-1" });
     expect(ctx).not.toBeNull();
     expect(ctx).toMatchObject({
-      userId: ids.users.manager,
+      userId: ids.users.coAdmin,
       organisationId: ids.organisationId,
-      role: "manager",
+      role: "photographer",
+      isAdmin: true,
+      isPrimaryOwner: false,
       isActive: true,
       isSystem: false,
       requestId: "req-1",
-      canViewAnalytics: false,
+      // admin ⇒ every member switch, whatever the raw columns say
+      canViewAnalytics: true,
+      canViewAllJobs: true,
+      canReviewSubmissions: true,
+      canViewTeamJobs: false,
+      clientId: null,
+      clientFeedbackEnabled: false,
     });
-    expect(ctx?.settings).toMatchObject({ timezone: "Australia/Sydney", timeTrackingEnabled: true, editorsSeeTeamJobs: true });
+    expect(ctx?.settings).toEqual({ timezone: "Australia/Sydney", timeTrackingEnabled: true, automationsEnabled: true, auditNotifications: false });
     expect(ctx?.now()).toBe("2026-10-08T00:00:00.000Z");
     fakeClock.advanceMinutes(1);
     expect(ctx?.now()).toBe("2026-10-08T00:01:00.000Z");
@@ -82,12 +92,58 @@ describe("buildContextFromDb", () => {
   });
 
   it("re-reads role/flags on every build (no stale permissions)", async () => {
-    await db.update(users).set({ role: "manager", canViewAnalytics: true }).where(eq(users.id, ids.users.photographer1));
+    expect((await buildContextFromDb(db, ids.users.photographer1))?.canViewAnalytics).toBe(false);
+    await db.update(users).set({ isAdmin: true }).where(eq(users.id, ids.users.photographer1));
     const ctx = await buildContextFromDb(db, ids.users.photographer1);
-    expect(ctx?.role).toBe("manager");
+    expect(ctx?.isAdmin).toBe(true);
     expect(ctx?.canViewAnalytics).toBe(true);
+    await db.update(users).set({ isAdmin: false, canViewAnalytics: true }).where(eq(users.id, ids.users.photographer1));
+    expect((await buildContextFromDb(db, ids.users.photographer1))).toMatchObject({ isAdmin: false, canViewAnalytics: true, canViewAllJobs: false });
     await db.update(organisationSettings).set({ timezone: "Europe/London" });
     expect((await buildContextFromDb(db, ids.users.photographer1))?.settings.timezone).toBe("Europe/London");
+  });
+
+  it("marks the primary owner and computes effective switches per persona", async () => {
+    const owner = await buildContextFromDb(db, ids.users.owner);
+    expect(owner).toMatchObject({ isAdmin: true, isPrimaryOwner: true });
+    const lead = await buildContextFromDb(db, ids.users.lead);
+    expect(lead).toMatchObject({ isAdmin: false, canViewAllJobs: true, canViewTeamWorkloads: true, canViewAnalytics: true, canViewTeamJobs: false });
+    const p1 = await buildContextFromDb(db, ids.users.photographer1);
+    expect(p1).toMatchObject({ canCreateJobs: true, canAssignEditors: true, canReviewSubmissions: true, canViewAllJobs: false, canViewAnalytics: false });
+    const fresh = await buildContextFromDb(db, await inviteDefaultsMember(db, ids));
+    expect(fresh).toMatchObject({ canCreateJobs: true, canAssignEditors: true, canReviewSubmissions: false, canViewAllJobs: false });
+    // a member switch on an editor row is ignored; the editor switch only counts for editors
+    await db.update(users).set({ canViewAllJobs: true, canReviewSubmissions: true, canViewTeamJobs: true }).where(eq(users.id, ids.users.editor1));
+    expect(await buildContextFromDb(db, ids.users.editor1)).toMatchObject({ canViewAllJobs: false, canReviewSubmissions: false, canViewTeamJobs: true, canCreateJobs: true });
+    await db.update(users).set({ canViewTeamJobs: true }).where(eq(users.id, ids.users.photographer1));
+    expect((await buildContextFromDb(db, ids.users.photographer1))?.canViewTeamJobs).toBe(false);
+  });
+
+  it("effectiveFlags: clients have no switches", () => {
+    const none = effectiveFlags({
+      role: "client",
+      isAdmin: false,
+      canCreateJobs: true,
+      canViewAllJobs: true,
+      canAssignEditors: true,
+      canReviewSubmissions: true,
+      canViewTeamWorkloads: true,
+      canViewAnalytics: true,
+      canViewTeamJobs: true,
+    });
+    expect(Object.values(none).every((v) => v === false)).toBe(true);
+  });
+
+  it("client users: context carries the client; none while the portal is off or the client is archived", async () => {
+    const ctx = await buildContextFromDb(db, ids.users.client);
+    expect(ctx).toMatchObject({ role: "client", isAdmin: false, clientId: ids.clientId, clientFeedbackEnabled: true, canCreateJobs: false });
+    expect(ctx?.teamUserIds.size).toBe(0);
+    expect((await buildContextFromDb(db, ids.users.client2))?.clientFeedbackEnabled).toBe(false);
+    await db.update(clients).set({ portalEnabled: false }).where(eq(clients.id, ids.clientId));
+    expect(await buildContextFromDb(db, ids.users.client)).toBeNull();
+    await db.update(clients).set({ portalEnabled: true, archivedAt: fakeClock.now() }).where(eq(clients.id, ids.clientId));
+    expect(await buildContextFromDb(db, ids.users.client)).toBeNull();
+    expect(await buildContextFromDb(db, ids.users.client2)).not.toBeNull();
   });
 
   describe("teamUserIds", () => {
@@ -101,10 +157,10 @@ describe("buildContextFromDb", () => {
 
     it("ignores archived teams and memberships that ended (either side)", async () => {
       await addTeamFixture(db, ids, { name: "Old crew", archived: true, memberIds: [ids.users.editor1, ids.users.photographer2] });
-      const live = await addTeamFixture(db, ids, { name: "Live", memberIds: [ids.users.editor1, ids.users.photographer1, ids.users.manager] });
+      const live = await addTeamFixture(db, ids, { name: "Live", memberIds: [ids.users.editor1, ids.users.photographer1, ids.users.coAdmin] });
       const [, photographerMembership] = live.membershipIds;
       await db.update(teamMemberships).set({ leftAt: fakeClock.now() }).where(eq(teamMemberships.id, photographerMembership));
-      expect([...(await loadTeamUserIds(db, ids.organisationId, ids.users.editor1))]).toEqual([ids.users.manager]);
+      expect([...(await loadTeamUserIds(db, ids.organisationId, ids.users.editor1))]).toEqual([ids.users.coAdmin]);
 
       // the user themself left → no teammates at all from that team
       const [editorMembership] = live.membershipIds;
@@ -126,7 +182,18 @@ describe("systemContext", () => {
     const db = await makeTestDb();
     const ids = await seedMinimalOrg(db, { settings: { automationsEnabled: false } });
     const ctx = await systemContext(ids.organisationId, { db, requestId: "sys", automationRunId: "run-1" });
-    expect(ctx).toMatchObject({ userId: null, isSystem: true, role: "owner", cause: "automation", automationRunId: "run-1", requestId: "sys" });
+    expect(ctx).toMatchObject({
+      userId: null,
+      isSystem: true,
+      role: "photographer",
+      isAdmin: true,
+      isPrimaryOwner: false,
+      canViewAllJobs: true,
+      clientId: null,
+      cause: "automation",
+      automationRunId: "run-1",
+      requestId: "sys",
+    });
     expect(ctx.settings.automationsEnabled).toBe(false);
     expect((await systemContext(ids.organisationId, { db })).cause).toBe("sweep");
     fakeClock.reset();

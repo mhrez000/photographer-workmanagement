@@ -17,14 +17,15 @@ import { jobRevisions, jobStatusTransitions } from "@/db/schema";
 import type { AuthContext, JobRevision } from "@/lib/types";
 import { optionalDeadlineToIso } from "@/lib/validation/jobs";
 import { RequestRevisionInput, ResolveRevisionInput, UpdateRevisionInput, WithdrawRevisionInput } from "@/lib/validation/revisions";
-import { assertCan } from "@/server/auth/permissions";
+import { assertCan, can } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
-import { InvalidTransitionError, NotFoundError, ValidationError } from "@/server/errors";
+import { ForbiddenError, InvalidTransitionError, NotFoundError, ValidationError } from "@/server/errors";
 import { assertVersion, loadRevisionInOrg, loadUserInOrg, parseInput } from "./_shared";
 import { assignEditorToJob } from "./assignments";
 import { notify } from "./notifications";
 import {
   applyMove,
+  assertMayMoveJob,
   jobEventMeta,
   jobLinkPath,
   loadVisibleJob,
@@ -46,7 +47,8 @@ async function loadRevision(tx: Tx, id: string): Promise<JobRevision> {
 /** `POST /api/jobs/:id/revisions` — request revision #n (job moves to a revision status). */
 export async function requestRevision(tx: Tx, ctx: AuthContext, input: unknown): Promise<RevisionTransitionResult> {
   const p = parseInput(RequestRevisionInput, input);
-  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
+  assertMayMoveJob(ctx, ref);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: "revision" });
   if (target.category !== "revision") {
@@ -156,7 +158,9 @@ export async function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): 
 export async function resolveRevision(tx: Tx, ctx: AuthContext, input: unknown): Promise<RevisionTransitionResult> {
   const p = parseInput(ResolveRevisionInput, input);
   const revision = await loadRevisionInOrg(tx, ctx, p.revisionId);
-  const { job } = await loadVisibleJob(tx, ctx, revision.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, revision.jobId);
+  // Permission before state and version (a read-only viewer gets 403, never a 409 carrying the row).
+  if (!can(ctx, "revision.resolve", ref)) throw new ForbiddenError("revision.resolve", "Only the assigned editor can do this");
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is already resolved");
   if (job.statusCategory !== "revision") {
     throw new InvalidTransitionError(job.statusCategory, "resubmitted", "The job is not waiting on this revision");

@@ -20,7 +20,7 @@ export function MobileTabBar({ tabs, pathname, onOpenSearch, onOpenMore, moreOpe
     <nav
       aria-label="Primary"
       className={cn(
-        "fixed inset-x-0 bottom-0 z-30 border-t border-border bg-surface/95 backdrop-blur safe-bottom lg:hidden",
+        "fixed inset-x-0 bottom-0 z-(--z-shell) border-t border-border bg-surface/95 backdrop-blur safe-bottom lg:hidden",
       )}
     >
       <ul className="flex h-(--tabbar-height) items-stretch">

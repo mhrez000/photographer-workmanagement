@@ -1,5 +1,8 @@
 import { redirect } from "next/navigation";
+import { getOptionalContext } from "@/server/auth/session";
 
-export default function Home() {
-  redirect("/dashboard");
+/** Landing by persona (docs/ROLES.md §7.8): clients → /portal, staff → /dashboard. */
+export default async function Home() {
+  const ctx = await getOptionalContext();
+  redirect(ctx?.role === "client" ? "/portal" : "/dashboard");
 }

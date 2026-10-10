@@ -1,4 +1,12 @@
-/** Zod inputs for the users service (ARCHITECTURE.md §2.1, §3.2, §4.5). */
+/**
+ * Zod inputs for the users service (docs/ROLES.md §3.5, §6.1; ARCHITECTURE.md §4.5).
+ *
+ * The profile schema and every roles-v2 schema are STRICT (`z.strictObject`):
+ * unknown keys — including the columns only dedicated services may write
+ * (`isAdmin`, `clientId`, the permission switches) — are a 400 (§3.5). The
+ * lifecycle schemas (deactivate, capacity, id-only, prefs) keep stripping
+ * unknown keys as before.
+ */
 import { z } from "zod";
 import { NOTIFICATION_TYPES, ROLES } from "@/lib/constants";
 import { EmailSchema } from "./auth";
@@ -6,21 +14,68 @@ import { ExpectedVersionSchema, HexColourSchema, IdSchema, NameSchema, OptionalT
 
 const CapacitySchema = z.number().min(0).max(168).nullable();
 
-export const InviteUserInput = z.object({
-  email: EmailSchema,
-  name: NameSchema(120),
-  role: z.enum(ROLES),
-  title: OptionalTextSchema(120),
-  avatarColour: HexColourSchema.optional(),
-  /** null / omitted → organisation default. */
-  capacityHoursPerWeek: CapacitySchema.optional(),
+/** Team-member switches an invite may set (omitted → invite defaults, §2.2: review ✗). */
+export const MemberFlagsInput = z.strictObject({
+  canCreateJobs: z.boolean().optional(),
+  canAssignEditors: z.boolean().optional(),
+  canReviewSubmissions: z.boolean().optional(),
   canViewTeamWorkloads: z.boolean().optional(),
+  canViewAllJobs: z.boolean().optional(),
   canViewAnalytics: z.boolean().optional(),
 });
+export type MemberFlagsInput = z.infer<typeof MemberFlagsInput>;
+
+/** Editor switches an invite may set (omitted → invite defaults: create ✓, other editors' jobs ✗). */
+export const EditorFlagsInput = z.strictObject({
+  canCreateJobs: z.boolean().optional(),
+  canViewTeamJobs: z.boolean().optional(),
+});
+export type EditorFlagsInput = z.infer<typeof EditorFlagsInput>;
+
+const inviteBase = {
+  email: EmailSchema,
+  name: NameSchema(120),
+  avatarColour: HexColourSchema.optional(),
+};
+
+/**
+ * POST /api/users — discriminated on `role` (§6.1):
+ * - photographer: optional `isAdmin` (co-owner) and member `flags`;
+ * - editor: optional editor `flags`;
+ * - client: REQUIRED `clientId` (a non-archived, portal-enabled client of the
+ *   organisation); no flags, no capacity, no admin, no title.
+ */
+export const InviteUserInput = z.discriminatedUnion("role", [
+  z.strictObject({
+    ...inviteBase,
+    role: z.literal("photographer"),
+    title: OptionalTextSchema(120),
+    /** null / omitted → organisation default. */
+    capacityHoursPerWeek: CapacitySchema.optional(),
+    isAdmin: z.boolean().optional(),
+    flags: MemberFlagsInput.optional(),
+  }),
+  z.strictObject({
+    ...inviteBase,
+    role: z.literal("editor"),
+    title: OptionalTextSchema(120),
+    capacityHoursPerWeek: CapacitySchema.optional(),
+    flags: EditorFlagsInput.optional(),
+  }),
+  z.strictObject({
+    ...inviteBase,
+    role: z.literal("client"),
+    clientId: IdSchema,
+  }),
+]);
 export type InviteUserInput = z.infer<typeof InviteUserInput>;
 
-/** Profile fields. Self edits may change name/title/avatarColour; email needs `user.edit`. */
-export const UpdateUserInput = z.object({
+/**
+ * Profile fields. Self edits may change name/title/avatarColour (clients: name
+ * only); email needs `user.change_email`. Strict: `role`, `isAdmin`, `clientId`
+ * and the switches have their own endpoints.
+ */
+export const UpdateUserInput = z.strictObject({
   userId: IdSchema,
   expectedVersion: ExpectedVersionSchema,
   name: NameSchema(120).optional(),
@@ -30,7 +85,11 @@ export const UpdateUserInput = z.object({
 });
 export type UpdateUserInput = z.infer<typeof UpdateUserInput>;
 
-export const ChangeRoleInput = z.object({
+/**
+ * `role` accepts every stored role so a client ⇄ staff request gets the
+ * service's 422 `role_change_not_allowed` rather than a schema error.
+ */
+export const ChangeRoleInput = z.strictObject({
   userId: IdSchema,
   role: z.enum(ROLES),
   expectedVersion: ExpectedVersionSchema,
@@ -60,17 +119,53 @@ export const SetCapacityInput = z.object({
 });
 export type SetCapacityInput = z.infer<typeof SetCapacityInput>;
 
-export const SetVisibilityFlagsInput = z
-  .object({
+/** POST /api/users/:id/admin { isAdmin, expectedVersion } (§6.1). */
+export const SetAdminInput = z.strictObject({
+  userId: IdSchema,
+  isAdmin: z.boolean(),
+  expectedVersion: ExpectedVersionSchema,
+});
+export type SetAdminInput = z.infer<typeof SetAdminInput>;
+
+/**
+ * POST /api/users/:id/permissions (§6.1; replaces /visibility). Member switches
+ * apply to non-admin photographers, `canViewTeamJobs` to editors,
+ * `canCreateJobs` to both; the service rejects a switch outside the target's role.
+ */
+export const SetPermissionsInput = z
+  .strictObject({
     userId: IdSchema,
+    canCreateJobs: z.boolean().optional(),
+    canViewAllJobs: z.boolean().optional(),
+    canAssignEditors: z.boolean().optional(),
+    canReviewSubmissions: z.boolean().optional(),
     canViewTeamWorkloads: z.boolean().optional(),
     canViewAnalytics: z.boolean().optional(),
+    canViewTeamJobs: z.boolean().optional(),
     expectedVersion: ExpectedVersionSchema,
   })
-  .refine((v) => v.canViewTeamWorkloads !== undefined || v.canViewAnalytics !== undefined, {
-    message: "Nothing to change",
-  });
-export type SetVisibilityFlagsInput = z.infer<typeof SetVisibilityFlagsInput>;
+  .refine(
+    (v) =>
+      [v.canCreateJobs, v.canViewAllJobs, v.canAssignEditors, v.canReviewSubmissions, v.canViewTeamWorkloads, v.canViewAnalytics, v.canViewTeamJobs].some(
+        (f) => f !== undefined,
+      ),
+    { message: "Nothing to change" },
+  );
+export type SetPermissionsInput = z.infer<typeof SetPermissionsInput>;
+
+/**
+ * POST /api/organisation/primary-owner { userId, expectedVersion } (§3.4).
+ * `expectedVersion` is the organisation_settings row version.
+ */
+export const TransferPrimaryOwnerInput = z.strictObject({
+  userId: IdSchema,
+  expectedVersion: ExpectedVersionSchema,
+});
+export type TransferPrimaryOwnerInput = z.infer<typeof TransferPrimaryOwnerInput>;
+
+/** GET /api/clients/:id/portal-users (§7.1). */
+export const ClientPortalUsersInput = z.strictObject({ clientId: IdSchema });
+export type ClientPortalUsersInput = z.infer<typeof ClientPortalUsersInput>;
 
 export const SetNotificationPrefsInput = z.object({
   /** Omitted → the actor. Only your own preferences can be changed. */

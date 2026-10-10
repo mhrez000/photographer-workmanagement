@@ -10,12 +10,13 @@ import { z } from "zod";
 import {
   DASHBOARD_WIDGET_TYPES,
   JOB_TABLE_COLUMNS,
+  AUTOMATION_NOTE_KINDS,
   LINK_KINDS,
   NOTE_KINDS,
   PRIORITIES,
-  ROLES,
   STATUS_CATEGORIES,
-  type Role,
+  TRANSITION_ROLES,
+  type TransitionRole,
 } from "@/lib/constants";
 import type {
   AutomationAction,
@@ -41,8 +42,8 @@ const id = z.string().min(1).max(64);
 const statusCategory = z.enum(STATUS_CATEGORIES);
 const priority = z.enum(PRIORITIES);
 
-/** workflow_transitions.allowed_roles */
-export const AllowedRolesSchema: z.ZodType<Role[]> = z.array(z.enum(ROLES)).min(1);
+/** workflow_transitions.allowed_roles: non-empty subset of TRANSITION_ROLES (roles v2 §5.1; "client" is never a value). */
+export const AllowedRolesSchema: z.ZodType<TransitionRole[]> = z.array(z.enum(TRANSITION_ROLES)).min(1);
 
 /* ------------------------------------------------------------------ */
 /*  Automations                                                        */
@@ -77,28 +78,65 @@ export const AutomationConditionSchema: z.ZodType<AutomationCondition> = z.union
   z.object({ field: z.literal("hasLinkKind"), op: z.enum(["exists", "missing"]), kind: z.enum(LINK_KINDS) }),
 ]);
 
+/** Notify targets accepted on WRITE (roles v2: "managers" / "owner" became "admins"). */
+export const AUTOMATION_NOTIFY_TARGETS = ["photographer", "editor", "previous_editor", "creator", "admins", "user"] as const;
+/** Legacy notify targets still found in frozen snapshots (automation_runs.actions_performed); read as "admins". */
+export const LEGACY_AUTOMATION_NOTIFY_TARGETS = ["managers", "owner"] as const;
+
+const assignEditorAction = z.object({
+  type: z.literal("assign_editor"),
+  target: z.enum(["previous_editor", "original_editor", "user"]),
+  userId: id.optional(),
+});
+const transitionAction = z.object({ type: z.literal("transition"), toCategory: statusCategory, reason: z.string().max(500).optional() });
+const setPriorityAction = z.object({ type: z.literal("set_priority"), priority });
+
+/**
+ * WRITE schema: only the roles-v2 notify targets; `add_note` cannot write a
+ * client-visible `delivery` note (AUTOMATION_NOTE_KINDS, §6.3).
+ */
 export const AutomationActionSchema: z.ZodType<AutomationAction> = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("notify"),
-    target: z.enum(["photographer", "editor", "previous_editor", "creator", "managers", "owner", "user"]),
+    target: z.enum(AUTOMATION_NOTIFY_TARGETS),
     userId: id.optional(),
     message: z.string().max(500).optional(),
   }),
+  assignEditorAction,
+  transitionAction,
+  setPriorityAction,
+  z.object({ type: z.literal("add_note"), kind: z.enum(AUTOMATION_NOTE_KINDS), body: z.string().min(1).max(5000) }),
+]);
+
+/**
+ * READ (parse-or-fallback) schema: also accepts the legacy "managers" / "owner"
+ * targets (normalised to "admins") and any NOTE_KINDS value (frozen snapshots).
+ * The engine must still refuse to EXECUTE a `delivery` note action.
+ */
+export const AutomationActionReadSchema: z.ZodType<AutomationAction> = z.discriminatedUnion("type", [
   z.object({
-    type: z.literal("assign_editor"),
-    target: z.enum(["previous_editor", "original_editor", "user"]),
+    type: z.literal("notify"),
+    target: z.enum([...AUTOMATION_NOTIFY_TARGETS, ...LEGACY_AUTOMATION_NOTIFY_TARGETS]).transform((t) =>
+      t === "managers" || t === "owner" ? ("admins" as const) : t,
+    ),
     userId: id.optional(),
+    message: z.string().max(500).optional(),
   }),
-  z.object({ type: z.literal("transition"), toCategory: statusCategory, reason: z.string().max(500).optional() }),
-  z.object({ type: z.literal("set_priority"), priority }),
+  assignEditorAction,
+  transitionAction,
+  setPriorityAction,
   z.object({ type: z.literal("add_note"), kind: z.enum(NOTE_KINDS), body: z.string().min(1).max(5000) }),
 ]);
 
 export const AutomationConditionsSchema = z.array(AutomationConditionSchema).max(20);
+/** WRITE (create / update automation). */
 export const AutomationActionsSchema = z.array(AutomationActionSchema).min(1).max(10);
+/** READ of stored automations.actions (legacy targets normalised). */
+export const AutomationActionsReadSchema = z.array(AutomationActionReadSchema).min(1).max(10);
 
+/** automation_runs.actions_performed entries are frozen ledger rows: read with the legacy-tolerant schema. */
 export const AutomationActionResultSchema: z.ZodType<AutomationActionResult> = z.object({
-  action: AutomationActionSchema,
+  action: AutomationActionReadSchema,
   ok: z.boolean(),
   detail: z.string().optional(),
   activityEventId: z.string().optional(),

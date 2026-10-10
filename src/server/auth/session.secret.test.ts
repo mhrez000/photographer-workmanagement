@@ -35,7 +35,7 @@ describe("session secret", () => {
     // A restart reuses the same file → existing sessions stay valid.
     vi.resetModules();
     const second = await import("./session");
-    expect(await second.verifySessionToken(token)).toEqual({ sub: "u1", sv: 1 });
+    expect(await second.verifySessionToken(token)).toEqual({ sub: "u1", sv: 1, k: "staff" });
   });
 
   it("never generates one in production", async () => {

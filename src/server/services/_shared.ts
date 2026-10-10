@@ -33,7 +33,6 @@ import {
   workflowStatuses,
   workflows,
 } from "@/db/schema";
-import { MANAGEMENT_ROLES } from "@/lib/constants";
 import type {
   AuthContext,
   Automation,
@@ -55,6 +54,8 @@ import type {
   WorkflowStatus,
 } from "@/lib/types";
 import { ConflictError, NotFoundError, ValidationError } from "@/server/errors";
+import { isAdmin, jobRefFromRow } from "@/server/auth/permissions";
+import { loadJobRef } from "@/server/auth/job-ref";
 import { runPendingAutomations } from "./automationEngine";
 
 export type { Db, DbLike, Tx };
@@ -216,26 +217,20 @@ export async function loadPastEditorIds(db: DbLike, jobId: string): Promise<stri
   return rows.map((r) => r.userId);
 }
 
+/**
+ * Sync ref from a job row (roles v2: unknown facts are conservative — draft
+ * window closed, project not shared). Prefer `loadJobPermissionRef` / `loadJobRef`.
+ */
 export function jobPermissionRef(job: Job, pastEditorIds?: readonly string[]): JobPermissionRef {
-  return {
-    id: job.id,
-    organisationId: job.organisationId,
-    photographerId: job.photographerId,
-    editorId: job.editorId,
-    createdByUserId: job.createdByUserId,
-    statusCategory: job.statusCategory,
-    isPaused: job.isPaused,
-    ...(pastEditorIds ? { pastEditorIds } : {}),
-  };
+  return jobRefFromRow(job, pastEditorIds ? { pastEditorIds } : {});
 }
 
 /**
- * The facts permissions.ts needs about a job. `pastEditorIds` is loaded for
- * editors only (the `past` read-only scope).
+ * The facts permissions.ts needs about a job (roles v2: every fact, incl.
+ * pastEditorIds for the self-review rule and draftClosed; one query).
  */
 export async function loadJobPermissionRef(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobPermissionRef> {
-  const job = await loadJobInOrg(db, ctx, jobId);
-  return jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
+  return (await loadJobRef(db, ctx, jobId)).ref;
 }
 
 export async function loadUserInOrg(db: DbLike, ctx: AuthContext, userId: string): Promise<User> {
@@ -382,11 +377,11 @@ export function safeUser(row: User): SafeUser {
 }
 
 /**
- * Users projection by viewer (§3.2): owners/managers and the user themself
- * get the full safe row; photographers/editors get `UserRef` only
+ * Users projection by viewer (roles v2 §3.4): admins and the user themself
+ * get the full safe row; team members / editors get `UserRef` only
  * (`id, name, role, avatarColour, isActive`).
  */
 export function redactUser(row: User, ctx: AuthContext): SafeUser | UserRef {
-  if (MANAGEMENT_ROLES.includes(ctx.role) || row.id === ctx.userId) return safeUser(row);
+  if (isAdmin(ctx) || row.id === ctx.userId) return safeUser(row);
   return userRef(row);
 }

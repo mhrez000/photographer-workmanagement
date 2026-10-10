@@ -35,7 +35,8 @@ describe("makeTestDb", () => {
     expect(tables).toHaveLength(27);
     expect(tables).toContain("activity_events");
     expect(tables.sort()).toEqual([...schema.TABLE_NAMES].sort());
-    expect(ROW_GUARDS).toHaveLength(28);
+    expect(ROW_GUARDS).toHaveLength(31);
+    expect(ROW_GUARDS.map((g) => g.name)).toEqual(expect.arrayContaining(["users_keep_admin", "users_client_link", "org_primary_owner"]));
     expect((await listInstalledGuards(db)).sort()).toEqual(GUARDS.map((g) => g.name).sort());
     // FKs are enforced (restrict): a job type pointing at a missing workflow is rejected.
     expect(
@@ -49,7 +50,7 @@ describe("makeTestDb", () => {
     const a = await makeTestDb();
     const b = await makeTestDb();
     await seedMinimalOrg(a);
-    expect((await a.select({ n: count() }).from(schema.users))[0]?.n).toBe(7);
+    expect((await a.select({ n: count() }).from(schema.users))[0]?.n).toBe(10);
     expect((await b.select({ n: count() }).from(schema.users))[0]?.n).toBe(0);
   });
 
@@ -85,16 +86,27 @@ describe("seedMinimalOrg", () => {
   });
   afterEach(() => fakeClock.reset());
 
-  it("creates the org, settings, 7 users, default workflow, job types, client and project with known ids", async () => {
+  it("creates the org, settings, 10 persona users, default workflow, job types, clients and projects with known ids", async () => {
     const ids = await seedMinimalOrg(db);
     expect(ids.organisationId).toBe("studio-org");
     expect(ids.users.owner).toBe("studio-owner");
     expect(ids.emails.owner).toBe("owner@studio.test");
-    expect(ids.emails.manager).toBe("manager1@studio.test");
+    expect(ids.emails.coAdmin).toBe("coadmin@studio.test");
+    expect(ids.emails.lead).toBe("lead@studio.test");
     expect(ids.emails.editor1).toBe("editor01@studio.test");
+    expect(ids.emails.client).toBe("client@studio.test");
+    expect(ids.emails.client2).toBe("client2@studio.test");
 
     const users = await db.select().from(schema.users);
-    expect(users).toHaveLength(7);
+    expect(users).toHaveLength(10);
+    const byId = new Map(users.map((u) => [u.id, u]));
+    expect(byId.get(ids.users.owner)).toMatchObject({ role: "photographer", isAdmin: true });
+    expect(byId.get(ids.users.coAdmin)).toMatchObject({ role: "photographer", isAdmin: true });
+    expect(byId.get(ids.users.lead)).toMatchObject({ role: "photographer", isAdmin: false, canViewAllJobs: true, canViewAnalytics: true, canViewTeamWorkloads: true });
+    expect(byId.get(ids.users.photographer1)).toMatchObject({ isAdmin: false, canCreateJobs: true, canAssignEditors: true, canReviewSubmissions: true, canViewAllJobs: false });
+    expect(byId.get(ids.users.client)).toMatchObject({ role: "client", clientId: ids.clientId });
+    expect(byId.get(ids.users.client2)).toMatchObject({ role: "client", clientId: ids.clientId2 });
+    expect((await db.select().from(schema.organisationSettings))[0]?.primaryOwnerUserId).toBe(ids.users.owner);
     expect(users.filter((u) => !u.isActive).map((u) => u.id)).toEqual([ids.users.inactiveEditor]);
     expect((await db.select().from(schema.organisationSettings))[0]?.timezone).toBe("Australia/Sydney");
 
@@ -107,7 +119,9 @@ describe("seedMinimalOrg", () => {
     expect(ids.transitions["in_progress->cancelled"]).toBeDefined();
     expect(ids.transitions["completed->cancelled"]).toBeUndefined();
     expect(Object.keys(ids.jobTypes)).toHaveLength(DEFAULT_JOB_TYPES.length);
-    expect((await db.select().from(schema.projects))[0]?.clientId).toBe(ids.clientId);
+    const projects = await db.select().from(schema.projects);
+    expect(projects.find((p) => p.id === ids.projectId)?.clientId).toBe(ids.clientId);
+    expect(projects.find((p) => p.id === ids.projectId2)?.clientId).toBe(ids.clientId2);
   });
 
   it("can seed a second organisation alongside (cross-org tests)", async () => {

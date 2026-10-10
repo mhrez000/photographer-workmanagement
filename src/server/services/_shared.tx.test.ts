@@ -79,7 +79,7 @@ describe("withTx", () => {
     // the post-commit dispatcher reads through getDb(); point it at the test db
     setDbOverride(db);
     try {
-      const ctx = await contextFor(db, ids.users.manager);
+      const ctx = await contextFor(db, ids.users.coAdmin);
       await expect(
         withTx(async (tx) => {
           await notify(tx, ctx, { userIds: [ids.users.editor1], type: "comment_added", title: "rolled back", linkPath: "/" });

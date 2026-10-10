@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { first } from "@/db/index";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { activityEvents, users } from "@/db/schema";
+import { activityEvents, clients, users } from "@/db/schema";
 import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { buildContextFromDb } from "@/server/auth/session";
 import { LOGIN_EMAIL_RATE_LIMIT, clearLoginRateLimits } from "@/server/auth/rate-limit";
@@ -28,7 +28,7 @@ const events = async (type: string) =>
 describe("authenticate", () => {
   it("accepts valid credentials (case-insensitive email), sets last_login_at and audits auth.logged_in", async () => {
     const user = await authenticate(db, { email: "  OWNER@studio.test ", password: ids.password, ip: "1.2.3.4", userAgent: "vitest" });
-    expect(user).toMatchObject({ id: ids.users.owner, role: "owner", sessionVersion: 1 });
+    expect(user).toMatchObject({ id: ids.users.owner, role: "photographer", sessionVersion: 1 });
     expect((await first(db.select().from(users).where(eq(users.id, ids.users.owner))))?.lastLoginAt).toBe("2026-10-08T00:00:00.000Z");
     const [event] = await events("auth.logged_in");
     expect(event).toMatchObject({ actorUserId: ids.users.owner, visibility: "management", newValue: { email: "owner@studio.test" } });
@@ -49,18 +49,39 @@ describe("authenticate", () => {
     expect((await events("auth.login_failed"))[0].metadata).toMatchObject({ reason: "inactive" });
   });
 
+  it("client users sign in while their portal is on; portal off or client archived → the same generic 401 (no oracle)", async () => {
+    await expect(authenticate(db, { email: ids.emails.client, password: ids.password })).resolves.toMatchObject({ id: ids.users.client, role: "client" });
+
+    await db.update(clients).set({ portalEnabled: false }).where(eq(clients.id, ids.clientId));
+    const off = await authenticate(db, { email: ids.emails.client, password: ids.password }).catch((e: unknown) => e);
+    expect(off).toBeInstanceOf(UnauthorizedError);
+    expect((off as Error).message).toBe("Incorrect email or password");
+    // identical to a wrong password
+    const wrong = await authenticate(db, { email: ids.emails.client2, password: "wrong-password" }).catch((e: unknown) => e);
+    expect((wrong as Error).message).toBe((off as Error).message);
+
+    await db.update(clients).set({ archivedAt: "2026-10-07T00:00:00.000Z" }).where(eq(clients.id, ids.clientId2));
+    const archived = await authenticate(db, { email: ids.emails.client2, password: ids.password }).catch((e: unknown) => e);
+    expect(archived).toBeInstanceOf(UnauthorizedError);
+    expect((archived as Error).message).toBe("Incorrect email or password");
+
+    const failures = await events("auth.login_failed");
+    expect(failures.map((e) => (e.metadata as { reason: string }).reason)).toEqual(["portal_closed", "bad_password", "portal_closed"]);
+    expect(await events("auth.logged_in")).toHaveLength(1);
+  });
+
   it("validates input", async () => {
     await expect(authenticate(db, { email: "not-an-email", password: "" })).rejects.toThrow(ValidationError);
   });
 
   it("rate-limits after 5 failures per email+IP, then a different IP still works", async () => {
-    const attempt = (ip: string, password = "bad") => authenticate(db, { email: ids.emails.manager, password, ip });
+    const attempt = (ip: string, password = "bad") => authenticate(db, { email: ids.emails.coAdmin, password, ip });
     for (let i = 0; i < 4; i += 1) await expect(attempt("9.9.9.9")).rejects.toThrow(UnauthorizedError);
     await expect(attempt("9.9.9.9")).rejects.toThrow(RateLimitedError);
     const blocked = await attempt("9.9.9.9", ids.password).catch((e: unknown) => e);
     expect(blocked).toBeInstanceOf(RateLimitedError);
     expect((blocked as RateLimitedError).retryAfterSeconds).toBeGreaterThan(0);
-    await expect(attempt("8.8.8.8", ids.password)).resolves.toMatchObject({ id: ids.users.manager });
+    await expect(attempt("8.8.8.8", ids.password)).resolves.toMatchObject({ id: ids.users.coAdmin });
   });
 
   it("rotating X-Forwarded-For buys nothing: XFF is ignored without trusted proxies, so 5 failures → 429 (even for the right password)", async () => {
@@ -86,8 +107,8 @@ describe("authenticate", () => {
     expect(blocked).toBeInstanceOf(RateLimitedError);
     expect((blocked as RateLimitedError).retryAfterSeconds).toBeGreaterThan(0);
     // other accounts are unaffected
-    await expect(authenticate(db, { email: ids.emails.manager, password: ids.password, ip: "203.0.113.200" })).resolves.toMatchObject({
-      id: ids.users.manager,
+    await expect(authenticate(db, { email: ids.emails.coAdmin, password: ids.password, ip: "203.0.113.200" })).resolves.toMatchObject({
+      id: ids.users.coAdmin,
     });
   });
 });
@@ -114,7 +135,7 @@ describe("change password / logout", () => {
   });
 
   it("recordLogout audits auth.logged_out", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await withTx((tx) => recordLogout(tx, ctx, { ip: "1.1.1.1" }), { db });
     expect(await events("auth.logged_out")).toHaveLength(1);
   });

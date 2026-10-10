@@ -7,7 +7,10 @@ import { api, errorMessage } from "@/lib/api-client";
 import type { ClientOption, ProjectOption } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Combobox, type ComboboxOption } from "./combobox";
-import { NewClientDialog, NewProjectDialog } from "./quick-create-dialogs";
+import { NewClientDialog, NewProjectDialog, type DeferredProjectDraft } from "./quick-create-dialogs";
+
+/** Sentinel project id of a not-yet-created inline project (editors, docs/ROLES.md §4.3). */
+export const NEW_PROJECT_ID = "__new_project__";
 
 export interface UseClientProjectInput {
   clients: ClientOption[];
@@ -17,6 +20,14 @@ export interface UseClientProjectInput {
   initialProjectId: string | null;
   canCreateClient: boolean;
   canCreateProject: boolean;
+  /**
+   * Editors (docs/ROLES.md §4.3): "New project" does not create anything yet;
+   * the project is created together with the job (`POST /api/jobs` `newProject`).
+   * Implies a "New project" row even when `canCreateProject` is false.
+   */
+  inlineNewProject?: boolean;
+  /** Extra text for the client picker's empty state (e.g. "Ask your studio owner to add this client."). */
+  clientEmptyHint?: string;
   disabled?: boolean;
   errors?: { clientId?: string; projectId?: string };
   /** Called whenever the project (or client) selection changes. */
@@ -28,6 +39,8 @@ export interface ClientProjectState {
   projectId: string | null;
   client: ClientOption | null;
   project: ProjectOption | null;
+  /** The inline project to create with the job (only while it is the selected project). */
+  newProject: (DeferredProjectDraft & { clientId: string }) | null;
   /** The two pickers, ready to drop into a grid. */
   fields: React.ReactNode;
   /** Quick-create dialogs — render OUTSIDE the surrounding <form>. */
@@ -59,7 +72,8 @@ function CreateRow({ label, onClick, disabled }: { label: string; onClick: () =>
  * select the new row.
  */
 export function useClientProject(input: UseClientProjectInput): ClientProjectState {
-  const { canCreateClient, canCreateProject, disabled, errors, onChange } = input;
+  const { canCreateClient, canCreateProject, inlineNewProject = false, clientEmptyHint, disabled, errors, onChange } = input;
+  const [draftProject, setDraftProject] = React.useState<(DeferredProjectDraft & { clientId: string }) | null>(null);
   const [clients, setClients] = React.useState<ClientOption[]>(input.clients);
   const [clientId, setClientId] = React.useState<string | null>(input.initialClientId);
   const [projectsByClient, setProjectsByClient] = React.useState<Record<string, ProjectOption[]>>(() =>
@@ -73,7 +87,11 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
   const requestRef = React.useRef<AbortController | null>(null);
 
   const client = clients.find((c) => c.id === clientId) ?? null;
-  const projects = React.useMemo(() => (clientId ? (projectsByClient[clientId] ?? []) : []), [clientId, projectsByClient]);
+  const projects = React.useMemo(() => {
+    const loaded = clientId ? (projectsByClient[clientId] ?? []) : [];
+    if (!draftProject || draftProject.clientId !== clientId || !client) return loaded;
+    return [...loaded, { id: NEW_PROJECT_ID, name: draftProject.name, clientId: draftProject.clientId, clientName: client.name }];
+  }, [clientId, projectsByClient, draftProject, client]);
   const project = projects.find((p) => p.id === projectId) ?? null;
 
   const emit = (nextClient: ClientOption | null, nextProject: ProjectOption | null) => onChange?.({ client: nextClient, project: nextProject });
@@ -115,7 +133,11 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
     () => clients.map((c) => ({ value: c.id, label: c.name, leading: <ColourDot colour={c.colour} /> })),
     [clients],
   );
-  const projectOptions: ComboboxOption[] = React.useMemo(() => projects.map((p) => ({ value: p.id, label: p.name })), [projects]);
+  const projectOptions: ComboboxOption[] = React.useMemo(
+    () => projects.map((p) => (p.id === NEW_PROJECT_ID ? { value: p.id, label: p.name, description: "New — created with the job" } : { value: p.id, label: p.name })),
+    [projects],
+  );
+  const offerNewProject = (canCreateProject || inlineNewProject) && client !== null;
   const loadingProjects = clientId !== null && loadingFor === clientId;
 
   const fields = (
@@ -130,7 +152,7 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
             disabled={disabled}
             placeholder="Choose a client"
             searchPlaceholder="Search clients…"
-            emptyText="No client by that name."
+            emptyText={clientEmptyHint ? `No client by that name. ${clientEmptyHint}` : "No client by that name."}
             footer={
               canCreateClient
                 ? (query, close) => (
@@ -151,7 +173,17 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
         label="Project"
         required
         error={errors?.projectId ?? loadError ?? undefined}
-        description={!clientId ? "Pick the client first." : !loadingProjects && projects.length === 0 ? "This client has no projects yet — create one." : undefined}
+        description={
+          !clientId
+            ? "Pick the client first."
+            : !loadingProjects && projects.length === 0
+              ? offerNewProject
+                ? "This client has no projects yet — create one."
+                : "This client has no projects yet."
+              : projectId === NEW_PROJECT_ID
+                ? "A new project — it is created together with the job."
+                : undefined
+        }
       >
         {(control) => (
           <Combobox
@@ -166,7 +198,7 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
             emptyText={client ? `No projects for ${client.name} match.` : "Choose a client first."}
             className={cn(!clientId && "opacity-90")}
             footer={
-              canCreateProject && client
+              offerNewProject && client
                 ? (query, close) => (
                     <CreateRow
                       label={query ? `New project "${query}"` : `New project for ${client.name}`}
@@ -202,6 +234,16 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
         open={projectDialog.open}
         initialName={projectDialog.name}
         client={client}
+        onDeferred={
+          inlineNewProject && !canCreateProject && client
+            ? (draft) => {
+                const next = { ...draft, clientId: client.id };
+                setDraftProject(next);
+                setProjectId(NEW_PROJECT_ID);
+                emit(client, { id: NEW_PROJECT_ID, name: draft.name, clientId: client.id, clientName: client.name });
+              }
+            : undefined
+        }
         onOpenChange={(open) => setProjectDialog((d) => ({ ...d, open }))}
         onCreated={(created) => {
           setProjectsByClient((prev) => ({
@@ -215,5 +257,6 @@ export function useClientProject(input: UseClientProjectInput): ClientProjectSta
     </>
   );
 
-  return { clientId, projectId, client, project, fields, dialogs };
+  const newProject = projectId === NEW_PROJECT_ID && draftProject && draftProject.clientId === clientId ? draftProject : null;
+  return { clientId, projectId, client, project, newProject, fields, dialogs };
 }

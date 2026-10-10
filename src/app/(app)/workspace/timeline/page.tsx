@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { AlertTriangle, ChartNoAxesGantt, Diamond } from "lucide-react";
 import { FilterBar, type FilterFacet } from "@/components/filters/filter-bar";
-import { PageContainer } from "@/components/shell";
+import { PageContainer, ScopeNotice } from "@/components/shell";
 import { TimelineGantt } from "@/components/timeline/timeline-gantt";
 import { TimelineToolbar } from "@/components/timeline/timeline-toolbar";
 import {
@@ -19,6 +19,8 @@ import { endOfCivilDayIso, formatDate, startOfCivilDayIso, todayCivil } from "@/
 import { PRIORITIES, type Priority } from "@/lib/constants";
 import type { TimelineRow } from "@/lib/types";
 import { load, pageContext, param, params } from "@/server/page";
+import { pageScope } from "@/server/page-scope";
+import { hasBusinessView } from "@/server/auth/permissions";
 import { loadOrgSettingsRow } from "@/server/queries/scope";
 import { getTimelineRows, orgCategoryBaselines, TIMELINE_BOTTLENECK_FACTOR } from "@/server/queries/timeline";
 
@@ -29,17 +31,19 @@ type WeekStart = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 /**
  * /workspace/timeline — Gantt of job stages (spec §11, ARCHITECTURE §10).
- * Scope (page map): owners/managers see every visible job; photographers
- * their own jobs; editors the jobs they hold or held a stage of. Rows are
- * already restricted by `visibleJobsWhere` in the query; this page narrows
- * them further per role.
+ * Scope (docs/ROLES.md §8): rows are the viewer's visible jobs
+ * (`visibleJobsWhere` in the query), narrowed to "My shoots" when the
+ * personal / business switch says so. Editors see the jobs they hold or held
+ * a stage of.
  */
 export default async function TimelinePage({ searchParams }: PageProps<"/workspace/timeline">) {
   const sp = await searchParams;
   const { ctx, db } = await pageContext();
   const timeZone = ctx.settings.timezone;
   const today = todayCivil(timeZone);
-  const isManagement = ctx.role === "owner" || ctx.role === "manager";
+  // Admins and team members with "See all jobs" get the business-wide grouping and facets.
+  const business = hasBusinessView(ctx);
+  const { scope, scopeCookie } = await pageScope(ctx, param(sp, "scope"));
 
   const weeks = normaliseWindow(param(sp, "weeks"));
   const rawWeekStart = (await load(() => loadOrgSettingsRow(db, ctx)))?.weekStartsOn ?? 1;
@@ -49,7 +53,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const from = fromParam && CIVIL.test(fromParam) && !Number.isNaN(Date.parse(fromParam)) ? fromParam : defaultFrom;
   const to = shiftCivil(from, weeks * 7 - 1);
 
-  const groupModes: readonly TimelineGroup[] = isManagement
+  const groupModes: readonly TimelineGroup[] = business
     ? ["editor", "photographer", "project", "job"]
     : ctx.role === "photographer"
       ? ["editor", "project", "job"]
@@ -72,17 +76,15 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
       currentEditorId: editorIds,
       photographerId: photographerIds,
       priority: priorities,
-    }),
+      scope: param(sp, "scope"),
+    }, { scopeCookie }),
   );
   const baselines = await load(() => orgCategoryBaselines(db, ctx));
 
-  // Role scope (page map: "managers; P own; E assigned").
+  // Editors: the jobs they hold or held a stage of. Photographers: every visible row (already scoped by the query).
   const me = ctx.userId;
-  const scoped: TimelineRow[] = isManagement
-    ? all
-    : ctx.role === "photographer"
-      ? all.filter((r) => r.job.photographer?.id === me)
-      : all.filter((r) => r.job.editor?.id === me || r.segments.some((s) => s.editor?.id === me));
+  const scoped: TimelineRow[] =
+    ctx.role === "editor" ? all.filter((r) => r.job.editor?.id === me || r.segments.some((s) => s.editor?.id === me)) : all;
 
   // FilterBar filters (URL state) are applied in SQL by getTimelineRows, before its row cap.
   const rows = scoped;
@@ -94,17 +96,19 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const nowMs = Date.parse(ctx.now());
 
   const bottleneckCount = rows.reduce((n, r) => n + r.segments.filter((s) => s.isBottleneck).length, 0);
-  const facets: FilterFacet[] = isManagement ? ["editor", "photographer", "priority"] : ctx.role === "photographer" ? ["editor", "priority"] : ["priority"];
+  const facets: FilterFacet[] = business ? ["editor", "photographer", "priority"] : ctx.role === "photographer" ? ["editor", "priority"] : ["priority"];
 
-  const description = isManagement
+  const description = business && scope !== "mine"
     ? "Every job from assignment to delivery. Stages that take more than twice the usual time, or run past their deadline, are outlined so bottlenecks stand out."
     : ctx.role === "photographer"
-      ? "Your jobs from assignment to delivery, stage by stage."
+      ? scope === "mine"
+        ? "Your own shoots from assignment to delivery, stage by stage."
+        : "Your jobs from assignment to delivery, stage by stage."
       : "The jobs you are editing or have edited, stage by stage.";
 
   return (
     <PageContainer width="full" className="max-w-[2000px]">
-      <PageHeader eyebrow="Workspace" title="Timeline" description={description}>
+      <PageHeader eyebrow="Workspace" title="Timeline" description={description} meta={<ScopeNotice scope={scope} />}>
         <FilterBar quickFilters={[]} facets={facets} timeZone={ctx.settings.timezone} searchPlaceholder="Filter by job, client, project…" />
       </PageHeader>
 

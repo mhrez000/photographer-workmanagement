@@ -60,7 +60,7 @@ import {
   type MetricScope,
 } from "./metrics";
 import { computeEditorPerformance, computePhotographerPerformance } from "./performance";
-import { computeWorkloads } from "./workloads";
+import { assertPersonPage, computeWorkloads } from "./workloads";
 
 const DAILY_MAX_DAYS = 31;
 
@@ -274,13 +274,13 @@ const refOf = (u: { id: string; name: string; role: UserRef["role"]; avatarColou
 });
 
 /**
- * `GET /api/analytics/editors/:userId` — the editor themself
- * (analytics.view_self) or management (performance.view). 404 for foreign ids.
+ * `GET /api/analytics/editors/:userId` — the person-page rule (docs/ROLES.md
+ * §3.4): the person themself, an admin, or a ⚑analytics member. 404 for
+ * foreign ids.
  */
 export async function getEditorAnalytics(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): Promise<EditorAnalytics> {
   const target = await loadUserInOrg(db, ctx, userId);
-  if (target.id === ctx.userId) assertCan(ctx, "analytics.view_self");
-  else assertCan(ctx, "performance.view");
+  assertPersonPage(ctx, target, "performance");
   const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   const user = refOf(target);
   return {

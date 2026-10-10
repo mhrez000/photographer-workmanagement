@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api-client";
-import { CATEGORY_GROUPS, MANAGEMENT_ROLES, type Role, type StatusCategory } from "@/lib/constants";
+import { CATEGORY_GROUPS, type Role, type StatusCategory } from "@/lib/constants";
 import type { JobAvailableActions, JobRow, WorkSessionView } from "@/lib/types";
 import { useJobActionController, moveKey, moveTargetCategory, type JobMove } from "./job-action-controller";
 import { JobActionBar } from "./job-actions";
@@ -26,7 +26,8 @@ type QuickJob = Pick<JobRow, "id" | "version" | "jobNumber" | "name" | "statusCa
 export interface JobQuickActionsProps {
   job: QuickJob;
   /** The signed-in user (decides the guessed next step when `actions` is not loaded). */
-  viewer: { id: string; role: Role };
+  /** `isAdmin` (roles v2) lets the owner see reviewer hints on every job. */
+  viewer: { id: string; role: Role; isAdmin?: boolean };
   timeTrackingEnabled: boolean;
   /** The viewer's running session, if it is on this job. */
   runningSession?: Pick<WorkSessionView, "id" | "startedAt"> | null;
@@ -57,9 +58,14 @@ const REVIEWER_NEXT: Partial<Record<StatusCategory, { to: StatusCategory; label:
   resubmitted: { to: "approved", label: "Approve", icon: BadgeCheck },
 };
 
-function guessNext(job: QuickJob, viewer: { id: string; role: Role }): Guess | null {
+/** Roles v2: an admin photographer (owner / co-owner). Hints only — the server re-checks every action. */
+function isAdminViewer(viewer: { role: Role; isAdmin?: boolean }): boolean {
+  return viewer.role === "photographer" && viewer.isAdmin === true;
+}
+
+function guessNext(job: QuickJob, viewer: { id: string; role: Role; isAdmin?: boolean }): Guess | null {
   const isEditor = job.editor?.id === viewer.id;
-  const isManager = MANAGEMENT_ROLES.includes(viewer.role);
+  const isManager = isAdminViewer(viewer);
   const isOwnPhotographer = viewer.role === "photographer" && job.photographer?.id === viewer.id;
   if (job.isPaused && (isEditor || isManager)) return { resume: true, label: "Resume", icon: Play };
   if (isEditor && EDITOR_NEXT[job.statusCategory]) {
@@ -112,7 +118,7 @@ function GuessedQuickActions({ job, viewer, timeTrackingEnabled, runningSession,
     job: { statusCategory: job.statusCategory, isPaused: job.isPaused, editor: job.editor, photographer: job.photographer, jobNumber: job.jobNumber, name: job.name },
     timeTrackingEnabled,
     canUseTimer,
-    canAssignEditor: MANAGEMENT_ROLES.includes(viewer.role) || (viewer.role === "photographer" && job.photographer?.id === viewer.id),
+    canAssignEditor: isAdminViewer(viewer) || (viewer.role === "photographer" && job.photographer?.id === viewer.id),
     timeZone,
   });
   const guess = guessNext(job, viewer);

@@ -17,14 +17,17 @@
  *      photographer (`job_overdue`, dedupe `overdue:<jobId>:<dueDate>`);
  *      `job_overdue` automations are enqueued by recordEvent.
  *   3. `job.review_overdue` for REVIEWER_HOLDS jobs past `review_due_date`,
- *      one per (job, reviewDueDate); notifies photographer + managers.
+ *      one per (job, reviewDueDate); notifies photographer + admins.
  *   4. workload bands of active editors: `user.workload_band_changed` only
  *      when the band differs from the latest such event (no event yet =
- *      healthy); entering near_capacity / overloaded notifies managers +
- *      owners (`workload_threshold`, dedupe per editor/band/civil day) and
- *      fires `workload_threshold` automations.
- *   5. `editor_unavailable` to managers for active jobs held by a deactivated
- *      editor (dedupe per editor per civil day; notification only).
+ *      healthy); entering near_capacity / overloaded notifies the workload
+ *      watchers = admins ∪ team members with "View team workload"
+ *      (`workload_threshold`, dedupe per editor/band/civil day; no job
+ *      details) and fires `workload_threshold` automations.
+ *   5. `editor_unavailable` for active jobs held by a deactivated editor:
+ *      admins get every job; each team member with "View team workload" gets
+ *      only the jobs they can see (nothing when none) — docs/ROLES.md §6.2
+ *      (dedupe per editor per civil day; notification only).
  *   6. auto-close work sessions running longer than
  *      `work_session_auto_timeout_minutes` (`auto_timeout`).
  *   7. execute the automation runs enqueued above.
@@ -35,11 +38,12 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-o
 import { getDb, type Db, type DbLike, type Tx } from "@/db/index";
 import { activityEvents, jobs, organisationSettings, users, type Json } from "@/db/schema";
 import { CATEGORY_GROUPS, SWEEP_MIN_INTERVAL_MINUTES, WORKLOAD_BANDS, WORKLOAD_BAND_META, type WorkloadBand } from "@/lib/constants";
+import { loadJobRefs } from "@/server/auth/job-ref";
 import { formatDateShort, todayCivil } from "@/lib/dates";
 import type { AuthContext, Job } from "@/lib/types";
 import { recordEvent } from "@/server/audit";
-import { assertCan } from "@/server/auth/permissions";
-import { systemContext } from "@/server/auth/session";
+import { assertCan, can } from "@/server/auth/permissions";
+import { buildContextFromDb, systemContext } from "@/server/auth/session";
 import { nowIso } from "@/server/clock";
 import { computeWorkloads } from "@/server/queries/workloads";
 import { withTx } from "./_shared";
@@ -51,7 +55,7 @@ import {
   runPendingAutomations,
   type RunPendingResult,
 } from "./automationEngine";
-import { managersOf, notify } from "./notifications";
+import { adminsOf, notify } from "./notifications";
 import { closeTimedOutSessions } from "./timeTracking";
 import { jobEventMeta, jobLinkPath } from "./workflow";
 
@@ -175,6 +179,44 @@ export async function flagOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[
   return out;
 }
 
+/**
+ * Workload watchers (docs/ROLES.md §6.2): active admins ∪ active team members
+ * with "View team workload". Only for notifications WITHOUT job details.
+ */
+export async function workloadWatchersOf(db: DbLike, organisationId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        eq(users.organisationId, organisationId),
+        eq(users.isActive, true),
+        eq(users.role, "photographer"),
+        or(eq(users.isAdmin, true), eq(users.canViewTeamWorkloads, true)),
+      ),
+    )
+    .orderBy(asc(users.id));
+  return rows.map((r) => r.id);
+}
+
+/** Active team members (non-admin photographers) with "View team workload". */
+async function memberWatchersOf(db: DbLike, organisationId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        eq(users.organisationId, organisationId),
+        eq(users.isActive, true),
+        eq(users.role, "photographer"),
+        eq(users.isAdmin, false),
+        eq(users.canViewTeamWorkloads, true),
+      ),
+    )
+    .orderBy(asc(users.id));
+  return rows.map((r) => r.id);
+}
+
 /** Step 3 — `job.review_overdue`, deduped per (job, reviewDueDate). */
 export async function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[]> {
   const now = ctx.now();
@@ -192,7 +234,7 @@ export async function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): Promise<s
     .orderBy(asc(jobs.reviewDueDate), asc(jobs.jobNumber));
   if (candidates.length === 0) return [];
   const flagged = await latestFlagValues(tx, ctx.organisationId, "job.review_overdue", candidates.map((j) => j.id), "reviewDueDate");
-  const managers = await managersOf(tx, ctx.organisationId);
+  const admins = await adminsOf(tx, ctx.organisationId);
   const out: string[] = [];
   for (const job of candidates) {
     const reviewDueDate = job.reviewDueDate as string;
@@ -208,7 +250,7 @@ export async function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): Promise<s
       metadata: jobEventMeta(job, { statusCategory: job.statusCategory }),
     });
     await notify(tx, ctx, {
-      userIds: [job.photographerId, ...managers],
+      userIds: [job.photographerId, ...admins],
       type: "review_overdue",
       title: `Review of ${job.jobNumber} is overdue`,
       body: `${job.name} — review was due ${formatDateShort(reviewDueDate, ctx.settings.timezone)}`,
@@ -233,7 +275,7 @@ export async function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): Promise<S
   if (rows.length === 0) return [];
   const latest = await latestFlagValues(tx, ctx.organisationId, "user.workload_band_changed", rows.map((r) => r.editor.id), "band", "entity");
   const today = todayCivil(ctx.settings.timezone, new Date(now));
-  let managers: string[] | null = null;
+  let watchers: string[] | null = null;
   const changes: SweepResult["bandChanges"] = [];
   for (const row of rows) {
     const stored = latest.get(row.editor.id);
@@ -250,9 +292,9 @@ export async function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): Promise<S
       metadata: { targetUserId: row.editor.id, targetName: row.editor.name, bandReason: row.bandReason },
     });
     if (row.band !== "healthy") {
-      managers ??= await managersOf(tx, ctx.organisationId);
+      watchers ??= await workloadWatchersOf(tx, ctx.organisationId);
       await notify(tx, ctx, {
-        userIds: managers,
+        userIds: watchers,
         type: "workload_threshold",
         title: `${row.editor.name} is ${WORKLOAD_BAND_META[row.band].label.toLowerCase()}`,
         body: `${row.active} active job${row.active === 1 ? "" : "s"}, ${Math.round(row.ratio * 100)}% of weekly capacity${row.overdue ? `, ${row.overdue} overdue` : ""}`,
@@ -267,7 +309,11 @@ export async function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): Promise<S
   return changes;
 }
 
-/** Step 5 — active jobs held by deactivated editors → managers (`editor_unavailable`). */
+/**
+ * Step 5 — active jobs held by deactivated editors → `editor_unavailable`:
+ * admins (every job), plus each member with "View team workload" for the jobs
+ * they can see (docs/ROLES.md §6.2; omitted when they can see none).
+ */
 export async function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): Promise<SweepResult["editorUnavailable"]> {
   const rows = await tx
     .select({ jobId: jobs.id, editorId: users.id, name: users.name })
@@ -282,22 +328,48 @@ export async function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): Promise
     entry.jobIds.push(r.jobId);
     byEditor.set(r.editorId, entry);
   }
-  const managers = await managersOf(tx, ctx.organisationId);
+  const admins = await adminsOf(tx, ctx.organisationId);
+  const memberContexts: AuthContext[] = [];
+  for (const id of await memberWatchersOf(tx, ctx.organisationId)) {
+    const member = await buildContextFromDb(tx, id, { now: ctx.now, requestId: ctx.requestId });
+    if (member && member.organisationId === ctx.organisationId) memberContexts.push(member);
+  }
+  const refs = memberContexts.length > 0 ? await loadJobRefs(tx, ctx, rows.map((r) => r.jobId)) : new Map();
   const today = todayCivil(ctx.settings.timezone, new Date(ctx.now()));
   const out: SweepResult["editorUnavailable"] = [];
+  const message = (name: string, n: number) => ({
+    title: `${n} job${n === 1 ? "" : "s"} assigned to a deactivated editor`,
+    body: `${name} is deactivated but still holds ${n} active job${n === 1 ? "" : "s"}. Reassign them.`,
+  });
   for (const [editorId, entry] of byEditor) {
-    const n = entry.jobIds.length;
     const sent = await notify(tx, ctx, {
-      userIds: managers,
+      userIds: admins,
       type: "editor_unavailable",
-      title: `${n} job${n === 1 ? "" : "s"} assigned to a deactivated editor`,
-      body: `${entry.name} is deactivated but still holds ${n} active job${n === 1 ? "" : "s"}. Reassign them.`,
+      ...message(entry.name, entry.jobIds.length),
       jobId: null,
       activityEventId: null,
       linkPath: "/team/workloads",
       dedupeKey: `unavailable:${editorId}:${today}`,
     });
-    out.push({ editorId, jobIds: entry.jobIds, notified: sent.recipientIds.length });
+    let notified = sent.recipientIds.length;
+    for (const member of memberContexts) {
+      const visible = entry.jobIds.filter((jobId) => {
+        const loaded = refs.get(jobId);
+        return loaded !== undefined && can(member, "job.view", loaded.ref);
+      });
+      if (visible.length === 0) continue;
+      const res = await notify(tx, ctx, {
+        userIds: [member.userId],
+        type: "editor_unavailable",
+        ...message(entry.name, visible.length),
+        jobId: null,
+        activityEventId: null,
+        linkPath: "/team/workloads",
+        dedupeKey: `unavailable:${editorId}:${today}`,
+      });
+      notified += res.recipientIds.length;
+    }
+    out.push({ editorId, jobIds: entry.jobIds, notified });
   }
   return out;
 }

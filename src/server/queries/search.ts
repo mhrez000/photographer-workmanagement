@@ -5,19 +5,23 @@
  * workflow status (`matchedIn: "status"`, e.g. "Revision Required"), note
  * bodies and comment bodies — always through `visibleJobsWhere(ctx)`. An exact job number
  * (`PJ-0142`, case-insensitive, or just `142`) ranks first and is returned as
- * `exactJob` for deep-linking. Notes: photographers / editors never match on
- * internal notes; archived notes and soft-deleted comments never match.
- * Clients / projects: owners, managers and photographers search the whole
- * organisation; editors only those of jobs visible to them. People: active
- * users of the organisation (name; email too for owners / managers).
+ * `exactJob` for deep-linking. Notes follow `note.read` (docs/ROLES.md §2.1
+ * pinned port): internal notes match for admins on any job and for team
+ * members only on jobs they manage; editors never match internal or client
+ * notes and, on past / created-only jobs, only rows up to their read cut-off
+ * (§2.3). Archived notes and soft-deleted comments never match.
+ * Clients / projects: admins and team members search the whole organisation;
+ * editors only those of jobs visible to them (name only). People: active
+ * staff of the organisation for admins and team members (name; email too for
+ * admins; client portal users for admins only). Clients: 403 (search.global).
  */
-import { and, asc, desc, eq, exists, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, asc, desc, eq, exists, inArray, isNull, ne, notInArray, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
 import { clients, jobComments, jobNotes, jobs, projects, users, workflowStatuses } from "@/db/schema";
-import { JOB_NUMBER_PAD } from "@/lib/constants";
+import { JOB_NUMBER_PAD, STAFF_ROLES } from "@/lib/constants";
 import type { AuthContext, SearchResults } from "@/lib/types";
-import { assertCan, can, isManagement } from "@/server/auth/permissions";
-import { likeSql, selectRawJobs, visibleJobsWhere, type RawJobRow } from "./scope";
+import { assertCan, can, isAdmin, managedJobsWhere } from "@/server/auth/permissions";
+import { editorCutoffWhere, likeSql, selectRawJobs, visibleJobsWhere, type RawJobRow } from "./scope";
 
 export const SEARCH_DEFAULT_LIMIT = 8;
 export const SEARCH_MAX_LIMIT = 50;
@@ -37,6 +41,17 @@ function exactNumberSql(term: string): SQL {
     parts.push(sql`${jobs.jobNumber} like ${`%-${padded}`}`);
   }
   return or(...parts) as SQL;
+}
+
+/**
+ * Note kinds the viewer may match (`note.read` as SQL, correlated on `jobs`):
+ * admins every kind; members every kind but `internal`, which needs a job
+ * they manage; editors never `internal` / `client`.
+ */
+function readableNoteKindsSql(ctx: AuthContext): SQL | undefined {
+  if (isAdmin(ctx)) return undefined;
+  if (ctx.role === "photographer") return or(ne(jobNotes.kind, "internal"), managedJobsWhere(ctx)) as SQL;
+  return notInArray(jobNotes.kind, ["internal", "client"]);
 }
 
 function toHit(raw: RawJobRow, matchedIn: MatchedIn): JobHit {
@@ -98,18 +113,34 @@ export async function globalSearch(db: DbLike, ctx: AuthContext, query: string, 
     add(await selectRawJobs(db, ctx, { where: likeSql(sql`${workflowStatuses.name}`, term), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "status");
   }
   if (hits.size < limit) {
-    const noteKinds = isManagement(ctx) ? undefined : ne(jobNotes.kind, "internal");
     const noteMatch = db
       .select({ one: sql`1` })
       .from(jobNotes)
-      .where(and(eq(jobNotes.jobId, jobs.id), eq(jobNotes.organisationId, org), isNull(jobNotes.archivedAt), noteKinds, likeSql(jobNotes.body, term)));
+      .where(
+        and(
+          eq(jobNotes.jobId, jobs.id),
+          eq(jobNotes.organisationId, org),
+          isNull(jobNotes.archivedAt),
+          readableNoteKindsSql(ctx),
+          editorCutoffWhere(ctx, jobNotes.createdAt, jobNotes.authorUserId),
+          likeSql(jobNotes.body, term),
+        ),
+      );
     add(await selectRawJobs(db, ctx, { where: exists(noteMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "note");
   }
   if (hits.size < limit) {
     const commentMatch = db
       .select({ one: sql`1` })
       .from(jobComments)
-      .where(and(eq(jobComments.jobId, jobs.id), eq(jobComments.organisationId, org), isNull(jobComments.deletedAt), likeSql(jobComments.body, term)));
+      .where(
+        and(
+          eq(jobComments.jobId, jobs.id),
+          eq(jobComments.organisationId, org),
+          isNull(jobComments.deletedAt),
+          editorCutoffWhere(ctx, jobComments.createdAt, jobComments.authorUserId),
+          likeSql(jobComments.body, term),
+        ),
+      );
     add(await selectRawJobs(db, ctx, { where: exists(commentMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "comment");
   }
 
@@ -153,12 +184,22 @@ export async function globalSearch(db: DbLike, ctx: AuthContext, query: string, 
     .limit(limit);
 
   /* ---------------- people ---------------- */
-  const userMatch = isManagement(ctx) ? or(likeSql(users.name, term), likeSql(users.email, term)) : likeSql(users.name, term);
+  // Email match: admins only; client portal users: admins only (§2.1, §3.4).
+  const admin = isAdmin(ctx);
+  const userMatch = admin ? or(likeSql(users.name, term), likeSql(users.email, term)) : likeSql(users.name, term);
   const userRows = can(ctx, "team.view_members")
     ? await db
         .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
         .from(users)
-        .where(and(eq(users.organisationId, org), eq(users.isActive, true), isNull(users.anonymisedAt), userMatch))
+        .where(
+          and(
+            eq(users.organisationId, org),
+            eq(users.isActive, true),
+            isNull(users.anonymisedAt),
+            admin ? undefined : inArray(users.role, [...STAFF_ROLES]),
+            userMatch,
+          ),
+        )
         .orderBy(...nocaseOrder(users.name), asc(users.id))
         .limit(limit)
 

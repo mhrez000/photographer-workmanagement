@@ -59,18 +59,18 @@ const historyHtml = async (key: FixtureUserKey, jobId: string) => {
 describe("getJobHistory", () => {
   it("an accept → start → submit job includes job.accepted, job.work_started and job.submitted (for the editor too)", async () => {
     const jobId = await acceptStartSubmit();
-    for (const key of ["manager", "editor1", "photographer1"] as const) {
+    for (const key of ["coAdmin", "editor1", "photographer1"] as const) {
       const types = (await getJobHistory(db, await ctxOf(key), jobId)).filter((e) => e.kind === "event").map((e) => e.event?.eventType);
       expect(types).toEqual(expect.arrayContaining(["job.accepted", "job.work_started", "job.submitted"]));
-      // management-only events never reach the History tab of a non-manager
-      if (key !== "manager")
+      // management-only events never reach the History tab of a non-admin
+      if (key !== "coAdmin")
         expect((await getJobHistory(db, await ctxOf(key), jobId)).every((e) => e.kind === "stage" || e.event?.visibility === "all")).toBe(true);
     }
   });
 
   it("History tab: the first start after Accepted reads 'started editing', not 'resumed'", async () => {
     const jobId = await acceptStartSubmit();
-    const text = await historyHtml("manager", jobId);
+    const text = await historyHtml("coAdmin", jobId);
     expect(text).toContain("started editing");
     expect(text).not.toContain("resumed editing");
   });
@@ -81,14 +81,14 @@ describe("getJobHistory", () => {
     await run((tx) => pauseJob(tx, p.ctx, { jobId: job.id, expectedVersion: p.expectedVersion }));
     p = await prep("editor1", job.id);
     await run((tx) => resumeJob(tx, p.ctx, { jobId: job.id, expectedVersion: p.expectedVersion }));
-    const paused = await historyHtml("manager", job.id);
+    const paused = await historyHtml("coAdmin", job.id);
     expect(paused).toMatch(/paused/i);
     expect(paused).toMatch(/resumed/i);
 
     const d = (await insertJobFixture(db, ids, { statusKey: "assigned" })).job;
     p = await prep("editor1", d.id);
     await run((tx) => declineJob(tx, p.ctx, { jobId: d.id, expectedVersion: p.expectedVersion, reason: "Too busy" }));
-    const declined = await historyHtml("manager", d.id);
+    const declined = await historyHtml("coAdmin", d.id);
     expect(declined).toContain("declined the job");
     expect(declined).not.toContain("unassigned the editor");
     expect(declined.match(/declined the job/g)).toHaveLength(1);
@@ -99,7 +99,7 @@ describe("same-millisecond events keep their insertion order", () => {
   it("jobEvents, getJobHistory and the paginated feed follow insertion order, not the random id", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     fakeClock.advanceHours(1);
-    const ctx = await ctxOf("manager");
+    const ctx = await ctxOf("coAdmin");
     const written = await run(async (tx) => {
       const out: string[] = [];
       for (let i = 0; i < 12; i++) {

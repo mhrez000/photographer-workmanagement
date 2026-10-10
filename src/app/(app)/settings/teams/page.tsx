@@ -3,15 +3,15 @@ import { PageContainer } from "@/components/shell/page-container";
 import { TeamsManager } from "@/components/settings/teams-manager";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
-import type { UserProfile, UserRef } from "@/lib/types";
+import type { ReducedUser, UserProfile, UserRef } from "@/lib/types";
 import { getTeamDetail, listTeams } from "@/server/queries/teams";
 import { listUsers } from "@/server/queries/users";
 import { allowed, guard, load, pageContext } from "@/server/page";
 
 export const metadata: Metadata = { title: "Teams" };
 
-function toRef(u: UserProfile | UserRef): UserRef {
-  return { id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive };
+function toRef(u: UserProfile | ReducedUser): UserRef {
+  return { id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive, isAdmin: u.isAdmin, title: u.title };
 }
 
 export default async function TeamsSettingsPage() {
@@ -20,7 +20,8 @@ export default async function TeamsSettingsPage() {
   const canManage = allowed(ctx, "team.manage");
   const list = await load(() => listTeams(db, ctx, { includeArchived: canManage ? "1" : undefined }));
   const teams = await Promise.all(list.map((t) => load(() => getTeamDetail(db, ctx, t.id))));
-  const people = (await load(() => listUsers(db, ctx, { active: "1" }))).map(toRef);
+  // Teams group staff only: client portal users can never be team members (docs/ROLES.md §3.4).
+  const people = (await load(() => listUsers(db, ctx, { active: "1" }))).filter((u) => u.role !== "client").map(toRef);
   const activeCount = teams.filter((t) => t.archivedAt === null).length;
 
   return (

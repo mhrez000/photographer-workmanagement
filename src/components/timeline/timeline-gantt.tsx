@@ -88,8 +88,8 @@ export function TimelineGantt({ rows, group, days, dayStarts, nowMs, today, base
       <div ref={scroller} className="overflow-x-auto rounded-lg border border-border bg-surface shadow-xs scrollbar-thin" onScroll={() => setHover(null)}>
         <div className="relative [--gantt-label:9rem] sm:[--gantt-label:15rem]" style={{ minWidth: "100%", width: "max-content" }}>
           {/* Header */}
-          <div className="sticky top-0 z-30 flex border-b border-border bg-surface">
-            <div ref={labelRef} className="sticky left-0 z-30 flex w-36 shrink-0 items-end border-r border-border bg-surface px-3 pb-2 sm:w-60">
+          <div className="sticky top-0 z-(--z-shell) flex border-b border-border bg-surface">
+            <div ref={labelRef} className="sticky left-0 z-(--z-shell) flex w-36 shrink-0 items-end border-r border-border bg-surface px-3 pb-2 sm:w-60">
               <span className="eyebrow">Job</span>
             </div>
             <div className="relative" style={{ width: trackWidth }}>
@@ -325,7 +325,7 @@ function SegmentTooltip({ hover, baselines, slowFactor, timeZone }: { hover: Hov
   return (
     <div
       role="tooltip"
-      className="pointer-events-none fixed z-50 rounded-md bg-ink px-3 py-2 text-xs leading-5 text-ink-inverse shadow-pop animate-fade-in"
+      className="pointer-events-none fixed z-(--z-popover) rounded-md bg-ink px-3 py-2 text-xs leading-5 text-ink-inverse shadow-pop animate-fade-in"
       style={{ left, width, ...(above ? { bottom: window.innerHeight - rect.top + 8 } : { top: rect.bottom + 8 }) }}
     >
       <p className="font-semibold">

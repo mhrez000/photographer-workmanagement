@@ -3,16 +3,15 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { Role } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
 import { activeSettingsHref, settingsNavFor } from "./nav-items";
 
 /** Left sub-navigation on desktop; a compact select on small screens. */
-export function SettingsNav({ role }: { role: Role }) {
+export function SettingsNav({ showStudio }: { showStudio: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
-  const sections = React.useMemo(() => settingsNavFor(role), [role]);
+  const sections = React.useMemo(() => settingsNavFor(showStudio), [showStudio]);
   const active = activeSettingsHref(pathname, sections);
 
   return (

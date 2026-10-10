@@ -41,11 +41,11 @@ describe("clients", () => {
   });
 
   it("validates input", async () => {
-    await expect(run(ids.users.manager, (tx, ctx) => createClient(tx, ctx, { name: "" }))).rejects.toThrow(ValidationError);
-    await expect(run(ids.users.manager, (tx, ctx) => createClient(tx, ctx, { name: "X", email: "not-an-email" }))).rejects.toThrow(ValidationError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => createClient(tx, ctx, { name: "" }))).rejects.toThrow(ValidationError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => createClient(tx, ctx, { name: "X", email: "not-an-email" }))).rejects.toThrow(ValidationError);
   });
 
-  it("photographers edit only clients they created; managers edit any", async () => {
+  it("photographers edit only clients they created; admins edit any", async () => {
     const own = await run(ids.users.photographer1, (tx, ctx) => createClient(tx, ctx, { name: "Own" }));
     const updated = await run(ids.users.photographer1, (tx, ctx) => updateClient(tx, ctx, { clientId: own.id, notes: "VIP", expectedVersion: 1 }));
     expect(updated).toMatchObject({ notes: "VIP", version: 2 });
@@ -53,40 +53,40 @@ describe("clients", () => {
     expect(ev?.previousValue).toEqual({ notes: null });
     expect(ev?.newValue).toEqual({ notes: "VIP" });
 
-    // fixture client was created by the manager
+    // fixture client was created by the owner (another admin may still edit it)
     await expect(run(ids.users.photographer1, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "Hijack" }))).rejects.toThrow(ForbiddenError);
-    expect((await run(ids.users.manager, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "Harbour Realty Group" }))).name).toBe(
+    expect((await run(ids.users.coAdmin, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "Harbour Realty Group" }))).name).toBe(
       "Harbour Realty Group",
     );
   });
 
   it("no-op updates write nothing; stale versions conflict", async () => {
     const before = (await eventsFor(ids.clientId)).length;
-    const same = await run(ids.users.manager, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "Harbour Realty" }));
+    const same = await run(ids.users.coAdmin, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "Harbour Realty" }));
     expect(same.version).toBe(1);
     expect(await eventsFor(ids.clientId)).toHaveLength(before);
-    await expect(run(ids.users.manager, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "X", expectedVersion: 7 }))).rejects.toThrow(
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateClient(tx, ctx, { clientId: ids.clientId, name: "X", expectedVersion: 7 }))).rejects.toThrow(
       ConflictError,
     );
   });
 
   it("foreign ids are 404", async () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
-    await expect(run(ids.users.manager, (tx, ctx) => updateClient(tx, ctx, { clientId: other.clientId, name: "X" }))).rejects.toThrow(NotFoundError);
-    await expect(run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: other.clientId }))).rejects.toThrow(NotFoundError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateClient(tx, ctx, { clientId: other.clientId, name: "X" }))).rejects.toThrow(NotFoundError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: other.clientId }))).rejects.toThrow(NotFoundError);
   });
 
-  it("archive is management-only and blocked while the client has active jobs", async () => {
+  it("archive is admin-only and blocked while the client has active jobs", async () => {
     await insertJobFixture(db, ids, { statusKey: "in_progress" });
     await expect(run(ids.users.photographer1, (tx, ctx) => archiveClient(tx, ctx, { clientId: ids.clientId }))).rejects.toThrow(ForbiddenError);
-    await expect(run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: ids.clientId }))).rejects.toThrow(/1 active job/);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: ids.clientId }))).rejects.toThrow(/1 active job/);
 
-    const fresh = await run(ids.users.manager, (tx, ctx) => createClient(tx, ctx, { name: "Quiet" }));
-    const archived = await run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: fresh.id, expectedVersion: 1 }));
+    const fresh = await run(ids.users.coAdmin, (tx, ctx) => createClient(tx, ctx, { name: "Quiet" }));
+    const archived = await run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: fresh.id, expectedVersion: 1 }));
     expect(archived.archivedAt).toBe("2026-10-08T00:00:00.000Z");
-    await expect(run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: fresh.id }))).rejects.toThrow(ValidationError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: fresh.id }))).rejects.toThrow(ValidationError);
     // archived client: no new projects
-    await expect(run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: fresh.id, name: "P" }))).rejects.toThrow(/archived/);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: fresh.id, name: "P" }))).rejects.toThrow(/archived/);
 
     const restored = await run(ids.users.owner, (tx, ctx) => restoreClient(tx, ctx, { clientId: fresh.id }));
     expect(restored.archivedAt).toBeNull();
@@ -96,7 +96,7 @@ describe("clients", () => {
   it("completed and cancelled jobs do not block archiving", async () => {
     await insertJobFixture(db, ids, { statusKey: "completed" });
     await insertJobFixture(db, ids, { statusKey: "cancelled" });
-    const row = await run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: ids.clientId }));
+    const row = await run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: ids.clientId }));
     expect(row.archivedAt).not.toBeNull();
   });
 });
@@ -116,18 +116,18 @@ describe("projects", () => {
   it("rejects end before start and foreign clients", async () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
     await expect(
-      run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "X", startDate: "2026-10-10", endDate: "2026-10-01" })),
+      run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "X", startDate: "2026-10-10", endDate: "2026-10-01" })),
     ).rejects.toThrow(/End date/);
-    await expect(run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: other.clientId, name: "X" }))).rejects.toThrow(NotFoundError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: other.clientId, name: "X" }))).rejects.toThrow(NotFoundError);
   });
 
   it("a project with jobs cannot move to another client; an empty one can", async () => {
     await insertJobFixture(db, ids, { statusKey: "new" });
-    const c2 = await run(ids.users.manager, (tx, ctx) => createClient(tx, ctx, { name: "Second" }));
-    await expect(run(ids.users.manager, (tx, ctx) => updateProject(tx, ctx, { projectId: ids.projectId, clientId: c2.id }))).rejects.toThrow(/1 job/);
+    const c2 = await run(ids.users.coAdmin, (tx, ctx) => createClient(tx, ctx, { name: "Second" }));
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateProject(tx, ctx, { projectId: ids.projectId, clientId: c2.id }))).rejects.toThrow(/1 job/);
 
-    const empty = await run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "Empty" }));
-    const moved = await run(ids.users.manager, (tx, ctx) => updateProject(tx, ctx, { projectId: empty.id, clientId: c2.id, expectedVersion: 1 }));
+    const empty = await run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "Empty" }));
+    const moved = await run(ids.users.coAdmin, (tx, ctx) => updateProject(tx, ctx, { projectId: empty.id, clientId: c2.id, expectedVersion: 1 }));
     expect(moved).toMatchObject({ clientId: c2.id, version: 2 });
     const ev = (await eventsFor(empty.id)).find((e) => e.eventType === "project.updated");
     expect(ev?.metadata).toMatchObject({ fromLabel: "Harbour Realty", toLabel: "Second" });
@@ -141,30 +141,30 @@ describe("projects", () => {
 
   it("archive blocked by active jobs; restore needs an active client; resolveProjectForJob rejects archived rows", async () => {
     const job = await insertJobFixture(db, ids, { statusKey: "submitted" });
-    await expect(run(ids.users.manager, (tx, ctx) => archiveProject(tx, ctx, { projectId: ids.projectId }))).rejects.toThrow(/active job/);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => archiveProject(tx, ctx, { projectId: ids.projectId }))).rejects.toThrow(/active job/);
     expect(job.job.projectId).toBe(ids.projectId);
 
-    const p = await run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "Short" }));
-    await run(ids.users.manager, (tx, ctx) => archiveProject(tx, ctx, { projectId: p.id }));
-    await expect(run(ids.users.manager, (tx, ctx) => resolveProjectForJob(tx, ctx, p.id))).rejects.toThrow(/archived/);
+    const p = await run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: ids.clientId, name: "Short" }));
+    await run(ids.users.coAdmin, (tx, ctx) => archiveProject(tx, ctx, { projectId: p.id }));
+    await expect(run(ids.users.coAdmin, (tx, ctx) => resolveProjectForJob(tx, ctx, p.id))).rejects.toThrow(/archived/);
     await expect(run(ids.users.editor1, (tx, ctx) => archiveProject(tx, ctx, { projectId: p.id }))).rejects.toThrow(ForbiddenError);
 
     // archive the client of an archived project → restoring the project is blocked
-    const c2 = await run(ids.users.manager, (tx, ctx) => createClient(tx, ctx, { name: "Gone" }));
-    const p2 = await run(ids.users.manager, (tx, ctx) => createProject(tx, ctx, { clientId: c2.id, name: "Gone project" }));
-    await run(ids.users.manager, (tx, ctx) => archiveProject(tx, ctx, { projectId: p2.id }));
-    await run(ids.users.manager, (tx, ctx) => archiveClient(tx, ctx, { clientId: c2.id }));
-    await expect(run(ids.users.manager, (tx, ctx) => restoreProject(tx, ctx, { projectId: p2.id }))).rejects.toThrow(/client/);
+    const c2 = await run(ids.users.coAdmin, (tx, ctx) => createClient(tx, ctx, { name: "Gone" }));
+    const p2 = await run(ids.users.coAdmin, (tx, ctx) => createProject(tx, ctx, { clientId: c2.id, name: "Gone project" }));
+    await run(ids.users.coAdmin, (tx, ctx) => archiveProject(tx, ctx, { projectId: p2.id }));
+    await run(ids.users.coAdmin, (tx, ctx) => archiveClient(tx, ctx, { clientId: c2.id }));
+    await expect(run(ids.users.coAdmin, (tx, ctx) => restoreProject(tx, ctx, { projectId: p2.id }))).rejects.toThrow(/client/);
 
     const restored = await run(ids.users.owner, (tx, ctx) => restoreProject(tx, ctx, { projectId: p.id }));
     expect(restored.archivedAt).toBeNull();
-    const resolved = await run(ids.users.manager, (tx, ctx) => resolveProjectForJob(tx, ctx, p.id));
+    const resolved = await run(ids.users.coAdmin, (tx, ctx) => resolveProjectForJob(tx, ctx, p.id));
     expect(resolved.client.id).toBe(ids.clientId);
   });
 
   it("writes nothing when a later step throws (single transaction)", async () => {
     const before = (await db.select().from(projects)).length;
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await expect(
       withTx(
         async (tx) => {
@@ -181,6 +181,6 @@ describe("projects", () => {
         .from(activityEvents)
         .where(and(eq(activityEvents.eventType, "project.created"))),
     ).toHaveLength(0);
-    expect(await db.select().from(clients)).toHaveLength(1);
+    expect(await db.select().from(clients)).toHaveLength(2); // the two fixture clients (clientId, clientId2)
   });
 });

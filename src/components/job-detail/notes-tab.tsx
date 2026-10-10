@@ -93,7 +93,7 @@ function NoteComposer({ jobId, kinds, defaultKind, onDone }: { jobId: string; ki
               if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit(e);
             }}
             rows={3}
-            placeholder={kind === "internal" ? "Visible to owners and managers only…" : "Shoot details, editing direction, client preferences…"}
+            placeholder={kind === "internal" ? "Visible to the owner and admins only (and the job's photographer)…" : "Shoot details, editing direction, client preferences…"}
           />
         </FormField>
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -397,7 +397,7 @@ export function NotesTab({ jobId, notes, readableKinds, canAddKinds, permissions
 
       {filter === "internal" ? (
         <p className="flex items-center gap-2 rounded-md bg-warning-soft/60 px-3 py-2 text-xs text-warning-fg">
-          <Lock aria-hidden="true" className="size-3.5" /> Internal notes are visible to owners and managers only (and the job&apos;s photographer).
+          <Lock aria-hidden="true" className="size-3.5" /> Internal notes are visible to the owner and admins only (and the job&apos;s photographer). Editors never see them.
         </p>
       ) : null}
 

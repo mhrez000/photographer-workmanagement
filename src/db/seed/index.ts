@@ -1,12 +1,15 @@
 /**
  * Demo seed orchestration (ARCHITECTURE.md §12). `runSeed(db, options)`:
  *
- *   A. bootstraps Northlight Studios and builds its structure through the
- *      admin services (settings, users, workflows, job types, teams,
- *      clients, automations, saved views, dashboards) ~130 days ago;
+ *   A. bootstraps Northlight Studios (owner = admin photographer, primary
+ *      owner) and builds its structure through the admin services (settings,
+ *      users + their permission switches, workflows, job types, teams,
+ *      clients + client portal users, automations, saved views, dashboards)
+ *      ~130 days ago — no manager accounts (roles v2, docs/ROLES.md §13);
  *   B. plans 160 jobs and queues every service call with its timestamp,
- *      plus the two editor deactivations, a sweep every morning, client
- *      archiving — and runs the queue in global time order;
+ *      plus the portal story and editor-created jobs (./portal.ts), the two
+ *      editor deactivations, a sweep every morning, client archiving — and
+ *      runs the queue in global time order;
  *   C. seeds "Other Studio" (isolation tests), marks ~70 % of notifications
  *      read, runs the final sweep at real now;
  *   D. returns counts; the CLI (src/db/seed.ts) verifies and prints them.
@@ -24,7 +27,7 @@ import { buildContextFromDb } from "@/server/auth/session";
 import { withTx } from "@/server/services/_shared";
 import { createAutomation } from "@/server/services/automations";
 import { createSavedView } from "@/server/services/savedViews";
-import { putDashboardLayout } from "@/server/services/dashboards";
+import { defaultLayoutFor, putDashboardLayout } from "@/server/services/dashboards";
 import { deactivateUser } from "@/server/services/users";
 import { archiveClient } from "@/server/services/clients";
 import { createProject } from "@/server/services/projects";
@@ -34,7 +37,8 @@ import { approveJob, completeJob, startJob, submitJob } from "@/server/services/
 import { addLink } from "@/server/services/links";
 import { markRead } from "@/server/services/notifications";
 import { runSweep, type SweepResult } from "@/server/services/sweep";
-import { CLIENTS, NORTHLIGHT, OTHER_STUDIO, OWNER, SEED_PASSWORD, STAFF, TEAMS, type SeedUserDef } from "./catalog";
+import { CLIENTS, NORTHLIGHT, OTHER_STUDIO, OWNER, PORTAL_CLIENTS, SEED_PASSWORD, STAFF, TEAMS, type SeedUserDef } from "./catalog";
+import { inviteSeedClientUser, schedulePortalStory, seedOtherStudioPortal, setSeedClientPortal } from "./portal";
 import {
   bootstrapOrganisation,
   createDefaultWorkflow,
@@ -116,23 +120,16 @@ export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedRe
     const workflows = { default: defaultWf, quick: quickWf, video: videoWf };
     const jobTypes: Record<JobTypeName, string> = await createJobTypes(rt, ownerId, workflows);
 
-    at(t0 + 2 * HOUR);
-    const managers = STAFF.filter((u) => u.role === "manager");
-    for (const m of managers) {
-      await inviteSeedUser(rt, NORTHLIGHT.slug, ownerId, m, secret);
-      tick(3);
-    }
+    // The owner invites everyone (and sets each person's switches explicitly).
     at(t0 + DAY + 9 * HOUR);
-    const manager1 = rt.user(NORTHLIGHT.slug, "manager1");
-    const manager2 = rt.user(NORTHLIGHT.slug, "manager2");
-    for (const u of STAFF.filter((x) => x.role !== "manager")) {
-      await inviteSeedUser(rt, NORTHLIGHT.slug, rt.rng.chance(0.5) ? manager1 : ownerId, u, secret);
+    for (const u of STAFF) {
+      await inviteSeedUser(rt, NORTHLIGHT.slug, ownerId, u, secret);
       tick(rt.rng.int(2, 9));
     }
 
     at(t0 + 2 * DAY + 10 * HOUR);
     for (const team of TEAMS) {
-      await createSeedTeam(rt, manager1, {
+      await createSeedTeam(rt, ownerId, {
         name: team.name,
         description: team.description,
         leadUserId: rt.user(NORTHLIGHT.slug, team.lead),
@@ -144,7 +141,7 @@ export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedRe
     at(t0 + 2 * DAY + 13 * HOUR);
     const clients: { def: (typeof CLIENTS)[number]; id: string }[] = [];
     for (const def of CLIENTS) {
-      const id = await createSeedClient(rt, rt.rng.chance(0.5) ? manager1 : manager2, {
+      const id = await createSeedClient(rt, ownerId, {
         name: def.name,
         contactName: def.contactName,
         email: def.email,
@@ -154,19 +151,45 @@ export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedRe
       clients.push({ def, id });
     }
 
+    // Client portal: Harbourline Realty (portal + feedback) and Coastal Key Property (portal only).
+    at(t0 + 2 * DAY + 17 * HOUR);
+    for (const portal of PORTAL_CLIENTS) {
+      const client = clients.find((c) => c.def.name === portal.clientName);
+      if (!client) throw new Error(`seed: portal client ${portal.clientName} missing`);
+      await setSeedClientPortal(rt, ownerId, client.id, { portalEnabled: portal.portalEnabled, feedbackEnabled: portal.feedbackEnabled });
+      tick(2);
+      for (const user of portal.users) {
+        await inviteSeedClientUser(rt, NORTHLIGHT.slug, ownerId, client.id, user, passwordHash);
+        tick(3);
+      }
+    }
+
     at(t0 + 3 * DAY + 9 * HOUR);
-    await seedAutomations(rt, manager1, ownerId);
+    await seedAutomations(rt, ownerId);
 
     at(t0 + 4 * DAY + 10 * HOUR);
-    await seedSavedViews(rt, manager1);
+    await seedSavedViews(rt, ownerId);
     at(t0 + 5 * DAY + 9 * HOUR);
     await seedDashboards(rt, ownerId);
     lap("structure");
 
     /* ---------------- B. jobs + timeline ---------------- */
-    const seeder = new NorthlightSeeder(rt, { organisationId: nl, workflows, jobTypes, clients });
+    const seeder = new NorthlightSeeder(rt, {
+      organisationId: nl,
+      workflows,
+      jobTypes,
+      clients,
+      // Harbourline's jobs are all scripted by the portal story (shared work must be delivered with client-visible links).
+      excludeClientNames: ["Harbourline Realty"],
+    });
     seeder.plan(buildSpecs());
     seeder.schedule();
+    schedulePortalStory(rt, {
+      orgSlug: NORTHLIGHT.slug,
+      clientIds: Object.fromEntries(clients.map((c) => [c.def.name, c.id])),
+      projectId: (clientName, projectName) => seeder.projectIdOf(clientName, projectName),
+      jobTypes,
+    });
 
 
     // editor13 leaves 10 days ago: their open jobs go to editor05 (reassignment history).
@@ -181,12 +204,12 @@ export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedRe
     rt.schedule(seeder.deactivate11At, "deactivate editor11", async () => {
       const target = rt.user(NORTHLIGHT.slug, "editor11");
       const version = await userVersion(rt, target);
-      await rt.act(manager1, (tx, ctx) => deactivateUser(tx, ctx, { userId: target, reason: "Extended leave", expectedVersion: version }));
+      await rt.act(ownerId, (tx, ctx) => deactivateUser(tx, ctx, { userId: target, reason: "Extended leave", expectedVersion: version }));
     });
     // Two agencies stopped booking: archived once all their jobs are done.
     rt.schedule(nowMs - 2 * DAY, "archive clients", async () => {
       for (const c of clients.filter((x) => x.def.archived)) {
-        await rt.act(manager1, (tx, ctx) => archiveClient(tx, ctx, { clientId: c.id }));
+        await rt.act(ownerId, (tx, ctx) => archiveClient(tx, ctx, { clientId: c.id }));
       }
     });
     // The lazy sweep runs every morning (overdue flags, workload bands, editor-unavailable notices).
@@ -248,28 +271,28 @@ async function userVersion(rt: SeedRuntime, userId: string): Promise<number> {
 /*  Automations, saved views, dashboards                               */
 /* ------------------------------------------------------------------ */
 
-async function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: string): Promise<void> {
+async function seedAutomations(rt: SeedRuntime, ownerId: string): Promise<void> {
   const create = async (actor: string, input: Record<string, unknown>) => {
     const row = await rt.act(actor, (tx, ctx) => createAutomation(tx, ctx, input));
     rt.setTime(Date.parse(row.createdAt) + 4 * MINUTE);
     return row.id;
   };
   // The photographer (work_submitted) and the editor (job_overdue) already get a
-  // built-in notice for these events, so the example rules target the managers,
+  // built-in notice for these events, so the example rules target the admins,
   // who would otherwise hear nothing (and the engine never double-notifies, §7).
-  await create(managerId, {
-    name: "Submitted → notify managers",
-    description: "Let the managers know edits have landed in review (the photographer is told automatically).",
+  await create(ownerId, {
+    name: "Submitted → notify admins",
+    description: "Let the admins know edits have landed in review (the photographer is told automatically).",
     trigger: { type: "status_changed", toCategory: "submitted" },
-    actions: [{ type: "notify", target: "managers", message: "Edits are ready for review." }],
+    actions: [{ type: "notify", target: "admins", message: "Edits are ready for review." }],
   });
-  await create(managerId, {
-    name: "Overdue → notify managers",
+  await create(ownerId, {
+    name: "Overdue → notify admins",
     description: "Escalate jobs that pass their editing deadline (the editor and photographer are told automatically).",
     trigger: { type: "job_overdue" },
-    actions: [{ type: "notify", target: "managers", message: "A job just went overdue." }],
+    actions: [{ type: "notify", target: "admins", message: "A job just went overdue." }],
   });
-  await create(managerId, {
+  await create(ownerId, {
     name: "Repeat revision → back to the original editor",
     description: "When a job needs a second (or later) revision, hand it back to the editor who first worked on it.",
     trigger: { type: "revision_requested" },
@@ -283,17 +306,17 @@ async function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: stri
     trigger: { type: "status_changed", toCategory: "approved" },
     actions: [{ type: "transition", toCategory: "completed", reason: "Auto-completed on approval" }],
   });
-  await create(managerId, {
-    name: "Editor overloaded → notify managers",
+  await create(ownerId, {
+    name: "Editor overloaded → notify admins",
     description: "Flag editors who tip into the overloaded band.",
     trigger: { type: "workload_threshold", band: "overloaded" },
-    actions: [{ type: "notify", target: "managers", message: "An editor is overloaded. Consider rebalancing." }],
+    actions: [{ type: "notify", target: "admins", message: "An editor is overloaded. Consider rebalancing." }],
   });
 }
 
 const VIEW_COLUMNS = ["job", "client", "editor", "status", "priority", "dueDate", "daysRemaining", "lastActivity"] as const;
 
-async function seedSavedViews(rt: SeedRuntime, managerId: string): Promise<void> {
+async function seedSavedViews(rt: SeedRuntime, ownerId: string): Promise<void> {
   const shared: [string, string][] = [
     ["Overdue", "overdue"],
     ["Awaiting Review", "awaiting_review"],
@@ -301,7 +324,7 @@ async function seedSavedViews(rt: SeedRuntime, managerId: string): Promise<void>
     ["Unassigned", "unassigned"],
   ];
   for (const [name, quick] of shared) {
-    await rt.act(managerId, (tx, ctx) =>
+    await rt.act(ownerId, (tx, ctx) =>
       createSavedView(tx, ctx, {
         name,
         scope: "all_work",
@@ -310,7 +333,7 @@ async function seedSavedViews(rt: SeedRuntime, managerId: string): Promise<void>
       }),
     );
   }
-  for (const key of ["editor01", "editor03", "photographer01", "manager2"]) {
+  for (const key of ["editor01", "editor03", "photographer01", "photographer02"]) {
     await rt.act(rt.user(NORTHLIGHT.slug, key), (tx, ctx) =>
       createSavedView(tx, ctx, {
         name: "My Jobs",
@@ -325,21 +348,9 @@ async function seedSavedViews(rt: SeedRuntime, managerId: string): Promise<void>
 async function seedDashboards(rt: SeedRuntime, ownerId: string): Promise<void> {
   const w = (id: string, type: string, x: number, y: number, width: number, h: number) => ({ id, type, x, y, w: width, h });
   await rt.act(ownerId, (tx, ctx) =>
-    putDashboardLayout(tx, ctx, {
-      expectedVersion: 0,
-      layout: {
-        widgets: [
-          w("kpis", "kpis", 0, 0, 12, 2),
-          w("bottlenecks", "bottlenecks", 0, 2, 12, 2),
-          w("team_workload", "team_workload", 0, 4, 7, 4),
-          w("overdue", "overdue", 7, 4, 5, 4),
-          w("editor_performance", "editor_performance", 0, 8, 6, 4),
-          w("revision_rate", "revision_rate", 6, 8, 3, 4),
-          w("completion_rate", "completion_rate", 9, 8, 3, 4),
-          w("recent_activity", "recent_activity", 0, 12, 12, 4),
-        ],
-      },
-    }),
+    // Roles v2 (docs/ROLES.md §9, §13): the owner's saved layout IS the admin default
+    // (business widgets + "My shoots"), so the demo shows the persona dashboard.
+    putDashboardLayout(tx, ctx, { expectedVersion: 0, layout: defaultLayoutFor("admin") }),
   );
   await rt.act(rt.user(NORTHLIGHT.slug, "editor01"), (tx, ctx) =>
     putDashboardLayout(tx, ctx, {
@@ -365,7 +376,8 @@ const OTHER_OWNER: SeedUserDef = {
   key: "owner",
   email: "owner@other.test",
   name: "Morgan Ellis",
-  role: "owner",
+  role: "photographer",
+  isAdmin: true,
   title: "Owner",
   avatarColour: "#d97706",
 };
@@ -443,6 +455,19 @@ async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: Pr
 
   // Job 3: new.
   await create(now - 1 * DAY, "8 Lakeview Parade · Floor plan", "Floor Plans", 3);
+
+  // Its own portal client (isolation): "Other Realty" with client@other.test and one shared delivered job.
+  at(now - 20 * DAY);
+  const otherRealty = await createSeedClient(rt, ownerId, { name: "Other Realty", contactName: "Jordan Pike", email: "jordan@otherrealty.example", phone: "02 9960 4411" });
+  await seedOtherStudioPortal(rt, {
+    orgSlug: OTHER_STUDIO.slug,
+    ownerId,
+    editorId,
+    clientId: otherRealty,
+    jobTypeId: jobTypes["Real Estate"],
+    passwordHash,
+    startMs: now - 20 * DAY + 30 * MINUTE,
+  });
   return organisationId;
 }
 

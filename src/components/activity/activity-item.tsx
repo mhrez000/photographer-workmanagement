@@ -188,7 +188,7 @@ export function ActivityItem({ item, timeZone, people, hideJob }: ActivityItemPr
           <Sentence item={item} hideJob={hideJob} />
           <div className="flex shrink-0 items-center gap-2">
             {item.visibility === "management" ? (
-              <Badge size="sm" variant="outline" title="Visible to owners and managers only">
+              <Badge size="sm" variant="outline" title="Visible to the owner and admins only">
                 Management
               </Badge>
             ) : null}

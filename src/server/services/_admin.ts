@@ -7,13 +7,37 @@ import { endOfCivilDayIso } from "@/lib/dates";
 import { isCivilDate } from "@/lib/validation/admin-shared";
 import { ConflictError, ValidationError } from "@/server/errors";
 
-/** 400 for a business rule (archive blocked, last owner, …) with a form-level message. */
+/** 400 for a business rule (archive blocked, already deactivated, …) with a form-level message. */
 export function ruleViolation(message: string, extra: Record<string, unknown> = {}, field?: string): ValidationError {
   return new ValidationError(message, {
     formErrors: field ? [] : [message],
     fieldErrors: field ? { [field]: [message] } : {},
     ...extra,
   });
+}
+
+/**
+ * Machine-readable reasons of the user-management 422s (docs/ROLES.md §3.4, §6.1).
+ * They travel in `details.reason` (the error `code` stays "validation").
+ */
+export type UserRuleReason =
+  | "last_admin"
+  | "primary_owner"
+  | "role_change_not_allowed"
+  | "admin_has_every_permission"
+  | "flag_not_for_role"
+  | "client_portal_off"
+  | "not_staff"
+  | "invalid_target";
+
+/** 422 — a user-management rule (last admin, primary owner, role change, …) with a form-level message. */
+export class UserRuleError extends ValidationError {
+  override readonly status: number = 422;
+  readonly reason: UserRuleReason;
+  constructor(reason: UserRuleReason, message: string, field?: string) {
+    super(message, { reason, formErrors: field ? [] : [message], fieldErrors: field ? { [field]: [message] } : {} });
+    this.reason = reason;
+  }
 }
 
 /** Optimistic concurrency check (only when the caller sent a version). `current` is what the 409 carries. */

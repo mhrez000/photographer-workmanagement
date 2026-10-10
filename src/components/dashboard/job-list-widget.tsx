@@ -93,6 +93,8 @@ export interface JobListWidgetProps {
   max?: number;
   /** Hide the count bubble (lists that are a window, not a total). */
   showCount?: boolean;
+  /** Extra footer content (e.g. "3 more waiting in Whole business →", docs/ROLES.md §8). */
+  footerExtra?: React.ReactNode;
 }
 
 /** A titled job list card with a count, an empty state and a "View all" footer. */
@@ -110,6 +112,7 @@ export function JobListWidget({
   tone = "default",
   max = 6,
   showCount = true,
+  footerExtra,
 }: JobListWidgetProps) {
   const count = total ?? jobs.length;
   return (
@@ -138,11 +141,16 @@ export function JobListWidget({
       description={description}
       flush
       footer={
-        jobs.length > 0 ? (
-          <Link href={viewAllHref} className="inline-flex items-center gap-1 rounded-sm font-medium text-accent-ink hover:underline focus-ring">
-            {viewAllLabel ?? (count > Math.min(max, jobs.length) ? `View all ${count}` : "Open in All Work")}
-            <ArrowRight aria-hidden="true" className="size-3.5" />
-          </Link>
+        jobs.length > 0 || footerExtra ? (
+          <span className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            {jobs.length > 0 ? (
+              <Link href={viewAllHref} className="inline-flex items-center gap-1 rounded-sm font-medium text-accent-ink hover:underline focus-ring">
+                {viewAllLabel ?? (count > Math.min(max, jobs.length) ? `View all ${count}` : "Open in All Work")}
+                <ArrowRight aria-hidden="true" className="size-3.5" />
+              </Link>
+            ) : null}
+            {footerExtra}
+          </span>
         ) : undefined
       }
     >

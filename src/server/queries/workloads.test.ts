@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { users } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { moveJob } from "./test-history";
-import { computeWorkloads, getWorkloadDetail, getWorkloads } from "./workloads";
+import { canOpenPersonPage, computeWorkloads, getUserCompletedWork, getWorkloadDetail, getWorkloads } from "./workloads";
 
 const NOW = "2026-10-08T00:00:00.000Z";
 const END_YESTERDAY = "2026-10-07T13:00:00.000Z";
@@ -23,7 +23,7 @@ beforeEach(async () => {
 afterEach(() => fakeClock.reset());
 
 const job = async (o: Parameters<typeof insertJobFixture>[2]) => (await insertJobFixture(db, ids, { at: AT, dueDate: IN_A_WEEK, ...o })).job;
-const rowFor = async (userId: string) => (await computeWorkloads(db, await contextFor(db, ids.users.manager))).rows.find((r) => r.editor.id === userId);
+const rowFor = async (userId: string) => (await computeWorkloads(db, await contextFor(db, ids.users.coAdmin))).rows.find((r) => r.editor.id === userId);
 
 describe("workload bands", () => {
   it("healthy below the near-capacity ratio, near_capacity at ≥ 0.7, overloaded at ≥ 1.0", async () => {
@@ -71,7 +71,7 @@ describe("workload bands", () => {
     expect(r?.band).toBe("overloaded");
     expect(r?.bandReason).toBe("inactive");
     // listed first (overloaded sorts before healthy)
-    expect((await computeWorkloads(db, await contextFor(db, ids.users.manager))).rows[0].editor.id).toBe(ids.users.inactiveEditor);
+    expect((await computeWorkloads(db, await contextFor(db, ids.users.coAdmin))).rows[0].editor.id).toBe(ids.users.inactiveEditor);
   });
 
   it("counts completed this week once even after reopen + re-complete; approved/delivered are not workload", async () => {
@@ -88,23 +88,23 @@ describe("workload bands", () => {
 });
 
 describe("getWorkloads / getWorkloadDetail permissions", () => {
-  it("management sees every editor; an editor without the team flag sees only themself; photographers nothing", async () => {
+  it("admins see every editor; an editor without the team flag sees only themself; photographers nothing", async () => {
     await job({ statusKey: "in_progress" });
-    expect((await getWorkloads(db, await contextFor(db, ids.users.manager))).map((r) => r.editor.id).sort()).toEqual([ids.users.editor1, ids.users.editor2].sort());
+    expect((await getWorkloads(db, await contextFor(db, ids.users.coAdmin))).map((r) => r.editor.id).sort()).toEqual([ids.users.editor1, ids.users.editor2].sort());
     expect((await getWorkloads(db, await contextFor(db, ids.users.editor2))).map((r) => r.editor.id)).toEqual([ids.users.editor2]);
     expect(await getWorkloads(db, await contextFor(db, ids.users.photographer1))).toEqual([]);
     await db.update(users).set({ canViewTeamWorkloads: true }).where(eq(users.id, ids.users.photographer1));
     expect(await getWorkloads(db, await contextFor(db, ids.users.photographer1))).toHaveLength(2);
   });
 
-  it("detail: jobs, history and averages for management and self; others forbidden; foreign ids 404", async () => {
+  it("detail: jobs, history and averages for admins and self; others forbidden; foreign ids 404", async () => {
     await job({ statusKey: "in_progress", dueDate: END_YESTERDAY });
     const b = await job({ statusKey: "in_progress", at: "2026-10-02T00:00:00.000Z" });
     await moveJob(db, ids, b.id, "submitted", "2026-10-03T00:00:00.000Z");
     await moveJob(db, ids, b.id, "approved", "2026-10-04T00:00:00.000Z");
     await moveJob(db, ids, b.id, "completed", "2026-10-05T00:00:00.000Z");
 
-    const d = await getWorkloadDetail(db, await contextFor(db, ids.users.manager), ids.users.editor1);
+    const d = await getWorkloadDetail(db, await contextFor(db, ids.users.coAdmin), ids.users.editor1);
     expect(d.currentJobs).toHaveLength(1);
     expect(d.overdueJobs).toHaveLength(1);
     expect(d.recentCompleted.map((j) => j.id)).toEqual([b.id]);
@@ -120,7 +120,32 @@ describe("getWorkloads / getWorkloadDetail permissions", () => {
     await expect(getWorkloadDetail(db, editor2, ids.users.editor1)).rejects.toThrow(ForbiddenError);
 
     const other = await seedMinimalOrg(db, { slug: "other" });
-    const manager = await contextFor(db, ids.users.manager);
-    await expect(getWorkloadDetail(db, manager, other.users.editor1)).rejects.toThrow(NotFoundError);
+    const coAdmin = await contextFor(db, ids.users.coAdmin);
+    await expect(getWorkloadDetail(db, coAdmin, other.users.editor1)).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe("person pages (docs/ROLES.md §3.4)", () => {
+  it("⚑workloads members open editor workload pages; photographer peers need ⚑analytics; clients never", async () => {
+    await job({ statusKey: "in_progress" });
+    const p1 = await contextFor(db, ids.users.photographer1);
+    await expect(getWorkloadDetail(db, p1, ids.users.editor1)).rejects.toThrow(ForbiddenError);
+    await setUserFlags(db, ids.users.photographer1, { canViewTeamWorkloads: true });
+    expect((await getWorkloadDetail(db, await contextFor(db, ids.users.photographer1), ids.users.editor1)).currentJobs).toHaveLength(1);
+    await expect(getWorkloadDetail(db, await contextFor(db, ids.users.photographer1), ids.users.photographer2)).rejects.toThrow(ForbiddenError);
+    await setUserFlags(db, ids.users.photographer1, { canViewAnalytics: true });
+    expect((await getWorkloadDetail(db, await contextFor(db, ids.users.photographer1), ids.users.photographer2)).editor.id).toBe(ids.users.photographer2);
+    expect((await getUserCompletedWork(db, await contextFor(db, ids.users.photographer1), ids.users.editor1)).items).toEqual([]);
+    // job lists inside a person page stay visibility-scoped
+    const lead = await contextFor(db, ids.users.lead);
+    await setUserFlags(db, ids.users.lead, { canViewAllJobs: false });
+    expect((await getWorkloadDetail(db, await contextFor(db, ids.users.lead), ids.users.editor1)).currentJobs).toEqual([]);
+    expect(lead.canViewAllJobs).toBe(true);
+
+    const client = await contextFor(db, ids.users.client);
+    await expect(getWorkloads(db, client)).rejects.toThrow(ForbiddenError);
+    await expect(getWorkloadDetail(db, client, ids.users.editor1)).rejects.toThrow(ForbiddenError);
+    await expect(getWorkloadDetail(db, client, ids.users.client)).rejects.toThrow(ForbiddenError);
+    expect(canOpenPersonPage(await contextFor(db, ids.users.owner), { id: ids.users.client, role: "client" }, "workload")).toBe(false);
   });
 });

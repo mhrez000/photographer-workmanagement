@@ -37,7 +37,8 @@ import {
 } from "@/lib/metrics";
 import type { AuthContext, CompletedWorkItem, OrganisationSettings, User, UserCompletedWork, UserRef, WorkloadDetail, WorkloadRow } from "@/lib/types";
 import { isWorkloadCategory } from "@/lib/workflow";
-import { assertCan, can, isManagement } from "@/server/auth/permissions";
+import { assertCan, can, isAdmin } from "@/server/auth/permissions";
+import { ForbiddenError } from "@/server/errors";
 import { loadUserInOrg } from "@/server/services/_shared";
 import {
   approvedJobsInRange,
@@ -230,15 +231,39 @@ function emptyRow(u: User, settings: OrganisationSettings): WorkloadRow {
 }
 
 /**
- * `GET /api/workloads/:userId` → WorkloadDetail. Allowed for the user
- * themself (workloads.view_self) and for management (performance.view);
+ * Person pages (`/team/users/[id]`, `GET /api/workloads/:userId`,
+ * `GET /api/analytics/editors/:userId`; docs/ROLES.md §3.4): admin; self; a
+ * member with ⚑workloads (workload detail) or ⚑analytics (performance
+ * detail) when the target is an editor; photographer targets need admin or
+ * ⚑analytics. Editors never open another person's page; client users have
+ * no person page.
+ */
+export function canOpenPersonPage(ctx: AuthContext, target: Pick<User, "id" | "role">, kind: "workload" | "performance"): boolean {
+  if (!ctx.isActive || target.role === "client") return false;
+  if (isAdmin(ctx)) return true;
+  if (ctx.userId !== null && target.id === ctx.userId) return ctx.role !== "client";
+  if (ctx.role !== "photographer") return false;
+  if (target.role === "editor") {
+    return kind === "workload" ? ctx.canViewTeamWorkloads || ctx.canViewAnalytics : ctx.canViewAnalytics;
+  }
+  return ctx.canViewAnalytics;
+}
+
+/** 403 unless `canOpenPersonPage` (clients and other people's pages for editors included). */
+export function assertPersonPage(ctx: AuthContext, target: Pick<User, "id" | "role">, kind: "workload" | "performance"): void {
+  if (target.id === ctx.userId) assertCan(ctx, kind === "workload" ? "workloads.view_self" : "analytics.view_self");
+  if (!canOpenPersonPage(ctx, target, kind)) throw new ForbiddenError(kind === "workload" ? "workloads.view_team" : "performance.view");
+}
+
+/**
+ * `GET /api/workloads/:userId` → WorkloadDetail (person-page rule above);
  * foreign / missing ids → 404. For photographers the job lists follow
- * photographer_id and the averages use the jobs they shot.
+ * photographer_id and the averages use the jobs they shot; job lists are
+ * always visibility-scoped.
  */
 export async function getWorkloadDetail(db: DbLike, ctx: AuthContext, userId: string): Promise<WorkloadDetail> {
   const target = await loadUserInOrg(db, ctx, userId);
-  if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
-  else assertCan(ctx, "performance.view");
+  assertPersonPage(ctx, target, "workload");
 
   const now = ctx.now();
   const tz = ctx.settings.timezone;
@@ -335,9 +360,9 @@ export async function workloadHistory(
   });
 }
 
-/** True when the viewer may see other people's workload aggregates. */
+/** True when the viewer may see other people's workload aggregates (admins, ⚑workloads members). */
 export function canViewTeamWorkloads(ctx: AuthContext): boolean {
-  return isManagement(ctx) || can(ctx, "workloads.view_team");
+  return can(ctx, "workloads.view_team");
 }
 
 /** Number of active (non-terminal) jobs a user currently holds in either role. */
@@ -364,14 +389,12 @@ const COMPLETED_WORK_WEEKS = 8;
  * `/team/users/[id]` "what did they work on": the person's finished jobs
  * (approved or completed within the range; editor_id for editors,
  * photographer_id for photographers) with on-time flags, plus completions per
- * 7-day bucket over the last 8 weeks. Same permission as getWorkloadDetail:
- * self (workloads.view_self) or management (performance.view). Rows follow
- * job visibility.
+ * 7-day bucket over the last 8 weeks. Person-page rule (performance detail:
+ * self, admin, ⚑analytics members). Rows follow job visibility.
  */
 export async function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): Promise<UserCompletedWork> {
   const target = await loadUserInOrg(db, ctx, userId);
-  if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
-  else assertCan(ctx, "performance.view");
+  assertPersonPage(ctx, target, "performance");
   const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   const holder = target.role === "photographer" ? jobs.photographerId : jobs.editorId;
   const within = (col: typeof jobs.completedAt | typeof jobs.approvedAt, from: string, to: string) => and(gte(col, from), lt(col, to));

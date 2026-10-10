@@ -15,7 +15,7 @@ import {
 import { NotFoundError } from "@/server/errors";
 import { recordEvent } from "@/server/audit";
 import { withTx } from "./_shared";
-import { jobParticipants, managersOf, markAllRead, markRead, notify, unreadCount, type NotifyInput } from "./notifications";
+import { adminsOf, jobParticipants, markAllRead, markRead, notify, unreadCount, type NotifyInput } from "./notifications";
 
 let db: TestDb;
 let ids: SeedIds;
@@ -41,50 +41,50 @@ function rowsFor(userId: string) {
 
 describe("notify", () => {
   it("never notifies the actor and ignores null/duplicate ids", async () => {
-    const res = await send(ids.users.manager, { userIds: [ids.users.manager, ids.users.editor1, ids.users.editor1, null, undefined] });
+    const res = await send(ids.users.coAdmin, { userIds: [ids.users.coAdmin, ids.users.editor1, ids.users.editor1, null, undefined] });
     expect(res.recipientIds).toEqual([ids.users.editor1]);
-    expect(await rowsFor(ids.users.manager)).toHaveLength(0);
+    expect(await rowsFor(ids.users.coAdmin)).toHaveLength(0);
     expect(await rowsFor(ids.users.editor1)).toHaveLength(1);
-    expect((await rowsFor(ids.users.editor1))[0]).toMatchObject({ actorUserId: ids.users.manager, type: "comment_added", readAt: null });
+    expect((await rowsFor(ids.users.editor1))[0]).toMatchObject({ actorUserId: ids.users.coAdmin, type: "comment_added", readAt: null });
   });
 
   it("skips inactive users and users of other organisations", async () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
-    const res = await send(ids.users.manager, { userIds: [ids.users.inactiveEditor, other.users.editor1, ids.users.editor2] });
+    const res = await send(ids.users.coAdmin, { userIds: [ids.users.inactiveEditor, other.users.editor1, ids.users.editor2] });
     expect(res.recipientIds).toEqual([ids.users.editor2]);
   });
 
   it("honours a disabled preference for optional types", async () => {
     await db.insert(userNotificationPrefs)
       .values({ organisationId: ids.organisationId, userId: ids.users.editor1, type: "comment_added", enabled: false });
-    const res = await send(ids.users.manager, { userIds: [ids.users.editor1, ids.users.editor2] });
+    const res = await send(ids.users.coAdmin, { userIds: [ids.users.editor1, ids.users.editor2] });
     expect(res.recipientIds).toEqual([ids.users.editor2]);
   });
 
   it("ignores preferences for mandatory types", async () => {
     await db.insert(userNotificationPrefs)
       .values({ organisationId: ids.organisationId, userId: ids.users.editor1, type: "mentioned", enabled: false });
-    const res = await send(ids.users.manager, { userIds: [ids.users.editor1], type: "mentioned", title: "You were mentioned" });
+    const res = await send(ids.users.coAdmin, { userIds: [ids.users.editor1], type: "mentioned", title: "You were mentioned" });
     expect(res.recipientIds).toEqual([ids.users.editor1]);
   });
 
   it("an explicitly enabled preference row behaves like no row", async () => {
     await db.insert(userNotificationPrefs)
       .values({ organisationId: ids.organisationId, userId: ids.users.editor1, type: "comment_added", enabled: true });
-    expect((await send(ids.users.manager, { userIds: [ids.users.editor1] })).recipientIds).toEqual([ids.users.editor1]);
+    expect((await send(ids.users.coAdmin, { userIds: [ids.users.editor1] })).recipientIds).toEqual([ids.users.editor1]);
   });
 
   it("dedupes per (user, activityEventId, type) but allows other types for the same event", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const eventId = await withTx(
       (tx) =>
         recordEvent(tx, ctx, { entityType: "job", entityId: job.id, jobId: job.id, eventType: "job.priority_changed", action: "updated" }),
       { db },
     );
-    const first = await send(ids.users.manager, { userIds: [ids.users.editor1], activityEventId: eventId, type: "priority_changed" });
-    const again = await send(ids.users.manager, { userIds: [ids.users.editor1, ids.users.editor2], activityEventId: eventId, type: "priority_changed" });
-    const otherType = await send(ids.users.manager, { userIds: [ids.users.editor1], activityEventId: eventId, type: "deadline_changed" });
+    const first = await send(ids.users.coAdmin, { userIds: [ids.users.editor1], activityEventId: eventId, type: "priority_changed" });
+    const again = await send(ids.users.coAdmin, { userIds: [ids.users.editor1, ids.users.editor2], activityEventId: eventId, type: "priority_changed" });
+    const otherType = await send(ids.users.coAdmin, { userIds: [ids.users.editor1], activityEventId: eventId, type: "deadline_changed" });
     expect(first.recipientIds).toEqual([ids.users.editor1]);
     expect(again.recipientIds).toEqual([ids.users.editor2]);
     expect(otherType.recipientIds).toEqual([ids.users.editor1]);
@@ -113,22 +113,22 @@ describe("notify", () => {
   });
 
   it("writes notification.sent events only when audit_notifications is on", async () => {
-    await send(ids.users.manager, { userIds: [ids.users.editor1] });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor1] });
     expect(await db.select().from(activityEvents).where(eq(activityEvents.eventType, "notification.sent"))).toHaveLength(0);
 
-    const ctx = { ...(await contextFor(db, ids.users.manager)) };
+    const ctx = { ...(await contextFor(db, ids.users.coAdmin)) };
     ctx.settings = { ...ctx.settings, auditNotifications: true };
     await withTx((tx) => notify(tx, ctx, { userIds: [ids.users.editor2], type: "comment_added", title: "x", linkPath: "/" }), { db });
     const events = await db.select().from(activityEvents).where(eq(activityEvents.eventType, "notification.sent"));
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ visibility: "management", actorUserId: ids.users.manager });
+    expect(events[0]).toMatchObject({ visibility: "management", actorUserId: ids.users.coAdmin });
   });
 });
 
 describe("recipient helpers", () => {
-  it("managersOf returns active owners + managers of the org only", async () => {
+  it("adminsOf returns the active admins (owner + co-admin) of the org only", async () => {
     await seedMinimalOrg(db, { slug: "other" });
-    expect((await managersOf(db, ids.organisationId)).sort()).toEqual([ids.users.manager, ids.users.owner].sort());
+    expect((await adminsOf(db, ids.organisationId)).sort()).toEqual([ids.users.coAdmin, ids.users.owner].sort());
   });
 
   it("jobParticipants lists people and distinct non-deleted commenters", async () => {
@@ -141,19 +141,19 @@ describe("recipient helpers", () => {
         .returning({ id: jobComments.id });
       return row.id;
     };
-    await add(ids.users.manager);
-    await add(ids.users.manager);
+    await add(ids.users.coAdmin);
+    await add(ids.users.coAdmin);
     await add(ids.users.editor2, true);
     const p = await jobParticipants(db, job.id);
     expect(p).toMatchObject({ photographerId: ids.users.photographer1, editorId: ids.users.editor1, createdByUserId: ids.users.photographer1 });
-    expect(p.commenterIds).toEqual([ids.users.manager]);
+    expect(p.commenterIds).toEqual([ids.users.coAdmin]);
     await expect(jobParticipants(db, "missing")).rejects.toThrow(NotFoundError);
   });
 });
 
 describe("markRead / markAllRead / unreadCount", () => {
   it("marks only the actor's own notifications; others are 404", async () => {
-    await send(ids.users.manager, { userIds: [ids.users.editor1, ids.users.editor2] });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor1, ids.users.editor2] });
     const editorCtx = await contextFor(db, ids.users.editor1);
     expect(await unreadCount(editorCtx, db)).toBe(1);
     const [mine] = await rowsFor(ids.users.editor1);
@@ -171,9 +171,9 @@ describe("markRead / markAllRead / unreadCount", () => {
   });
 
   it("markAllRead clears every unread notification of the actor", async () => {
-    await send(ids.users.manager, { userIds: [ids.users.editor1], type: "comment_added" });
-    await send(ids.users.manager, { userIds: [ids.users.editor1], type: "priority_changed", title: "Priority" });
-    await send(ids.users.manager, { userIds: [ids.users.editor2] });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor1], type: "comment_added" });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor1], type: "priority_changed", title: "Priority" });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor2] });
     const ctx = await contextFor(db, ids.users.editor1);
     expect(await withTx((tx) => markAllRead(tx, ctx), { db })).toEqual({ updated: 2 });
     expect(await unreadCount(ctx, db)).toBe(0);
@@ -181,7 +181,7 @@ describe("markRead / markAllRead / unreadCount", () => {
   });
 
   it("only read_at may change (DB guard)", async () => {
-    await send(ids.users.manager, { userIds: [ids.users.editor1] });
+    await send(ids.users.coAdmin, { userIds: [ids.users.editor1] });
     const [row] = await rowsFor(ids.users.editor1);
     expect(await dbRejection(db.update(notifications).set({ title: "tampered" }).where(eq(notifications.id, row.id)))).toMatch(/read_at/);
   });

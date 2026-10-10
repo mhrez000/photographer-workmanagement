@@ -24,9 +24,9 @@ import { OPEN_SEARCH_EVENT } from "@/components/shell/types";
 import { StatusPill } from "@/components/jobs/status-pill";
 import { useHotkeys } from "@/hooks/use-hotkeys";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
-import { flattenNavigation, navigationForRole, quickActionsForRole, type NavGrants, type RoleKey } from "@/config/nav";
+import { flattenNavigation, navigationFor, quickActionsFor, type NavGates } from "@/config/nav";
 import { api, ApiError } from "@/lib/api-client";
-import { MANAGEMENT_ROLES, ROLE_LABELS } from "@/lib/constants";
+import { personaLabel } from "@/lib/constants";
 import type { JobRef, SearchResults, UserRef } from "@/lib/types";
 import { cn, readStorage, writeStorage } from "@/lib/utils";
 import { ShortcutsDialog } from "./shortcuts-dialog";
@@ -75,9 +75,8 @@ type SearchState =
 export interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  role: RoleKey;
-  /** Per-user / org grants that reveal extra navigation (see `NavGrants`). */
-  grants?: NavGrants;
+  /** Navigation gates of the signed-in staff user (docs/ROLES.md §10; computed server-side). */
+  gates: NavGates;
   /** Opens the keyboard shortcuts sheet. */
   onShowShortcuts?: () => void;
 }
@@ -86,9 +85,9 @@ export interface CommandPaletteProps {
  * ⌘K command palette (spec §19 search, §26 shortcuts): global search across
  * jobs / clients / projects / people (`GET /api/search?q=`, debounced and
  * abortable; an exact job number jumps to its History tab), navigation
- * filtered by role, and quick actions.
+ * filtered by the viewer's navigation gates, and quick actions.
  */
-export function CommandPalette({ open, onOpenChange, role, grants, onShowShortcuts }: CommandPaletteProps) {
+export function CommandPalette({ open, onOpenChange, gates, onShowShortcuts }: CommandPaletteProps) {
   const { ref, handleCancel, handleClose, handleBackdropClick } = useModalDialog({ open, onOpenChange });
   return (
     <dialog
@@ -99,19 +98,17 @@ export function CommandPalette({ open, onOpenChange, role, grants, onShowShortcu
       aria-label="Command palette"
       className="mx-auto mb-auto mt-[min(12vh,7rem)] w-[calc(100vw-1.5rem)] max-w-xl bg-transparent p-0 outline-none open:animate-scale-in"
     >
-      {open ? <PaletteBody role={role} grants={grants} close={() => onOpenChange(false)} onShowShortcuts={onShowShortcuts} /> : null}
+      {open ? <PaletteBody gates={gates} close={() => onOpenChange(false)} onShowShortcuts={onShowShortcuts} /> : null}
     </dialog>
   );
 }
 
 function PaletteBody({
-  role,
-  grants,
+  gates,
   close,
   onShowShortcuts,
 }: {
-  role: RoleKey;
-  grants?: NavGrants;
+  gates: NavGates;
   close: () => void;
   onShowShortcuts?: () => void;
 }) {
@@ -121,7 +118,6 @@ function PaletteBody({
   const [recent] = React.useState<RecentJob[]>(readRecent);
   const debounced = useDebouncedValue(query.trim(), SEARCH_DEBOUNCE_MS);
   const term = query.trim();
-  const isManagement = (MANAGEMENT_ROLES as readonly string[]).includes(role);
 
   React.useEffect(() => {
     if (!debounced) return undefined;
@@ -152,13 +148,14 @@ function PaletteBody({
   };
 
   const personHref = (u: UserRef) => {
-    if (isManagement) return `/team/users/${u.id}`;
+    // Person pages (docs/ROLES.md §3.4): admins; ⚑analytics for anyone; ⚑workloads for editors.
+    if (gates.admin || gates.analytics || (gates.teamWorkloads && u.role === "editor")) return `/team/users/${u.id}`;
     if (u.role === "editor") return `/workspace/all?editorId=${encodeURIComponent(u.id)}`;
     return `/workspace/all?photographerId=${encodeURIComponent(u.id)}`;
   };
 
   const statics = React.useMemo<StaticCommand[]>(() => {
-    const nav = flattenNavigation(navigationForRole(role, grants)).map(
+    const nav = flattenNavigation(navigationFor(gates)).map(
       (item): StaticCommand => ({
         id: `nav-${item.id}`,
         label: item.label,
@@ -170,7 +167,7 @@ function PaletteBody({
         run: () => go(item.href),
       }),
     );
-    const actions = quickActionsForRole(role).map(
+    const actions = quickActionsFor(gates).map(
       (a): StaticCommand => ({
         id: `action-${a.id}`,
         label: a.label,
@@ -196,7 +193,7 @@ function PaletteBody({
       },
     });
     return [...nav, ...actions];
-  }, [role, grants, go, close, onShowShortcuts]);
+  }, [gates, go, close, onShowShortcuts]);
 
   const scored = term
     ? statics
@@ -326,7 +323,7 @@ function PaletteBody({
               <Command.Item key={u.id} value={`user-${u.id}`} onSelect={() => go(personHref(u))} className={itemClass}>
                 <Avatar name={u.name} size="sm" colour={u.avatarColour || undefined} />
                 <span className="min-w-0 flex-1 truncate">{u.name}</span>
-                <span className="text-xs text-ink-muted">{ROLE_LABELS[u.role]}</span>
+                <span className="text-xs text-ink-muted">{personaLabel(u)}</span>
               </Command.Item>
             ))}
           </Command.Group>
@@ -462,19 +459,17 @@ const GO_TO_FALLBACKS: Record<string, string> = {
 };
 
 export interface CommandPaletteMountProps {
-  /** Signed-in user's role (filters navigation and actions). */
-  role: RoleKey;
-  /** Per-user / org grants that reveal extra navigation (see `NavGrants`). */
-  grants?: NavGrants;
+  /** Navigation gates of the signed-in staff user (filters navigation and actions). */
+  gates: NavGates;
 }
 
 /**
  * Mounted once by `src/app/(app)/layout.tsx`. Opens the palette on the shell's
  * OPEN_SEARCH_EVENT (⌘K / Ctrl K, the search button) and on "/"; wires the
  * global shortcuts from KEYBOARD_SHORTCUTS: "g d/a/m/k/c/n" go-to, "n" new job
- * (roles that may create jobs) and "?" for the shortcut sheet.
+ * (personas that may create jobs) and "?" for the shortcut sheet.
  */
-export function CommandPaletteMount({ role, grants }: CommandPaletteMountProps) {
+export function CommandPaletteMount({ gates }: CommandPaletteMountProps) {
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = React.useState(false);
@@ -502,23 +497,23 @@ export function CommandPaletteMount({ role, grants }: CommandPaletteMountProps) 
       "?": () => setShortcutsOpen(true),
     };
     const allowed = new Map<string, string>();
-    for (const item of flattenNavigation(navigationForRole(role, grants))) {
+    for (const item of flattenNavigation(navigationFor(gates))) {
       if (item.shortcut) allowed.set(item.shortcut, item.href);
     }
     for (const [keys, href] of Object.entries(GO_TO_FALLBACKS)) {
       map[keys] = () => router.push(allowed.get(keys) ?? href);
     }
-    if (quickActionsForRole(role).some((a) => a.id === "new-job")) {
+    if (quickActionsFor(gates).some((a) => a.id === "new-job")) {
       map.n = () => router.push("/jobs/new");
     }
     return map;
-  }, [role, grants, router]);
+  }, [gates, router]);
 
   useHotkeys(bindings, { enabled: !open });
 
   return (
     <>
-      <CommandPalette open={open} onOpenChange={setOpen} role={role} grants={grants} onShowShortcuts={() => setShortcutsOpen(true)} />
+      <CommandPalette open={open} onOpenChange={setOpen} gates={gates} onShowShortcuts={() => setShortcutsOpen(true)} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>
   );

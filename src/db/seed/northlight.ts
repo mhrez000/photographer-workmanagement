@@ -11,14 +11,22 @@
  * 4. Every step is queued on the runtime with its absolute timestamp and
  *    executed in global time order through the real services, acting as
  *    the right person (photographer creates/reviews, editor accepts/starts/
- *    submits, managers assign/cancel/restore). Steps that act as "the
+ *    submits, the owner — an admin photographer — assigns/cancels/restores).
+ *
+ * Roles v2 (docs/ROLES.md §13): there are no managers; every "management"
+ * step is the owner's. The owner also shoots ~12 % of the jobs. Seed rule:
+ * the reviewer / completer / assigner / deliverer must be able to act (the
+ * owner, or the job's photographer with the switch); photographer12 (assign ✗,
+ * review ✗) creates her own jobs and the owner assigns, reviews and delivers
+ * them. Clients listed in `NorthlightRefs.excludeClientNames` get no planned
+ * jobs (the portal story in ./portal.ts scripts theirs). Steps that act as "the
  *    editor" resolve the job's CURRENT editor at execution time, so
  *    deactivation hand-overs and automations are followed naturally.
  */
 import { and, eq, isNull } from "drizzle-orm";
 import { first } from "@/db/index";
 import { jobLinks, jobNotes, jobs, users, workSessions } from "@/db/schema";
-import { CATEGORY_GROUPS, DEFAULT_JOB_TYPES, type LinkKind, type NoteKind, type Priority } from "@/lib/constants";
+import { CATEGORY_GROUPS, DEFAULT_JOB_TYPES, REVIEW_GATED_CATEGORIES, type LinkKind, type NoteKind, type Priority } from "@/lib/constants";
 import type { Job } from "@/lib/types";
 import { addCivilDays, civilDate, startOfCivilDayIso } from "@/lib/dates";
 import { createJob, setDueDate, setPriority, setReviewDueDate, pauseJob, resumeJob } from "@/server/services/jobs";
@@ -52,6 +60,7 @@ import {
   EDIT_SPAN_HOURS,
   INTERNAL_NOTES,
   JOB_NAME_SUFFIX,
+  JUNIOR_PHOTOGRAPHER,
   MANAGER_COMMENTS,
   PAUSE_REASONS,
   PHOTOGRAPHER_COMMENTS,
@@ -381,7 +390,12 @@ export interface NorthlightRefs {
   workflows: Record<WorkflowKind, WorkflowRefs>;
   jobTypes: Record<JobTypeName, string>;
   clients: { def: SeedClientDef; id: string }[];
+  /** Clients that get no planned jobs (their projects are still created). */
+  excludeClientNames?: readonly string[];
 }
+
+/** Every management step (assign, cancel, restore, deadlines, priority, internal notes) is the owner's. */
+const OWNER_KEY = "owner";
 
 const SLUG = "northlight";
 const REGULAR_EDITORS = [1, 2, 4, 5, 6, 8, 9, 10, 12].map(E);
@@ -446,12 +460,20 @@ export class NorthlightSeeder {
     this.clients = refs.clients.map((c, clientIdx) => ({
       def: c.def,
       id: c.id,
-      projects: c.def.projects.map((p) => ({ clientIdx, def: p, id: null, uses: 0, firstUseAt: Number.POSITIVE_INFINITY, creatorKey: "manager1" })),
+      projects: c.def.projects.map((p) => ({ clientIdx, def: p, id: null, uses: 0, firstUseAt: Number.POSITIVE_INFINITY, creatorKey: OWNER_KEY })),
     }));
   }
 
   private user(key: string): string {
     return this.rt.user(SLUG, key);
+  }
+
+  /** Id of a catalog project (created by `schedule()`); throws when it does not exist yet. */
+  projectIdOf(clientName: string, projectName: string): string {
+    const client = this.clients.find((c) => c.def.name === clientName);
+    const project = client?.projects.find((p) => p.def.name === projectName);
+    if (!project?.id) throw new Error(`seed: project ${clientName} / ${projectName} not created yet`);
+    return project.id;
   }
 
   private civil(ms: number): string {
@@ -465,12 +487,15 @@ export class NorthlightSeeder {
     specs.forEach((spec, n) => {
       const type = this.pickType(spec);
       const wf0 = TYPE_WORKFLOW[type];
-      const photographerKey = rng.pick(PHOTOGRAPHERS_BY_TYPE[type]);
-      const managerKey = rng.chance(0.55) ? "manager1" : "manager2";
-      const creatorKey = rng.chance(0.85) ? photographerKey : managerKey;
-      const reviewerKey = rng.chance(0.75) ? photographerKey : managerKey;
-      const assignerKey = rng.chance(0.6) ? managerKey : photographerKey;
-      const completerKey = rng.chance(0.6) ? photographerKey : managerKey;
+      // The owner shoots ~12 % of the jobs herself.
+      const photographerKey = rng.chance(0.12) ? OWNER_KEY : rng.pick(PHOTOGRAPHERS_BY_TYPE[type]);
+      const managerKey = OWNER_KEY;
+      // The junior photographer creates her own jobs; the owner assigns, reviews, delivers and completes them.
+      const junior = photographerKey === JUNIOR_PHOTOGRAPHER;
+      const creatorKey = junior || rng.chance(0.85) ? photographerKey : managerKey;
+      const reviewerKey = !junior && rng.chance(0.75) ? photographerKey : managerKey;
+      const assignerKey = junior || rng.chance(0.6) ? managerKey : photographerKey;
+      const completerKey = !junior && rng.chance(0.6) ? photographerKey : managerKey;
       const tl = this.buildTimeline(spec, type, wf0);
       const steps = this.place(spec, tl);
       const project = this.pickProject(spec, type);
@@ -534,7 +559,9 @@ export class NorthlightSeeder {
 
   private pickProject(spec: Spec, type: JobTypeName): ProjectRec {
     const kind = TYPE_CLIENT_KIND[type];
+    const excluded = new Set(this.refs.excludeClientNames ?? []);
     const candidates = this.clients
+      .filter((c) => !excluded.has(c.def.name))
       .filter((c) => c.def.kind === kind && (spec.archivedClient ? c.def.archived === true : c.def.archived !== true))
       .flatMap((c) => c.projects);
     const minUses = Math.min(...candidates.map((p) => p.uses));
@@ -1013,6 +1040,14 @@ export class NorthlightSeeder {
     }
   }
 
+  /**
+   * The job's photographer, or the owner when the step needs "Review submissions"
+   * and the photographer lacks it (photographer12: the owner reviews her work).
+   */
+  private photographerActor(plan: JobPlan, needsReview: boolean): string {
+    return needsReview && plan.photographerKey === JUNIOR_PHOTOGRAPHER ? this.user(OWNER_KEY) : this.user(plan.photographerKey);
+  }
+
   private async requireActor(plan: JobPlan, role: ActorRole): Promise<string> {
     const id = await this.actorFor(plan, role);
     if (!id) throw new Error(`seed: job #${plan.n} has no ${role}`);
@@ -1068,7 +1103,9 @@ export class NorthlightSeeder {
 
     switch (def.k) {
       case "link": {
-        const actor = def.actor === "editor" ? await this.currentEditor(plan) : this.user(plan.photographerKey);
+        // Client-facing kinds on a review-gated job need "Review submissions" (§3.3 †).
+        const clientFacing = (def.kind === "gallery" || def.kind === "client_delivery") && REVIEW_GATED_CATEGORIES.includes((await this.job(plan)).statusCategory);
+        const actor = def.actor === "editor" ? await this.currentEditor(plan) : this.photographerActor(plan, clientFacing);
         if (!actor) return rt.skip(`#${plan.n} link ${def.kind}: no editor`);
         const link = await rt.act(actor, (tx, ctx) => addLink(tx, ctx, { jobId, kind: def.kind, url: this.url(plan, def.kind), label: null }));
         if (def.kind === "raw_files") plan.rawLinkId = link.id;
@@ -1080,7 +1117,10 @@ export class NorthlightSeeder {
         if (!linkId) return rt.skip(`#${plan.n} replace ${def.slot}: no link`);
         const link = await first(rt.db.select().from(jobLinks).where(eq(jobLinks.id, linkId)));
         const editor = await this.currentEditor(plan);
-        const actor = link && editor && link.addedByUserId === editor && (await this.job(plan)).statusCategory !== "completed" ? editor : this.user(plan.photographerKey);
+        const current = await this.job(plan);
+        // Editors change their own links only while the work is with them (EDITOR_HOLDS, §3.3 †).
+        const editorMay = link && editor && link.addedByUserId === editor && CATEGORY_GROUPS.EDITOR_HOLDS.includes(current.statusCategory);
+        const actor = editorMay ? editor : this.photographerActor(plan, REVIEW_GATED_CATEGORIES.includes(current.statusCategory));
         const kind: LinkKind = def.slot === "raw" ? "raw_files" : "finished_files";
         const result = await rt.act(actor, (tx, ctx) => replaceLink(tx, ctx, { linkId, url: this.url(plan, kind) }));
         if (def.slot === "raw") plan.rawLinkId = result.link.id;
@@ -1244,7 +1284,7 @@ export class NorthlightSeeder {
       }
       case "deliver": {
         const v = await version();
-        await rt.act(this.user(plan.photographerKey), (tx, ctx) => deliverJob(tx, ctx, { jobId, expectedVersion: v }));
+        await rt.act(this.photographerActor(plan, true), (tx, ctx) => deliverJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "complete": {
@@ -1254,7 +1294,7 @@ export class NorthlightSeeder {
       }
       case "reopen": {
         const v = await version();
-        await rt.act(this.user(plan.photographerKey), (tx, ctx) =>
+        await rt.act(this.photographerActor(plan, true), (tx, ctx) =>
           reopenJob(tx, ctx, { jobId, expectedVersion: v, reason: "Agent spotted a missing room after delivery", toCategory: "in_progress" }),
         );
         return;

@@ -30,7 +30,7 @@ async function teamEvents(teamId: string) {
 
 describe("teams", () => {
   it("creates a team with members (lead included) and management-only events", async () => {
-    const { team, memberIds } = await run(ids.users.manager, (tx, ctx) =>
+    const { team, memberIds } = await run(ids.users.coAdmin, (tx, ctx) =>
       createTeam(tx, ctx, { name: "Weddings", leadUserId: ids.users.photographer1, memberIds: [ids.users.editor1] }),
     );
     expect(memberIds.sort()).toEqual([ids.users.editor1, ids.users.photographer1].sort());
@@ -41,9 +41,23 @@ describe("teams", () => {
     expect(events[1].summary).toMatch(/added .+ to team/);
   });
 
-  it("only owners/managers manage teams", async () => {
+  it("only admins manage teams (a fully-switched team member — the v1 manager equivalent — cannot)", async () => {
+    await expect(run(ids.users.lead, (tx, ctx) => createTeam(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
     await expect(run(ids.users.photographer1, (tx, ctx) => createTeam(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
     await expect(run(ids.users.editor1, (tx, ctx) => createTeam(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
+    await expect(run(ids.users.client, (tx, ctx) => createTeam(tx, ctx, { name: "X" }))).rejects.toThrow(ForbiddenError);
+    const { team } = await run(ids.users.coAdmin, (tx, ctx) => createTeam(tx, ctx, { name: "Admins can" }));
+    await expect(run(ids.users.lead, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor1 }))).rejects.toThrow(ForbiddenError);
+  });
+
+  it("members and leads are allow-listed to active staff: a client user → 422, nothing written", async () => {
+    await expect(run(ids.users.owner, (tx, ctx) => createTeam(tx, ctx, { name: "Clients?", memberIds: [ids.users.client] }))).rejects.toMatchObject({ status: 422 });
+    await expect(run(ids.users.owner, (tx, ctx) => createTeam(tx, ctx, { name: "Clients?", leadUserId: ids.users.client2 }))).rejects.toMatchObject({ status: 422 });
+    const { team } = await run(ids.users.owner, (tx, ctx) => createTeam(tx, ctx, { name: "Staff" }));
+    await expect(run(ids.users.owner, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.client }))).rejects.toMatchObject({ status: 422 });
+    await expect(run(ids.users.owner, (tx, ctx) => updateTeam(tx, ctx, { teamId: team.id, leadUserId: ids.users.client }))).rejects.toMatchObject({ status: 422 });
+    expect(await teamMemberIds(db, team.id)).toEqual([]);
+    expect((await db.select().from(teams)).map((t) => t.name)).toEqual(["Staff"]);
   });
 
   it("rejects duplicate names (case-insensitive), inactive and foreign users", async () => {
@@ -55,16 +69,16 @@ describe("teams", () => {
   });
 
   it("membership is a ledger: remove fills left_at once, re-adding inserts a new row", async () => {
-    const { team } = await run(ids.users.manager, (tx, ctx) => createTeam(tx, ctx, { name: "Real Estate" }));
-    const m1 = await run(ids.users.manager, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
-    await expect(run(ids.users.manager, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }))).rejects.toThrow(/already/);
+    const { team } = await run(ids.users.coAdmin, (tx, ctx) => createTeam(tx, ctx, { name: "Real Estate" }));
+    const m1 = await run(ids.users.coAdmin, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
+    await expect(run(ids.users.coAdmin, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }))).rejects.toThrow(/already/);
 
     fakeClock.advanceHours(1);
-    const left = await run(ids.users.manager, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
-    expect(left).toMatchObject({ id: m1.id, leftAt: "2026-10-08T01:00:00.000Z", removedByUserId: ids.users.manager });
-    await expect(run(ids.users.manager, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }))).rejects.toThrow(/not a member/);
+    const left = await run(ids.users.coAdmin, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
+    expect(left).toMatchObject({ id: m1.id, leftAt: "2026-10-08T01:00:00.000Z", removedByUserId: ids.users.coAdmin });
+    await expect(run(ids.users.coAdmin, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }))).rejects.toThrow(/not a member/);
 
-    const m2 = await run(ids.users.manager, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
+    const m2 = await run(ids.users.coAdmin, (tx, ctx) => addMember(tx, ctx, { teamId: team.id, userId: ids.users.editor2 }));
     expect(m2.id).not.toBe(m1.id);
     const rows = await db.select().from(teamMemberships).where(eq(teamMemberships.teamId, team.id));
     expect(rows).toHaveLength(2);
@@ -74,19 +88,19 @@ describe("teams", () => {
   });
 
   it("membership changes the actor's teamUserIds (visibility input)", async () => {
-    const { team } = await run(ids.users.manager, (tx, ctx) => createTeam(tx, ctx, { name: "Crew", memberIds: [ids.users.photographer1, ids.users.editor1] }));
+    const { team } = await run(ids.users.coAdmin, (tx, ctx) => createTeam(tx, ctx, { name: "Crew", memberIds: [ids.users.photographer1, ids.users.editor1] }));
     expect((await buildContextFromDb(db, ids.users.photographer1))?.teamUserIds.has(ids.users.editor1)).toBe(true);
-    await run(ids.users.manager, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor1 }));
+    await run(ids.users.coAdmin, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor1 }));
     expect((await buildContextFromDb(db, ids.users.photographer1))?.teamUserIds.has(ids.users.editor1)).toBe(false);
   });
 
   it("removing the lead clears lead_user_id; a new lead joins automatically", async () => {
-    const { team } = await run(ids.users.manager, (tx, ctx) => createTeam(tx, ctx, { name: "Video", leadUserId: ids.users.editor1 }));
-    await run(ids.users.manager, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor1 }));
+    const { team } = await run(ids.users.coAdmin, (tx, ctx) => createTeam(tx, ctx, { name: "Video", leadUserId: ids.users.editor1 }));
+    await run(ids.users.coAdmin, (tx, ctx) => removeMember(tx, ctx, { teamId: team.id, userId: ids.users.editor1 }));
     expect((await first(db.select().from(teams).where(eq(teams.id, team.id))))?.leadUserId).toBeNull();
 
     const fresh = await first(db.select().from(teams).where(eq(teams.id, team.id)));
-    const updated = await run(ids.users.manager, (tx, ctx) =>
+    const updated = await run(ids.users.coAdmin, (tx, ctx) =>
       updateTeam(tx, ctx, { teamId: team.id, leadUserId: ids.users.photographer2, expectedVersion: fresh?.version }),
     );
     expect(updated.leadUserId).toBe(ids.users.photographer2);

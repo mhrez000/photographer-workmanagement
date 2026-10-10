@@ -93,8 +93,7 @@ const TARGET_LABEL = {
   editor: "the editor",
   previous_editor: "the previous editor",
   creator: "whoever created the job",
-  managers: "managers",
-  owner: "the owner",
+  admins: "the owner and admins",
   user: "a chosen person",
 } as const;
 

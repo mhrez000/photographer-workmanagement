@@ -11,6 +11,10 @@ import {
   Gauge,
   Hourglass,
   MessageSquare,
+  MessageSquareReply,
+  MessagesSquare,
+  PackageCheck,
+  Share2,
   Pause,
   RefreshCcw,
   Repeat,
@@ -49,6 +53,12 @@ export const NOTIFICATION_ICON: Record<NotificationType, { icon: LucideIcon; ton
   workload_threshold: { icon: Gauge, tone: "attention" },
   editor_unavailable: { icon: UserRoundX, tone: "danger" },
   automation: { icon: Zap, tone: "neutral" },
+  // roles v2 (docs/ROLES.md §7.5, §7.6)
+  client_feedback: { icon: MessagesSquare, tone: "attention" },
+  client_work_shared: { icon: Share2, tone: "info" },
+  client_work_delivered: { icon: PackageCheck, tone: "success" },
+  client_feedback_reply: { icon: MessageSquareReply, tone: "accent" },
+  job_created: { icon: UserPlus, tone: "attention" },
 };
 
 export const NOTIFICATION_TONE_CLASS: Record<NotificationTone, string> = {

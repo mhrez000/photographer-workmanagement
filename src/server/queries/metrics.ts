@@ -95,10 +95,14 @@ export async function loadOrgSettings(db: DbLike, ctx: AuthContext): Promise<Org
     revisionSpikeMinCount: BOTTLENECK_DEFAULTS.revisionSpikeMinCount,
     revisionSpikeMultiplier: BOTTLENECK_DEFAULTS.revisionSpikeMultiplier,
     reviewSlaHours: BOTTLENECK_DEFAULTS.reviewSlaHours,
-    photographersSeeAllJobs: ctx.settings.photographersSeeAllJobs,
-    photographersSeeTeamJobs: ctx.settings.photographersSeeTeamJobs,
-    editorsSeeTeamJobs: ctx.settings.editorsSeeTeamJobs,
-    editorsSeeTeamWorkloads: ctx.settings.editorsSeeTeamWorkloads,
+    // Deprecated roles-v1 visibility switches (kept physically, never read).
+    photographersSeeAllJobs: false,
+    photographersSeeTeamJobs: false,
+    editorsSeeTeamJobs: false,
+    editorsSeeTeamWorkloads: false,
+    primaryOwnerUserId: null,
+    defaultPhotographerUserId: null,
+    rolesV2NoticeDismissedAt: null,
     automationsEnabled: ctx.settings.automationsEnabled,
     auditNotifications: ctx.settings.auditNotifications ?? false,
     lastOverdueSweepAt: null,
@@ -292,6 +296,8 @@ export interface MetricQueryOptions {
 }
 
 export function scopeWhere(ctx: AuthContext, scope: MetricScope): SQL {
+  // Defence in depth: a client (portal) context never reads staff aggregates, even when a caller forgot its gate.
+  if (scope === "org" && !ctx.isSystem && ctx.role === "client") return and(eq(jobs.organisationId, ctx.organisationId), sql`1 = 0`) as SQL;
   return scope === "org" ? eq(jobs.organisationId, ctx.organisationId) : visibleJobsWhere(ctx);
 }
 
@@ -312,13 +318,20 @@ export async function loadActiveMetricJobs(db: DbLike, ctx: AuthContext, opts: M
  * Dashboard KPI cards (§8) over the scope: ACTIVE jobs + jobs whose latest
  * completion falls in the current week (organisation_settings.week_starts_on).
  */
-export async function kpisFor(db: DbLike, ctx: AuthContext, opts: { scope: MetricScope; now?: string; weekStartsOn?: number }): Promise<KpiSummary> {
+export async function kpisFor(
+  db: DbLike,
+  ctx: AuthContext,
+  opts: { scope: MetricScope; now?: string; weekStartsOn?: number; /** Extra job predicate (the "My shoots" view scope). */ where?: SQL },
+): Promise<KpiSummary> {
   const now = opts.now ?? ctx.now();
   const weekStartsOn = opts.weekStartsOn ?? (await loadOrgSettings(db, ctx)).weekStartsOn;
   const week = weekRangeAt(ctx, now, weekStartsOn);
   const rows = await loadMetricJobs(db, ctx, {
     scope: opts.scope,
-    where: or(categoryIn(CATEGORY_GROUPS.ACTIVE), and(eq(jobs.statusCategory, "completed"), gte(jobs.completedAt, week.from), lt(jobs.completedAt, week.to))),
+    where: and(
+      or(categoryIn(CATEGORY_GROUPS.ACTIVE), and(eq(jobs.statusCategory, "completed"), gte(jobs.completedAt, week.from), lt(jobs.completedAt, week.to))),
+      opts.where,
+    ),
   });
   return kpiSummary(rows, { now, tz: ctx.settings.timezone, weekRange: week });
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { KANBAN_COLUMNS } from "@/lib/constants";
 import type { KanbanCard } from "@/lib/types";
 import { NotFoundError } from "@/server/errors";
@@ -58,8 +58,13 @@ describe("getKanbanBoard", () => {
     const completed = await job({ statusKey: "completed", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
 
     expect((await card("editor1", inProgress.id))?.allowedColumns).toEqual(["review"]);
-    expect((await card("manager", inProgress.id))?.allowedColumns).toEqual(["review"]);
+    // Admins: submit on behalf, or unassign through the "Unassign" edge (job.assign_editor, docs/ROLES.md §5.2).
+    expect((await card("coAdmin", inProgress.id))?.allowedColumns).toEqual(["new", "review"]);
+    // photographer1 manages the job and has Assign editors: may unassign too; a member without it may not (below).
+    expect((await card("photographer1", inProgress.id))?.allowedColumns).toEqual(["new"]);
+    await setUserFlags(db, ids.users.photographer1, { canAssignEditors: false });
     expect((await card("photographer1", inProgress.id))?.allowedColumns).toEqual([]);
+    await setUserFlags(db, ids.users.photographer1, { canAssignEditors: true });
 
     expect((await card("photographer1", submitted.id))?.allowedColumns).toEqual(["revision", "approved"]);
     expect((await card("editor1", submitted.id))?.allowedColumns).toEqual([]);
@@ -100,5 +105,35 @@ describe("previewKanbanDrop", () => {
     expect(await previewKanbanDrop(db, await ctxOf("editor1"), j.id, "in_progress")).toEqual({ kind: "noop" });
     expect((await previewKanbanDrop(db, await ctxOf("editor1"), j.id, "completed")).kind).toBe("none");
     await expect(previewKanbanDrop(db, await ctxOf("editor2"), j.id, "review")).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe("getKanbanBoard — view scope and client isolation", () => {
+  it("scope mine = the owner's shoots; members without See all jobs and editors ignore it; clients see an empty board", async () => {
+    const own = await job({ statusKey: "in_progress", photographerId: ids.users.owner, createdByUserId: ids.users.owner });
+    const forP2 = await job({ statusKey: "in_progress", photographerId: ids.users.photographer2, createdByUserId: ids.users.owner });
+    await job({ statusKey: "delivered", sharedWithClient: true });
+    const owner = await ctxOf("owner");
+    const ids_ = (b: Awaited<ReturnType<typeof getKanbanBoard>>) => b.columns.flatMap((c) => c.cards).map((c) => c.id).sort();
+    const business = await getKanbanBoard(db, owner);
+    expect(business.scope).toBe("business");
+    expect(ids_(business)).toEqual(expect.arrayContaining([own.id, forP2.id]));
+    const mine = await getKanbanBoard(db, owner, { scope: "mine" });
+    expect(mine.scope).toBe("mine");
+    expect(ids_(mine)).toEqual([own.id]);
+    expect(mine.columns.find((c) => c.column === "in_progress")?.count).toBe(1);
+    expect(ids_(await getKanbanBoard(db, owner, {}, { scopeCookie: "mine" }))).toEqual([own.id]);
+    expect(ids_(await getKanbanBoard(db, owner, { scope: "business" }, { scopeCookie: "mine" }))).toEqual(ids_(business));
+
+    const p2 = await ctxOf("photographer2");
+    expect(ids_(await getKanbanBoard(db, p2, { scope: "business" }))).toEqual(ids_(await getKanbanBoard(db, p2)));
+    expect((await getKanbanBoard(db, p2, { scope: "mine" })).scope).toBeNull();
+    const e1 = await ctxOf("editor1");
+    expect(ids_(await getKanbanBoard(db, e1, { scope: "business" }))).toEqual(ids_(await getKanbanBoard(db, e1)));
+
+    const client = await getKanbanBoard(db, await ctxOf("client"), { includeCancelled: "1" });
+    expect(client.columns.every((c) => c.count === 0 && c.cards.length === 0)).toBe(true);
+    expect(client.cancelled?.count).toBe(0);
+    await expect(previewKanbanDrop(db, await ctxOf("client"), own.id, "review")).rejects.toThrow(NotFoundError);
   });
 });

@@ -6,4 +6,6 @@ export { PageContainer, type PageContainerProps } from "./page-container";
 export { Sidebar, type SidebarProps } from "./sidebar";
 export { Topbar, type TopbarProps } from "./topbar";
 export { UserMenu, type UserMenuProps } from "./user-menu";
-export { OPEN_SEARCH_EVENT, ROLE_LABELS, SIDEBAR_STORAGE_KEY, type ShellUser } from "./types";
+export { OPEN_SEARCH_EVENT, SIDEBAR_STORAGE_KEY, shellRoleLabel, type ShellUser } from "./types";
+export { ScopeSwitch, useScopeSwitch, type ScopeSwitchProps } from "./scope-switch";
+export { ScopeNotice, type ScopeNoticeProps } from "./scope-notice";

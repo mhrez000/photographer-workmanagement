@@ -21,6 +21,16 @@
   :root {
     color-scheme: light;
 
+    /* Layering scale (docs/ROLES.md §11.1). Use as z-(--z-…). The topbar sits above every
+       page-level sticky element; nothing in a page may use a z-index >= --z-topbar.
+       Dialogs / sheets use the native top layer and need none. */
+    --z-content: 10; /* in-content sticky table headers, row highlights */
+    --z-page-sticky: 20; /* job header (desktop), dashboard edit bar, sticky form footers / save bars */
+    --z-shell: 30; /* sidebar, mobile tab bar, job header mobile action bar, bulk-actions bar, timeline header */
+    --z-topbar: 40; /* the topbar */
+    --z-popover: 50; /* dropdowns, popovers, tooltips, calendar popover, rail tooltips */
+    --z-toast: 100; /* toaster */
+
     /* Canvas + surfaces */
     --canvas: light-dark(#faf9f7, #121315);
     --surface: light-dark(#ffffff, #1a1c1f);

@@ -22,13 +22,13 @@ test("the owner dashboard renders the 8 KPI cards, each linking into All Work", 
 });
 
 test("customise: moving a widget earlier persists after save and reload", async ({ api, pageWithState }) => {
-  // A fresh manager starts from the role default layout and is never shared.
-  const manager = await api.inviteUser("manager", "Dash");
-  const managerApi = await loginApi(manager.email, manager.tempPassword);
-  const before = await managerApi.get<{ layout: { widgets: { id: string; type: string }[] }; version: number }>("/api/dashboard/layout");
+  // A fresh team member starts from the persona default layout, which is never shared.
+  const member = await api.inviteUser("photographer", "Dash");
+  const memberApi = await loginApi(member.email, member.tempPassword);
+  const before = await memberApi.get<{ layout: { widgets: { id: string; type: string }[] }; version: number }>("/api/dashboard/layout");
   expect(before.layout.widgets.length).toBeGreaterThan(2);
 
-  const page = await pageWithState(await storageFor(manager.email, manager.tempPassword));
+  const page = await pageWithState(await storageFor(member.email, member.tempPassword));
   await page.goto("/dashboard?customise=1");
   const list = page.getByRole("list", { name: "Dashboard widgets" });
   await expect(list).toBeVisible();
@@ -43,7 +43,7 @@ test("customise: moving a widget earlier persists after save and reload", async 
   // Persisted server-side…
   await expect
     .poll(async () => {
-      const now = await managerApi.get<{ layout: { widgets: { id: string }[] }; version: number }>("/api/dashboard/layout");
+      const now = await memberApi.get<{ layout: { widgets: { id: string }[] }; version: number }>("/api/dashboard/layout");
       return now.layout.widgets.slice(0, 2).map((w) => w.id).join(",");
     })
     .toBe([before.layout.widgets[1].id, before.layout.widgets[0].id].join(","));
@@ -53,11 +53,11 @@ test("customise: moving a widget earlier persists after save and reload", async 
   await expect(list.locator(":scope > li").nth(0)).toContainText(secondLabel);
   await expect(list.locator(":scope > li").nth(1)).toContainText(firstLabel);
 
-  // Reset restores the role default.
-  await managerApi.post("/api/dashboard/layout/reset");
-  const reset = await managerApi.get<{ layout: { widgets: { id: string }[] } }>("/api/dashboard/layout");
+  // Reset restores the persona default.
+  await memberApi.post("/api/dashboard/layout/reset");
+  const reset = await memberApi.get<{ layout: { widgets: { id: string }[] } }>("/api/dashboard/layout");
   expect(reset.layout.widgets[0].id).toBe(before.layout.widgets[0].id);
-  await managerApi.ctx.dispose();
+  await memberApi.ctx.dispose();
 });
 
 test("editors get the personal dashboard variant", async ({ pageAs }) => {

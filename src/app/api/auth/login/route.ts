@@ -1,8 +1,9 @@
 import { bodyOrNull, clientIp, handle } from "@/server/http";
 import { login } from "@/server/services/auth";
+import { loginRedirectTarget } from "@/server/auth/redirect";
 import { methodNotAllowed } from "@/app/api/_lib/route";
 
-/** POST /api/auth/login `{ email, password }` → `{ data: { user } }` + session cookie. */
+/** POST /api/auth/login `{ email, password, next? }` → `{ data: { user, redirectTo } }` + session cookie. */
 export const POST = handle(async (req) => {
   const body = await bodyOrNull(req);
   const fields = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
@@ -12,7 +13,7 @@ export const POST = handle(async (req) => {
     ip: clientIp(req.headers),
     userAgent: req.headers.get("user-agent"),
   });
-  return { user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+  return { user: { id: user.id, name: user.name, email: user.email, role: user.role }, redirectTo: loginRedirectTarget(user.role, fields.next) };
 });
 
 /** Every other method → JSON 405 (not Next's empty-body 405). */

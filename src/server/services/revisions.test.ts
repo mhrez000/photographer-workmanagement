@@ -77,20 +77,20 @@ describe("requestRevision", () => {
 
   it("a transition into revision without a payload is a 400", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "review" });
-    const err = await catchErr(as("manager", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toCategory: "revision", expectedVersion: job.version })));
+    const err = await catchErr(as("coAdmin", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toCategory: "revision", expectedVersion: job.version })));
     expect(err.status).toBe(400);
     expect((await jobRow(job.id)).statusCategory).toBe("review");
   });
 
   it("naming another editor reassigns the job first (same transaction)", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" });
-    const res = await request("manager", job.id, { assigneeUserId: ids.users.editor2 });
+    const res = await request("coAdmin", job.id, { assigneeUserId: ids.users.editor2 });
     expect(res.revision.assigneeUserId).toBe(ids.users.editor2);
     expect(await jobRow(job.id)).toMatchObject({ editorId: ids.users.editor2, previousEditorId: ids.users.editor1 });
     const last = await first(db.select().from(jobStatusTransitions).where(eq(jobStatusTransitions.id, res.transitionId)));
     expect(last?.editorIdAtEntry).toBe(ids.users.editor2);
     const another = (await insertJobFixture(db, ids, { statusKey: "submitted" })).job;
-    expect((await catchErr(request("manager", another.id, { assigneeUserId: ids.users.inactiveEditor }))).status).toBe(400);
+    expect((await catchErr(request("coAdmin", another.id, { assigneeUserId: ids.users.inactiveEditor }))).status).toBe(422);
     await expectClean();
   });
 
@@ -143,7 +143,7 @@ describe("numbering, resolve, withdraw", () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" });
     const r1 = await request("photographer1", job.id);
     const expectedVersion = await versionOf(job.id);
-    await as("manager", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toCategory: "approved", expectedVersion, override: true, reason: "Client accepted as-is" }));
+    await as("coAdmin", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, toCategory: "approved", expectedVersion, override: true, reason: "Client accepted as-is" }));
     expect((await revisionsOf(job.id))[0]).toMatchObject({ id: r1.revision.id, resolution: "approved" });
     expect((await jobRow(job.id)).openRevisionId).toBeNull();
     await expectClean();

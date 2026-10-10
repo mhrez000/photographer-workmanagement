@@ -156,7 +156,7 @@ describe("pauseTimer / stopTimer", () => {
     await expect(run(ids.users.editor1, (tx, ctx) => stopTimer(tx, ctx, {}))).rejects.toThrow(NotFoundError);
     const { session } = await run(ids.users.editor1, (tx, ctx) => startTimer(tx, ctx, { jobId }));
     await expect(run(ids.users.photographer1, (tx, ctx) => stopTimer(tx, ctx, { sessionId: session.id }))).rejects.toThrow(ForbiddenError);
-    const stopped = await run(ids.users.manager, (tx, ctx) => stopTimer(tx, ctx, { sessionId: session.id }));
+    const stopped = await run(ids.users.coAdmin, (tx, ctx) => stopTimer(tx, ctx, { sessionId: session.id }));
     expect(stopped.endReason).toBe("stopped");
     const [ev] = await endedEvents();
     expect(ev?.metadata).toMatchObject({ onBehalfOf: ids.users.editor1 });
@@ -175,13 +175,13 @@ describe("engine hooks", () => {
     await run(ids.users.editor1, (tx, ctx) => startTimer(tx, ctx, { jobId }));
     await run(ids.users.photographer1, (tx, ctx) => startTimer(tx, ctx, { jobId }));
     fakeClock.advanceMinutes(10);
-    const closed = await run(ids.users.manager, (tx, ctx) => closeSessionsForJob(tx, ctx, jobId, "auto_status_change", { closedBy: "submit" }));
+    const closed = await run(ids.users.coAdmin, (tx, ctx) => closeSessionsForJob(tx, ctx, jobId, "auto_status_change", { closedBy: "submit" }));
     expect(closed).toHaveLength(2);
     expect(closed.every((s) => s.endReason === "auto_status_change" && s.durationSeconds === 600)).toBe(true);
     const ev = await endedEvents();
     expect(ev.map((e) => (e.metadata as { closedBy: string }).closedBy)).toEqual(["submit", "submit"]);
 
-    expect(await run(ids.users.manager, (tx, ctx) => closeSessionsForJob(tx, ctx, { jobId, reason: "auto_status_change" }))).toEqual([]);
+    expect(await run(ids.users.coAdmin, (tx, ctx) => closeSessionsForJob(tx, ctx, { jobId, reason: "auto_status_change" }))).toEqual([]);
   });
 
   it("closeRunningSessionForUser works from a system context and in object form", async () => {
@@ -225,7 +225,7 @@ describe("reads", () => {
     expect(forEditor.map((s) => s.user.id)).toEqual([ids.users.editor1]);
     await expect(listSessions(db, await contextFor(db, ids.users.editor2), jobId)).rejects.toThrow(NotFoundError); // invisible job → 404
 
-    const totals = await sessionTotals(db, await contextFor(db, ids.users.manager), jobId);
+    const totals = await sessionTotals(db, await contextFor(db, ids.users.coAdmin), jobId);
     expect(totals).toMatchObject({ totalSeconds: 2400, runningCount: 1, byCategory: { in_progress: 2400 } });
     expect(totals.byUser.map((u) => [u.user.id, u.seconds])).toEqual([
       [ids.users.editor1, 1800],
@@ -239,7 +239,7 @@ describe("reads", () => {
     const running = await runningSessionFor(db, await contextFor(db, ids.users.editor1));
     expect(running?.job.id).toBe(jobId);
     expect(running?.isRunning).toBe(true);
-    expect((await runningSessionFor(db, await contextFor(db, ids.users.manager), ids.users.editor1))?.id).toBe(running?.id);
+    expect((await runningSessionFor(db, await contextFor(db, ids.users.coAdmin), ids.users.editor1))?.id).toBe(running?.id);
     await expect(runningSessionFor(db, await contextFor(db, ids.users.editor2), ids.users.editor1)).rejects.toThrow(ForbiddenError);
     expect(
       await db.select().from(workSessions).where(and(eq(workSessions.userId, ids.users.editor1), isNull(workSessions.endedAt))),

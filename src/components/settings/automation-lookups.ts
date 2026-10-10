@@ -7,7 +7,10 @@ import type { NameLookup } from "./automation-describe";
 
 /** People, job types and clients by id — for automation sentences and pickers. */
 export async function loadAutomationLookups(db: PageContext["db"], ctx: PageContext["ctx"]) {
-  const users = (await listUsers(db, ctx, {})).map((u) => ({ id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive }));
+  // Staff only: automation assign / notify "user" targets must be photographers or editors (docs/ROLES.md §3.4).
+  const users = (await listUsers(db, ctx, {}))
+    .filter((u) => u.role !== "client")
+    .map((u) => ({ id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive, isAdmin: u.isAdmin }));
   const jobTypes = (await listJobTypes(db, ctx, { includeArchived: true })).map((t) => ({ id: t.id, name: t.name, colour: t.colour, archived: t.archivedAt !== null }));
   const clients = await getClientOptions(db, ctx, {});
   const lookup: NameLookup = {

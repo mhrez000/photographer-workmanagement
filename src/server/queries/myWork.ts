@@ -1,41 +1,55 @@
 /**
  * My Work queue (ARCHITECTURE.md §10 `/workspace/my`).
  *
- * Whose jobs: editors → jobs they currently hold (`editor_id = me`);
- * photographers → own jobs (photographer or creator); owners / managers →
- * jobs where they are photographer, editor or creator. Only ACTIVE jobs;
- * editors do not see DONE (approved / delivered) jobs in their queue.
+ * Whose jobs (docs/ROLES.md §8 — always personal, never the scope switch):
+ * editors → jobs they currently hold (`editor_id = me`); photographers
+ * (admins included) → jobs they shoot or created as a photographer; admins
+ * additionally get "Reviews waiting for me": reviewer-held jobs only an admin
+ * can review (`needsAdminReviewWhere`). Only ACTIVE jobs; editors do not see
+ * DONE (approved / delivered) jobs in their queue. Clients get nothing.
  *
  * Sections are exclusive; a job lands in the first that matches:
  *   Overdue → Paused → Waiting for Review → Revision Required →
  *   Due Today → Due Tomorrow → Upcoming (later or no due date).
  * Deadlines are judged in the organisation timezone.
  */
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { first, type DbLike } from "@/db/index";
 import { jobNotes, jobs, workSessions } from "@/db/schema";
-import { CATEGORY_GROUPS, MANAGEMENT_ROLES, type NoteKind } from "@/lib/constants";
+import { CATEGORY_GROUPS, type NoteKind } from "@/lib/constants";
 import type { AuthContext, JobRow, MyWorkQueue, WorkSessionView } from "@/lib/types";
 import { isDeadlineBound, isReviewerHolds } from "@/lib/workflow";
 import { toWorkSessionView } from "./jobDetail";
-import { categoryIn, loadOrgSettingsRow, loadStatusRefs, loadUserRefs, orgDayBounds, priorityOrderSql, selectJobRows, type OrgDayBounds } from "./scope";
+import { isAdmin, managedJobsWhere } from "@/server/auth/permissions";
+import {
+  categoryIn,
+  loadOrgSettingsRow,
+  loadStatusRefs,
+  loadUserRefs,
+  needsAdminReviewWhere,
+  orgDayBounds,
+  priorityOrderSql,
+  selectJobRows,
+  visibleJobsWhere,
+  type OrgDayBounds,
+} from "./scope";
 
 export const MY_WORK_MAX_JOBS = 500;
 
 export type MyWorkSection = Exclude<keyof MyWorkQueue, "runningSession">;
 
-/** WHERE for "my" jobs per role (see file header). */
+/** WHERE for "my" jobs per persona (see file header). */
 export function myJobsWhere(ctx: AuthContext): SQL {
   const me = ctx.userId;
-  if (!me) return sql`1 = 0`;
+  if (!me || ctx.isSystem) return sql`1 = 0`;
   if (ctx.role === "editor") {
     return and(eq(jobs.editorId, me), categoryIn(CATEGORY_GROUPS.DEADLINE_BOUND)) as SQL;
   }
-  const mine =
-    ctx.role === "photographer"
-      ? or(eq(jobs.photographerId, me), eq(jobs.createdByUserId, me))
-      : or(eq(jobs.photographerId, me), eq(jobs.editorId, me), eq(jobs.createdByUserId, me));
-  return and(mine, categoryIn(CATEGORY_GROUPS.ACTIVE)) as SQL;
+  if (ctx.role !== "photographer") return sql`1 = 0`;
+  const mine = managedJobsWhere(ctx);
+  // Admins: + reviews only an admin can do, regardless of the view scope (§8).
+  const reviews = isAdmin(ctx) ? and(categoryIn(CATEGORY_GROUPS.REVIEWER_HOLDS), needsAdminReviewWhere()) : undefined;
+  return and(reviews ? or(mine, reviews) : mine, categoryIn(CATEGORY_GROUPS.ACTIVE)) as SQL;
 }
 
 /** Section of a job row (exclusive, first match wins). */
@@ -99,10 +113,20 @@ export interface MyWorkNotePreview {
 }
 
 /**
+ * Kinds a viewer may read as a SQL predicate over `job_notes` joined to `jobs`
+ * (the `note.read` rule): admins every kind; team members every kind but
+ * `internal` unless they manage the job; editors never `internal` / `client`.
+ */
+function readableNoteKindsWhere(ctx: AuthContext): SQL | undefined {
+  if (isAdmin(ctx)) return undefined;
+  if (ctx.role === "photographer") return or(sql`${jobNotes.kind} <> 'internal'`, managedJobsWhere(ctx)) as SQL;
+  return notInArray(jobNotes.kind, ["internal", "client"]);
+}
+
+/**
  * One note preview per job (pinned first, then most recently edited; archived
- * notes skipped). Internal notes are only previewed for owners/managers — the
- * same rule as `note.read` for non-management roles. Callers pass job ids they
- * already loaded through `getMyWorkQueue` (so visibility is already scoped).
+ * notes skipped), only notes the viewer may read (`note.read`) on jobs they
+ * can see. Callers pass job ids they loaded through `getMyWorkQueue`.
  */
 export async function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Promise<Record<string, MyWorkNotePreview>> {
   const out: Record<string, MyWorkNotePreview> = {};
@@ -111,12 +135,14 @@ export async function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds
   const rows = await db
     .select({ jobId: jobNotes.jobId, kind: jobNotes.kind, body: jobNotes.body, isPinned: jobNotes.isPinned, updatedAt: jobNotes.updatedAt })
     .from(jobNotes)
+    .innerJoin(jobs, eq(jobs.id, jobNotes.jobId))
     .where(
       and(
         eq(jobNotes.organisationId, ctx.organisationId),
         inArray(jobNotes.jobId, ids),
         isNull(jobNotes.archivedAt),
-        MANAGEMENT_ROLES.includes(ctx.role) ? undefined : ne(jobNotes.kind, "internal"),
+        visibleJobsWhere(ctx),
+        readableNoteKindsWhere(ctx),
       ),
     )
     .orderBy(desc(jobNotes.isPinned), desc(jobNotes.updatedAt), asc(jobNotes.id));

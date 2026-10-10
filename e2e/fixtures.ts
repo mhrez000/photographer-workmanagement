@@ -1,9 +1,12 @@
 /**
- * The e2e fixtures module: role-based fixtures + shared UI helpers.
+ * The e2e fixtures module: persona-based fixtures + shared UI helpers.
  *
- * - Each role logs in ONCE per worker through the REST API
- *   (`POST /api/auth/login` with an Origin header) and its storage state is
- *   saved to `e2e/.auth/<role>.json` (gitignored).
+ * - Each seeded account (`Role` in ./api: owner, team photographers with and
+ *   without switches, editors, client portal users, the other studio) logs in
+ *   ONCE per worker through the REST API (`POST /api/auth/login` with an Origin
+ *   header) and its storage state is saved to `e2e/.auth/<role>.<pid>.json`
+ *   (gitignored). Client sessions carry the `k: "client"` claim and are routed
+ *   to `/portal` (docs/ROLES.md §7.8).
  * - `test.use({ role: "editor" })` makes the default `page` that user.
  * - `pageAs(role)` opens an extra, isolated browser context for multi-user flows.
  * - `api` (as the owner) and `apiAs(role)` are authenticated REST clients for
@@ -219,6 +222,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 });
 
 export { expect, escapeRegExp };
+
+/** Copy of the in-shell 403 page (`(app)/forbidden.tsx`) and the job 404 page. */
+export const FORBIDDEN_TEXT = "You don't have access to this";
+export const JOB_NOT_FOUND_TEXT = "We can't find that job";
+
+/** The topbar account-menu trigger (`Account menu for <name>`). */
+export function accountMenuButton(page: Page) {
+  return page.getByRole("banner").getByRole("button", { name: /^Account menu for / });
+}
 
 /* ------------------------------ UI helpers ------------------------------ */
 

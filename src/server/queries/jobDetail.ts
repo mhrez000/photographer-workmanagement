@@ -1,11 +1,16 @@
 /**
  * Job detail bundle (`GET /api/jobs/:id`, `/jobs/[id]`; ARCHITECTURE.md §10).
  *
- * Redaction per role:
- *  - notes: each kind passes `note.read` (editors never see internal notes;
- *    photographers only on their own jobs);
+ * Redaction per persona (docs/ROLES.md §2.3, §2.4):
+ *  - notes: each kind passes `note.read` (editors never see internal or
+ *    client notes; team members see internal notes on jobs they manage);
  *  - work sessions: other people's sessions need `timer.view_others`;
- *  - comments: soft-deleted bodies are blanked (`body: null`).
+ *  - comments: soft-deleted bodies are blanked (`body: null`);
+ *  - editors with past / created-only access: comments, notes, links,
+ *    revisions and assignments after their read cut-off are dropped (own rows
+ *    kept) and the current editor is "Another editor";
+ *  - assignment `reason` text: editors only on rows they acted on or are
+ *    the subject of.
  * Metrics come from src/lib/metrics.ts; action buttons from
  * `availableActions()` in src/lib/workflow.ts.
  */
@@ -38,7 +43,19 @@ import { availableActions, toStatusRef } from "@/lib/workflow";
 import { can } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
 import { loadTransitions, toStageViews } from "./jobHistory";
-import { loadStatusRefs, loadUserRefs, loadVisibleJob, loadWorkflowGraphs, mapJobRows, selectRawJobs, workflowJobOf } from "./scope";
+import {
+  ANOTHER_EDITOR,
+  editorReadCutoff,
+  loadStatusRefs,
+  loadUserRefs,
+  loadVisibleJob,
+  loadWorkflowGraphs,
+  mapJobRows,
+  passesCutoff,
+  redactOtherEditor,
+  selectRawJobs,
+  workflowJobOf,
+} from "./scope";
 
 const EDITING_CATEGORIES: readonly StatusCategory[] = ["in_progress", "revision"];
 
@@ -54,6 +71,7 @@ export type UserLookup = (id: string | null | undefined) => UserRef | null;
 
 export function toLinkView(l: JobLink, user: UserLookup): LinkView {
   return {
+    sharedWithClient: l.sharedWithClient,
     id: l.id,
     kind: l.kind,
     url: l.url,
@@ -133,7 +151,14 @@ export function buildCommentTree(
       editCount: c.editCount,
       deletedAt: c.deletedAt,
       createdAt: c.createdAt,
-      canEdit: can(ctx, "comment.edit", { job: jobRef, authorUserId: c.authorUserId, createdAt: c.createdAt, deletedAt: c.deletedAt }),
+      canEdit: can(ctx, "comment.edit", {
+        job: jobRef,
+        authorUserId: c.authorUserId,
+        createdAt: c.createdAt,
+        deletedAt: c.deletedAt,
+        kind: c.kind,
+        rootKind: rootKindOf(c, rows),
+      }),
       replies: [],
     });
   }
@@ -146,6 +171,11 @@ export function buildCommentTree(
     else roots.push(node);
   }
   return roots;
+}
+
+function rootKindOf(c: JobComment, rows: readonly JobComment[]): JobComment["kind"] {
+  if (!c.rootCommentId || c.rootCommentId === c.id) return c.kind;
+  return rows.find((r) => r.id === c.rootCommentId)?.kind ?? c.kind;
 }
 
 export function toRevisionView(r: JobRevision, user: UserLookup): RevisionView {
@@ -208,6 +238,7 @@ export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string):
   const { job, ref } = await loadVisibleJob(db, ctx, jobId, "job.view");
   const now = ctx.now();
   const org = ctx.organisationId;
+  const me = ctx.userId;
 
   const raw = (await selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 }))[0];
   if (!raw) throw new NotFoundError("Job");
@@ -259,6 +290,20 @@ export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string):
   ).filter((s) => mayViewOthersTime || s.userId === ctx.userId);
   const transitions = await loadTransitions(db, ctx, job.id);
 
+  // Editor read cut-off (§2.3): past / created-only access sees rows up to the cut-off plus their own.
+  const cutoff = editorReadCutoff(ctx, ref, assignmentRows.filter((a) => a.role === "editor"));
+  if (cutoff !== null) {
+    const keep = <T>(rows: T[], at: (r: T) => string, by: (r: T) => string | null): T[] => rows.filter((r) => passesCutoff(cutoff, at(r), by(r), me));
+    linkRows.splice(0, linkRows.length, ...keep(linkRows, (l) => l.createdAt, (l) => l.addedByUserId));
+    noteRows.splice(0, noteRows.length, ...keep(noteRows, (n) => n.createdAt, (n) => n.authorUserId));
+    commentRows.splice(0, commentRows.length, ...keep(commentRows, (c) => c.createdAt, (c) => c.authorUserId));
+    revisionRows.splice(0, revisionRows.length, ...keep(revisionRows, (r) => r.requestedAt, (r) => r.assigneeUserId));
+    assignmentRows.splice(0, assignmentRows.length, ...keep(assignmentRows, (a) => a.assignedAt, (a) => a.userId));
+    transitions.splice(0, transitions.length, ...keep(transitions, (t) => t.enteredAt, (t) => t.actorUserId));
+  }
+  const keptComments = new Set(commentRows.map((c) => c.id));
+  mentionRows.splice(0, mentionRows.length, ...mentionRows.filter((m) => keptComments.has(m.commentId)));
+
   // People + statuses in two queries.
   const userIds = new Set<string | null>([job.previousEditorId, job.createdByUserId, job.approvedByUserId, job.editorId, job.photographerId]);
   for (const l of linkRows) userIds.add(l.addedByUserId).add(l.removedByUserId);
@@ -269,7 +314,9 @@ export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string):
   for (const a of assignmentRows) userIds.add(a.userId).add(a.assignedByUserId).add(a.unassignedByUserId);
   for (const s of sessionRows) userIds.add(s.userId);
   const users = await loadUserRefs(db, ctx, userIds);
-  const user: UserLookup = (id) => (id ? (users.get(id) ?? null) : null);
+  // The current holder of a past / created-only job is "Another editor" (§2.3).
+  const hiddenEditor = job.editorId !== null && redactOtherEditor(ctx, users.get(job.editorId) ?? null) === ANOTHER_EDITOR ? job.editorId : null;
+  const user: UserLookup = (id) => (id ? (id === hiddenEditor ? ANOTHER_EDITOR : (users.get(id) ?? null)) : null);
   const statusRefs = await loadStatusRefs(db, ctx, [job.previousStatusId, ...sessionRows.map((s) => s.statusIdAtStart)]);
 
   const graph = (await loadWorkflowGraphs(db, ctx, [job.workflowId])).get(job.workflowId) ?? { statuses: [], edges: [] };
@@ -294,7 +341,12 @@ export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string):
   // Revisions, assignments, stages, sessions.
   const revisions = revisionRows.map((r) => toRevisionView(r, user));
   const openRevision = revisions.find((r) => r.isOpen) ?? null;
-  const assignments = assignmentRows.map((a) => toAssignmentView(a, user));
+  const assignments = assignmentRows.map((a) => {
+    const view = toAssignmentView(a, user);
+    // Assignment reasons: editors only on rows they acted on or are the subject of (§2.4).
+    const ownRow = me !== null && (a.userId === me || a.assignedByUserId === me || a.unassignedByUserId === me);
+    return ctx.role === "editor" && !ownRow ? { ...view, reason: null } : view;
+  });
   const stages = await toStageViews(db, ctx, transitions, now);
 
   const sessions = sessionRows.map((s) => toWorkSessionView(s, user, statusRefs.get(s.statusIdAtStart)?.name ?? s.categoryAtStart, now));
@@ -333,6 +385,9 @@ export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string):
     job: {
       ...row,
       ...detailFields(job, user),
+      sharedWithClient: job.sharedWithClient,
+      projectSharedWithClient: ref.projectSharedWithClient,
+      createdByRole: job.createdByRole,
       previousStatus: job.previousStatusId ? (statusRefs.get(job.previousStatusId) ?? null) : null,
     },
     workflowStatuses,

@@ -11,7 +11,7 @@ test("bell count tracks unread notifications; mark one read, then mark all read"
   const edApi = await loginApi(editor.email, editor.tempPassword);
   expect((await edApi.me()).unreadCount).toBe(0);
 
-  // Two notifications: assigned to a job, then its priority changes (manager actor → editor notified).
+  // Two notifications: assigned to a job, then its priority changes (owner actor → editor notified).
   const job = await api.createJob({ name: uniq("Notify"), editorId: editor.user.id });
   await api.patch(`/api/jobs/${job.id}`, { expectedVersion: await api.version(job.id), priority: "urgent" });
 

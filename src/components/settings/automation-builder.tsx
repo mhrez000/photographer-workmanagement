@@ -18,11 +18,11 @@ import { api } from "@/lib/api-client";
 import {
   LINK_KINDS,
   LINK_KIND_META,
-  NOTE_KINDS,
+  AUTOMATION_NOTE_KINDS,
   NOTE_KIND_META,
   PRIORITIES,
   PRIORITY_META,
-  ROLE_LABELS,
+  personaLabel,
   STATUS_CATEGORIES,
   STATUS_CATEGORY_META,
   type AutomationTriggerType,
@@ -45,6 +45,8 @@ export interface BuilderPerson {
   role: Role;
   avatarColour: string;
   isActive: boolean;
+  /** Roles v2: photographers who are admins show as "Owner / Photographer". */
+  isAdmin?: boolean;
 }
 
 export interface AutomationBuilderProps {
@@ -149,8 +151,7 @@ const NOTIFY_TARGETS = [
   ["editor", "The editor"],
   ["previous_editor", "The previous editor"],
   ["creator", "Whoever created the job"],
-  ["managers", "All managers"],
-  ["owner", "The owner(s)"],
+  ["admins", "The owner and admins"],
   ["user", "A specific person…"],
 ] as const;
 
@@ -323,9 +324,11 @@ function ActionRow({
             {a.target === "user" ? (
               <Select size="sm" value={a.userId ?? ""} onChange={(e) => onChange({ ...a, userId: e.target.value || undefined })} aria-label="Person to notify" wrapperClassName="sm:w-56">
                 <option value="">Choose a person…</option>
-                {users.map((u) => (
+                {users
+                  .filter((u) => u.role !== "client")
+                  .map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.name} · {ROLE_LABELS[u.role]}
+                    {u.name} · {personaLabel(u)}
                   </option>
                 ))}
               </Select>
@@ -391,7 +394,7 @@ function ActionRow({
       body = (
         <div className="flex flex-col gap-2">
           <Select size="sm" value={a.kind} onChange={(e) => onChange({ ...a, kind: e.target.value as NoteKind })} aria-label="Note kind" wrapperClassName="sm:w-48">
-            {NOTE_KINDS.map((k) => (
+            {AUTOMATION_NOTE_KINDS.map((k) => (
               <option key={k} value={k}>
                 {NOTE_KIND_META[k].label}
               </option>
@@ -468,7 +471,7 @@ export function AutomationBuilder({ rule, users, jobTypes, clients, lookup, time
       jobTypes: jobTypes.filter((t) => !t.archived).map((t) => ({ value: t.id, label: t.name, colour: t.colour })),
       clients: clients.map((c) => ({ value: c.id, label: c.name, colour: c.colour })),
       editors: users.filter((u) => u.role === "editor").map((u) => ({ value: u.id, label: u.name, description: u.isActive ? undefined : "Deactivated" })),
-      photographers: users.filter((u) => u.role !== "editor").map((u) => ({ value: u.id, label: u.name, description: ROLE_LABELS[u.role] })),
+      photographers: users.filter((u) => u.role === "photographer").map((u) => ({ value: u.id, label: u.name, description: personaLabel(u) })),
     }),
     [users, jobTypes, clients],
   );
@@ -705,7 +708,7 @@ export function AutomationBuilder({ rule, users, jobTypes, clients, lookup, time
         </ol>
       </SectionCard>
 
-      <div className="sticky bottom-[calc(var(--tabbar-height)+0.75rem)] z-20 flex flex-col gap-3 rounded-lg border border-border bg-surface-raised/95 p-4 shadow-pop backdrop-blur lg:bottom-4">
+      <div className="sticky bottom-[calc(var(--tabbar-height)+0.75rem)] z-(--z-page-sticky) flex flex-col gap-3 rounded-lg border border-border bg-surface-raised/95 p-4 shadow-pop backdrop-blur lg:bottom-4">
         <p className="text-sm leading-relaxed text-ink-secondary" aria-live="polite">
           <span className="font-medium text-ink">{sentence.trigger}</span>
           {sentence.conditions ? <span> {sentence.conditions}</span> : null}

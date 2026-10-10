@@ -153,7 +153,7 @@ describe("transactional integrity", () => {
   it("a service that throws mid-transaction leaves no event and no activity bump", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     const before = (await db.select().from(activityEvents)).length;
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     fakeClock.advanceHours(1);
     await expect(
       withTx(
@@ -180,7 +180,7 @@ describe("transactional integrity", () => {
   });
 
   it("an unknown event type aborts the whole mutation", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await expect(
       withTx(
         (tx) =>
@@ -235,7 +235,7 @@ describe("recordEvent", () => {
 
   it("bumps last_activity_at monotonically (a backdated event never rewinds it) and never bumps version", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const write = () =>
       withTx(
         (tx) => recordEvent(tx, ctx, { entityType: "job", entityId: job.id, jobId: job.id, eventType: "job.paused", action: "paused" }),
@@ -252,7 +252,7 @@ describe("recordEvent", () => {
 
   it("forces management visibility for management prefixes and internal notes, never downgrades", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const [userEvt, internalNote, editorNote, explicit] = await withTx(
       (tx) =>
         recordEvents(tx, ctx, [

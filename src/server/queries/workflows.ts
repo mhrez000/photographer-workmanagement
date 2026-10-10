@@ -9,16 +9,17 @@ import { jobTypes, jobs, workflowStatuses, workflowTransitions, workflows } from
 import { CATEGORY_GROUPS } from "@/lib/constants";
 import type { AuthContext, JobTypeView, WorkflowGraph, WorkflowListItem, WorkflowTransitionView } from "@/lib/types";
 import { generateCancelEdges, toStatusRef, validateWorkflowDefinition, type EdgeLike, type StatusLike } from "@/lib/workflow";
-import { assertCan, isManagement } from "@/server/auth/permissions";
+import { assertCan, isAdmin, visibleJobsWhere } from "@/server/auth/permissions";
 import { loadWorkflowInOrg } from "@/server/services/_shared";
 import { binaryAsc } from "./metrics";
-import { categoryIn } from "./scope";
+import { assertStaffRead, categoryIn } from "./scope";
 
 async function openJobCountsBy(db: DbLike, ctx: AuthContext, column: typeof jobs.workflowId | typeof jobs.jobTypeId): Promise<Map<string, number>> {
   const rows = await db
     .select({ key: column, n: sql<number>`count(*)`.mapWith(Number) })
     .from(jobs)
-    .where(and(eq(jobs.organisationId, ctx.organisationId), categoryIn(CATEGORY_GROUPS.ACTIVE)))
+    // Admins count every job; anyone else only the jobs they can see.
+    .where(and(isAdmin(ctx) ? eq(jobs.organisationId, ctx.organisationId) : visibleJobsWhere(ctx), categoryIn(CATEGORY_GROUPS.ACTIVE)))
     .groupBy(column);
   return new Map(rows.map((r) => [r.key, r.n]));
 }
@@ -139,11 +140,13 @@ export async function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId:
 }
 
 /**
- * `GET /api/job-types` — every authenticated user (the job form needs them);
- * archived types only for management.
+ * `GET /api/job-types` — every staff user (the job form needs them; clients
+ * 403); archived types only for admins; open-job counts over the viewer's
+ * visible jobs.
  */
 export async function listJobTypes(db: DbLike, ctx: AuthContext, opts: { includeArchived?: boolean } = {}): Promise<JobTypeView[]> {
-  const withArchived = opts.includeArchived === true && isManagement(ctx);
+  assertStaffRead(ctx);
+  const withArchived = opts.includeArchived === true && isAdmin(ctx);
   const rows = await db
     .select({ type: jobTypes, workflow: { id: workflows.id, name: workflows.name } })
     .from(jobTypes)

@@ -22,7 +22,7 @@ import { CATEGORY_GROUPS, type SessionEndReason, type StatusCategory } from "@/l
 import type { AuthContext, Job, RunningSessionView, SessionTotals, WorkSession, WorkSessionView } from "@/lib/types";
 import { durationSeconds } from "@/lib/metrics";
 import { EndTimerInput, StartTimerInput } from "@/lib/validation/timeTracking";
-import { assertCan, can, isManagement } from "@/server/auth/permissions";
+import { assertCan, can, isAdmin } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "@/server/errors";
 import { jobMeta, loadJobWithRef, loadUserRefMap, unknownUserRef } from "./_collab";
@@ -217,9 +217,9 @@ async function endTimer(tx: Tx, ctx: AuthContext, input: unknown, reason: "pause
     );
     if (!session || (data.jobId && session.jobId !== data.jobId)) throw new NotFoundError("Timer");
     if (session.userId !== userId) {
-      // Someone else's timer: owners/managers only (and only on jobs they can see).
+      // Someone else's timer: admins only (and only on jobs they can see).
       const { ref } = await loadJobWithRef(tx, ctx, session.jobId);
-      if (!isManagement(ctx) || !can(ctx, "timer.view_others", ref)) throw new ForbiddenError("timer.use");
+      if (!isAdmin(ctx) || !can(ctx, "timer.view_others", ref)) throw new ForbiddenError("timer.use");
     }
     if (session.endedAt) return session;
   } else {
@@ -417,7 +417,7 @@ export async function listSessions(db: DbLike, ctx: AuthContext, jobId: string):
 
 /**
  * `userId`'s running timer with its job (default: the actor). Another
- * user's timer requires owner/manager. Null when none is running.
+ * user's timer requires an admin. Null when none is running.
  */
 export async function runningSessionFor(
   db: DbLike,
@@ -425,7 +425,7 @@ export async function runningSessionFor(
   userId: string | null = ctx.userId,
 ): Promise<RunningSessionView | null> {
   if (!userId) return null;
-  if (userId !== ctx.userId && !isManagement(ctx) && !ctx.isSystem) throw new ForbiddenError("timer.view_others");
+  if (userId !== ctx.userId && !isAdmin(ctx) && !ctx.isSystem) throw new ForbiddenError("timer.view_others");
   const running = await runningForUser(db, ctx.organisationId, userId);
   if (!running) return null;
   const job = await jobLabel(db, ctx, running.jobId);

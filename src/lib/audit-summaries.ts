@@ -75,8 +75,13 @@ function priorityLabel(value: unknown): string | null {
   return typeof value === "string" && value in PRIORITY_META ? PRIORITY_META[value as Priority].label : null;
 }
 
+/** Roles of frozen pre-roles-v2 events (activity_events is append-only, so they stay readable). */
+const LEGACY_ROLE_LABELS: Record<string, string> = { owner: "Owner", manager: "Manager" };
+
 function roleLabel(value: unknown): string | null {
-  return typeof value === "string" && value in ROLE_LABELS ? ROLE_LABELS[value as Role] : null;
+  if (typeof value !== "string") return null;
+  if (value in ROLE_LABELS) return ROLE_LABELS[value as Role];
+  return LEGACY_ROLE_LABELS[value] ?? null;
 }
 
 function noteKindLabel(value: unknown): string {
@@ -528,6 +533,22 @@ export function summarise(
       return `deleted view ${entityName(prev, next, meta, "a view")}`;
     case "dashboard.updated":
       return "rearranged the dashboard";
+
+    /* ---------------- roles v2: sharing, portal, admin (docs/ROLES.md §1.1) ---------------- */
+    case "job.client_sharing_changed":
+      return bag(next).shared === true ? "shared the job with the client" : "stopped sharing the job with the client";
+    case "project.client_sharing_changed":
+      return bag(next).shared === true
+        ? `shared project ${entityName(prev, next, meta, "a project")} with the client`
+        : `stopped sharing project ${entityName(prev, next, meta, "a project")} with the client`;
+    case "link.client_sharing_changed":
+      return bag(next).shared === true ? "shared a link with the client" : "stopped sharing a link with the client";
+    case "client.portal_updated":
+      return `updated the client portal for ${entityName(prev, next, meta, "a client")}`;
+    case "user.admin_changed":
+      return bag(next).isAdmin === true ? "made a photographer an admin" : "removed admin from a photographer";
+    case "settings.primary_owner_changed":
+      return "transferred primary ownership";
 
     default:
       return assertNever(eventType);

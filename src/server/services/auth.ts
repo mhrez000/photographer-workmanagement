@@ -20,7 +20,7 @@ import { ChangePasswordInput, LoginInput } from "@/lib/validation/auth";
 import { recordEvent } from "@/server/audit";
 import { hashPassword, verifyAgainstDummy, verifyPassword } from "@/server/auth/password";
 import { checkLoginAttempt, recordLoginAttemptFailure, resetLoginAttempts } from "@/server/auth/rate-limit";
-import { buildContextFromDb, clearSession, createSession, systemContext } from "@/server/auth/session";
+import { buildContextFromDb, clearSession, createSession, sessionKindForRole, systemContext } from "@/server/auth/session";
 import { ConflictError, RateLimitedError, UnauthorizedError, ValidationError } from "@/server/errors";
 import { parseInput, withTx } from "./_shared";
 
@@ -56,7 +56,8 @@ async function auditFailure(db: Db, user: User, input: { email: string; ip?: str
 /**
  * Verifies credentials (rate-limited per email+IP AND per email alone), records the outcome and
  * returns the user. Throws RateLimitedError (429) or UnauthorizedError (401,
- * one generic message for unknown email / wrong password / inactive account).
+ * one generic message for unknown email / wrong password / inactive account /
+ * client user whose portal is off or whose client is archived).
  */
 export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedUser> {
   const input = parseInput(LoginInput, raw);
@@ -80,9 +81,16 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
     throw new UnauthorizedError(INVALID_CREDENTIALS);
   }
 
-  resetLoginAttempts(input.email, input.ip);
   const ctx = await buildContextFromDb(db, user.id, { sessionVersion: user.sessionVersion });
-  if (!ctx) throw new UnauthorizedError(INVALID_CREDENTIALS);
+  if (!ctx) {
+    // Roles v2 (docs/ROLES.md §7.8): a client user whose client is archived or has the
+    // portal off gets the SAME generic 401 as a wrong password (no credential oracle).
+    await auditFailure(db, user, input, user.role === "client" ? "portal_closed" : "no_context");
+    const after = recordLoginAttemptFailure(input.email, input.ip);
+    if (!after.allowed) throw new RateLimitedError(after.retryAfterSeconds);
+    throw new UnauthorizedError(INVALID_CREDENTIALS);
+  }
+  resetLoginAttempts(input.email, input.ip);
   await withTx(
     async (tx) => {
       await tx.update(users).set({ lastLoginAt: ctx.now() }).where(eq(users.id, user.id));
@@ -113,7 +121,7 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
 /** Full login for route handlers / server actions: authenticate + set the cookie. */
 export async function login(raw: unknown, db: Db = getDb()): Promise<AuthenticatedUser> {
   const user = await authenticate(db, raw);
-  await createSession(user.id, user.sessionVersion);
+  await createSession(user.id, user.sessionVersion, sessionKindForRole(user.role));
   return user;
 }
 
@@ -230,6 +238,6 @@ export async function changePasswordInDb(
 export async function changePassword(ctx: AuthContext, raw: unknown, db: Db = getDb()): Promise<{ ok: true }> {
   const prepared = await preparePasswordChange(db, ctx, raw);
   const { sessionVersion } = await withTx((tx) => changePasswordInDb(tx, ctx, prepared), { db });
-  await createSession(prepared.userId, sessionVersion);
+  await createSession(prepared.userId, sessionVersion, sessionKindForRole(ctx.role));
   return { ok: true };
 }

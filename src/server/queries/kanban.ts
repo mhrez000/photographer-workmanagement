@@ -19,7 +19,7 @@ import { KANBAN_COLUMNS, KANBAN_COLUMN_META, type KanbanColumn } from "@/lib/con
 import type { AuthContext, JobRow, KanbanCard, KanbanColumnView } from "@/lib/types";
 import { allowedKanbanColumns, resolveKanbanDrop, type KanbanDropResult } from "@/lib/workflow";
 import { parseInput } from "@/server/services/_shared";
-import { jobFiltersWhere, JobListFiltersSchema } from "./jobs";
+import { jobFiltersWhere, JobListFiltersSchema, listViewScope, type ListScopeOptions } from "./jobs";
 import {
   categoryIn,
   countJobs,
@@ -32,6 +32,7 @@ import {
   selectRawJobs,
   workflowJobOf,
   type RawJobRow,
+  type ViewScope,
 } from "./scope";
 
 export const KANBAN_DEFAULT_PER_COLUMN = 100;
@@ -49,6 +50,8 @@ export interface KanbanBoard {
   columns: KanbanColumnView[];
   /** Cancelled jobs when `includeCancelled`; otherwise null. */
   cancelled: { cards: KanbanCard[]; count: number } | null;
+  /** The resolved view scope (§8; null = no scope switch). */
+  scope: ViewScope | null;
   asOf: string;
 }
 
@@ -74,12 +77,16 @@ export async function toKanbanCards(db: DbLike, ctx: AuthContext, raws: readonly
   });
 }
 
-/** The full board for the actor (filters = the All Work vocabulary + perColumnLimit). */
-export async function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<KanbanBoard> {
+/**
+ * The full board for the actor (filters = the All Work vocabulary + perColumnLimit;
+ * `?scope=` / `opts.scopeCookie` = the personal / business view, §8).
+ */
+export async function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknown = {}, opts: ListScopeOptions = {}): Promise<KanbanBoard> {
   const f = parseInput(KanbanQuerySchema, input ?? {});
   const now = ctx.now();
   const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
-  const filterWhere = jobFiltersWhere(ctx, { ...f, includeCancelled: true }, bounds, { defaultHideCancelled: false });
+  const viewScope = listViewScope(ctx, f, opts);
+  const filterWhere = jobFiltersWhere(ctx, { ...f, includeCancelled: true }, bounds, { defaultHideCancelled: false, viewScope });
   const limit = f.perColumnLimit ?? KANBAN_DEFAULT_PER_COLUMN;
 
   // Sequential on purpose: `db` may be a transaction (one connection).
@@ -103,7 +110,7 @@ export async function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknow
     const raws = await selectRawJobs(db, ctx, { where, orderBy: columnOrder("cancelled"), limit });
     cancelled = { cards: await toKanbanCards(db, ctx, raws, now), count: await countJobs(db, ctx, where) };
   }
-  return { columns, cancelled, asOf: now };
+  return { columns, cancelled, scope: viewScope, asOf: now };
 }
 
 /**

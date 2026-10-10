@@ -19,6 +19,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { NAV_GATES, type NavGates } from "@/config/nav";
 import { AppShell, PageContainer } from "@/components/shell";
 import { Avatar, AvatarGroup } from "@/components/ui/avatar";
 import {
@@ -71,8 +72,12 @@ const demoUser = {
   id: "demo",
   name: "Alex Morgan",
   email: "alex@studio.test",
-  role: "owner" as const,
+  role: "photographer" as const,
+  isAdmin: true,
 };
+
+/** Every nav gate open: the demo shell shows the full Owner / Photographer navigation. */
+const DEMO_NAV_GATES = Object.fromEntries(NAV_GATES.map((g) => [g, true])) as NavGates;
 
 const SECTIONS = [
   ["tokens", "Tokens"],
@@ -132,7 +137,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 export default function DesignSystemPage() {
   return (
-    <AppShell user={demoUser} orgName="Northlight Studio" unreadCount={7}>
+    <AppShell user={demoUser} orgName="Northlight Studio" unreadCount={7} navGates={DEMO_NAV_GATES} viewScope="business">
       <PageContainer>
         <PageHeader
           eyebrow="Internal"

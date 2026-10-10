@@ -69,17 +69,17 @@ describe("addNote permissions per kind", () => {
   });
 
   it("writes note.added; internal notes produce management-only events", async () => {
-    const pub = await run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "Agent prefers warm tones" }));
-    const internal = await run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "internal", body: "Client pays late" }));
+    const pub = await run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "Agent prefers warm tones" }));
+    const internal = await run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "internal", body: "Client pays late" }));
     expect((await noteEvents(pub.id))[0]).toMatchObject({ eventType: "note.added", visibility: "all", jobId });
     expect((await noteEvents(internal.id))[0]).toMatchObject({ eventType: "note.added", visibility: "management" });
   });
 
   it("rejects a revision id on non-revision notes and unknown jobs", async () => {
     await expect(
-      run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "x", revisionId: "r1" })),
+      run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "x", revisionId: "r1" })),
     ).rejects.toThrow(ValidationError);
-    await expect(run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId: "missing", kind: "client", body: "x" }))).rejects.toThrow(
+    await expect(run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId: "missing", kind: "client", body: "x" }))).rejects.toThrow(
       NotFoundError,
     );
   });
@@ -99,8 +99,8 @@ describe("editNote + history", () => {
     const v2 = await run(ids.users.photographer1, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 1, body: "v2" }));
     expect(v2).toMatchObject({ body: "v2", editCount: 1, version: 2, lastEditedByUserId: ids.users.photographer1 });
     fakeClock.advanceMinutes(5);
-    const v3 = await run(ids.users.manager, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 2, body: "v3" }));
-    expect(v3).toMatchObject({ body: "v3", editCount: 2, version: 3, lastEditedByUserId: ids.users.manager });
+    const v3 = await run(ids.users.coAdmin, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 2, body: "v3" }));
+    expect(v3).toMatchObject({ body: "v3", editCount: 2, version: 3, lastEditedByUserId: ids.users.coAdmin });
 
     const history = await noteHistory(db, await contextFor(db, ids.users.editor1), note.id);
     expect(history.map((h) => h.eventType)).toEqual(["note.added", "note.edited", "note.edited"]);
@@ -109,31 +109,31 @@ describe("editNote + history", () => {
       ["v1", "v2"],
       ["v2", "v3"],
     ]);
-    expect(history[2].actor?.id).toBe(ids.users.manager);
+    expect(history[2].actor?.id).toBe(ids.users.coAdmin);
     expect(history[2].editCount).toBe(2);
   });
 
   it("orders same-instant history by insertion (rowid), not by id", async () => {
     // Frozen clock: all three events share created_at; insertion order must win.
-    const note = await run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "a" }));
-    await run(ids.users.manager, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 1, body: "b" }));
-    await run(ids.users.manager, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 2, body: "c" }));
-    const history = await noteHistory(db, await contextFor(db, ids.users.manager), note.id);
+    const note = await run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "a" }));
+    await run(ids.users.coAdmin, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 1, body: "b" }));
+    await run(ids.users.coAdmin, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 2, body: "c" }));
+    const history = await noteHistory(db, await contextFor(db, ids.users.coAdmin), note.id);
     expect(history.map((h) => h.newBody)).toEqual(["a", "b", "c"]);
   });
 
   it("409 on a stale version; pin-only changes do not count as body edits", async () => {
-    const note = await run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "a" }));
+    const note = await run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "a" }));
     await expect(
-      run(ids.users.manager, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 7, body: "b" })),
+      run(ids.users.coAdmin, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 7, body: "b" })),
     ).rejects.toThrow(ConflictError);
-    const pinned = await run(ids.users.manager, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 1, isPinned: true }));
+    const pinned = await run(ids.users.coAdmin, (tx, ctx) => editNote(tx, ctx, { noteId: note.id, expectedVersion: 1, isPinned: true }));
     expect(pinned).toMatchObject({ isPinned: true, editCount: 0, version: 2 });
     expect((await noteEvents(note.id)).map((e) => e.eventType)).toEqual(["note.added", "note.edited"]);
   });
 
   it("editors may only edit their own notes", async () => {
-    const other = await run(ids.users.manager, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "by manager" }));
+    const other = await run(ids.users.coAdmin, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "editor", body: "by manager" }));
     await expect(
       run(ids.users.editor1, (tx, ctx) => editNote(tx, ctx, { noteId: other.id, expectedVersion: 1, body: "x" })),
     ).rejects.toThrow(ForbiddenError);
@@ -150,19 +150,24 @@ describe("editNote + history", () => {
 });
 
 describe("archive / restore / list", () => {
-  it("archives and restores with events; list hides archived and internal notes per role", async () => {
+  it("archives and restores with events; list hides archived, internal and (for editors) client notes", async () => {
     const client = await run(ids.users.photographer1, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "client", body: "c" }));
+    const brief = await run(ids.users.photographer1, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "photographer", body: "p" }));
     await run(ids.users.owner, (tx, ctx) => addNote(tx, ctx, { jobId, kind: "internal", body: "i" }));
 
-    expect((await listNotes(db, await contextFor(db, ids.users.editor1), jobId)).map((n) => n.kind)).toEqual(["client"]);
-    expect((await listNotes(db, await contextFor(db, ids.users.owner), jobId)).map((n) => n.kind).sort()).toEqual(["client", "internal"]);
-    // photographer sees internal notes on own jobs only (§3.2)
-    expect(await listNotes(db, await contextFor(db, ids.users.photographer1), jobId)).toHaveLength(2);
+    // roles v2 §2.4: editors never see internal or client notes
+    expect((await listNotes(db, await contextFor(db, ids.users.editor1), jobId)).map((n) => n.kind)).toEqual(["photographer"]);
+    expect((await listNotes(db, await contextFor(db, ids.users.owner), jobId)).map((n) => n.kind).sort()).toEqual(["client", "internal", "photographer"]);
+    // photographer sees internal notes on jobs they manage
+    expect(await listNotes(db, await contextFor(db, ids.users.photographer1), jobId)).toHaveLength(3);
+
+    const archivedBrief = await run(ids.users.photographer1, (tx, ctx) => archiveNote(tx, ctx, { noteId: brief.id }));
+    expect(archivedBrief.archivedAt).toBe(fakeClock.now());
+    expect(await listNotes(db, await contextFor(db, ids.users.editor1), jobId)).toHaveLength(0);
+    expect(await listNotes(db, await contextFor(db, ids.users.editor1), jobId, { includeArchived: true })).toHaveLength(1);
 
     const archived = await run(ids.users.photographer1, (tx, ctx) => archiveNote(tx, ctx, { noteId: client.id }));
     expect(archived.archivedAt).toBe(fakeClock.now());
-    expect(await listNotes(db, await contextFor(db, ids.users.editor1), jobId)).toHaveLength(0);
-    expect(await listNotes(db, await contextFor(db, ids.users.editor1), jobId, { includeArchived: true })).toHaveLength(1);
     await expect(
       run(ids.users.photographer1, (tx, ctx) => editNote(tx, ctx, { noteId: client.id, expectedVersion: archived.version, body: "z" })),
     ).rejects.toThrow(ValidationError);

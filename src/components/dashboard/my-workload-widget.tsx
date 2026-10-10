@@ -35,7 +35,7 @@ export interface MyWorkloadWidgetProps {
   kpis: KpiSummary;
   queue: JobRow[];
   timeZone: string;
-  role: "editor" | "photographer" | "owner" | "manager";
+  role: "editor" | "photographer" | "client";
 }
 
 /** The viewer's own load (band + capacity for editors) and a preview of the next jobs in their queue. */
@@ -82,7 +82,8 @@ export function MyWorkloadWidget({ workload, kpis, queue, timeZone, role }: MyWo
         )}
       </div>
       <div className="border-t border-border">
-        <p className="eyebrow px-5 pt-3 pb-1">Up next</p>
+        <p className="eyebrow px-5 pt-3 pb-1">{role === "editor" ? "My queue" : "Up next"}</p>
+        {role === "editor" && queue.length > 0 ? <QueueBuckets queue={queue} /> : null}
         {queue.length === 0 ? (
           <EmptyState
             size="sm"
@@ -95,5 +96,24 @@ export function MyWorkloadWidget({ workload, kpis, queue, timeZone, role }: MyWo
         )}
       </div>
     </SectionCard>
+  );
+}
+
+/** Editor queue at a glance (docs/ROLES.md §9): To accept · In progress · Revisions to address · Paused. */
+function QueueBuckets({ queue }: { queue: MyWorkloadWidgetProps["queue"] }) {
+  const buckets = [
+    { label: "To accept", n: queue.filter((j) => j.statusCategory === "assigned" && !j.isPaused).length },
+    { label: "In progress", n: queue.filter((j) => (j.statusCategory === "accepted" || j.statusCategory === "in_progress") && !j.isPaused).length },
+    { label: "Revisions to address", n: queue.filter((j) => j.statusCategory === "revision" && !j.isPaused).length },
+    { label: "Paused", n: queue.filter((j) => j.isPaused).length },
+  ];
+  return (
+    <ul aria-label="Queue by stage" className="flex flex-wrap gap-1.5 px-5 pb-2">
+      {buckets.map((b) => (
+        <li key={b.label} className="inline-flex h-6 items-center gap-1 rounded-full bg-surface-muted px-2 text-xs text-ink-secondary">
+          {b.label} <span className="numeric font-medium text-ink">{b.n}</span>
+        </li>
+      ))}
+    </ul>
   );
 }

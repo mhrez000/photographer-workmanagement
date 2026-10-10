@@ -1,4 +1,4 @@
-import { ROLE_EMAILS, civilDate, eventTypesOf, eventually, loginApi, stagesOf, uniq } from "./api";
+import { ROLE_EMAILS, civilDate, eventTypesOf, eventually, loginApi, stagesOf, uniq, type Api } from "./api";
 import { expect, historyList, jobHeading, openJob, storageFor, test } from "./fixtures";
 
 /**
@@ -84,16 +84,26 @@ test("reopening a completed job keeps the earlier completion in history and coun
   expect(list.rows.filter((r) => r.id === job.id)).toHaveLength(1);
 });
 
+/**
+ * "Two users": the owner and the job's photographer. Roles v2 has no manager role; the second
+ * writer is photographer01, a team member who manages the job (its photographer) and holds
+ * Review submissions, so field, priority and cancel changes are theirs to make (ROLES.md §3.3).
+ */
+async function jobForColleague(api: Api, name: string) {
+  const colleague = await api.userByEmail(ROLE_EMAILS.photographer);
+  return api.createJob({ name, photographerId: colleague.id });
+}
+
 test("two users editing the same job: the stale action gets a 409 conflict dialog", async ({ page, api, apiAs }) => {
-  const job = await api.createJob({ name: uniq("Conflict") });
+  const job = await jobForColleague(api, uniq("Conflict"));
 
   // The owner opens the page (version v)…
   await openJob(page, job.id);
   await expect(page.getByRole("button", { name: "Mark ready" })).toBeVisible();
 
-  // …a manager changes the job meanwhile (version v+1).
-  const manager = await apiAs("manager");
-  await manager.patch(`/api/jobs/${job.id}`, { expectedVersion: await manager.version(job.id), priority: "urgent" });
+  // …the job's photographer changes the job meanwhile (version v+1).
+  const colleague = await apiAs("photographer");
+  await colleague.patch(`/api/jobs/${job.id}`, { expectedVersion: await colleague.version(job.id), priority: "urgent" });
 
   // The owner's action is rejected with a conflict, shown in the dialog.
   await page.getByRole("button", { name: "Mark ready" }).click();
@@ -109,15 +119,15 @@ test("two users editing the same job: the stale action gets a 409 conflict dialo
 });
 
 test("two users editing the same job: the stale edit-form save gets the conflict dialog and writes nothing", async ({ page, api, apiAs }) => {
-  const job = await api.createJob({ name: uniq("Conflict form") });
+  const job = await jobForColleague(api, uniq("Conflict form"));
   await page.goto(`/jobs/${job.id}/edit`);
   const nameInput = page.getByRole("textbox", { name: /job name/i });
   await expect(nameInput).toHaveValue(job.name);
 
   // Someone else saves first.
-  const manager = await apiAs("manager");
+  const colleague = await apiAs("photographer");
   const theirName = uniq("Conflict theirs");
-  await manager.patch(`/api/jobs/${job.id}`, { expectedVersion: await manager.version(job.id), name: theirName });
+  await colleague.patch(`/api/jobs/${job.id}`, { expectedVersion: await colleague.version(job.id), name: theirName });
 
   await nameInput.fill(uniq("Conflict mine"));
   await page.getByRole("button", { name: "Save changes" }).click();
@@ -131,18 +141,18 @@ test("two users editing the same job: the stale edit-form save gets the conflict
 });
 
 test("API contract: a stale expectedVersion is a 409 with the current row and changes nothing", async ({ api, apiAs }) => {
-  const job = await api.createJob({ name: uniq("Conflict api") });
+  const job = await jobForColleague(api, uniq("Conflict api"));
   const v = await api.version(job.id);
   const ownerName = uniq("Conflict owner wins");
   await api.patch(`/api/jobs/${job.id}`, { expectedVersion: v, name: ownerName });
 
-  const manager = await apiAs("manager");
-  const stale = await manager.raw("PATCH", `/api/jobs/${job.id}`, { expectedVersion: v, name: "E2E manager loses" });
+  const colleague = await apiAs("photographer");
+  const stale = await colleague.raw("PATCH", `/api/jobs/${job.id}`, { expectedVersion: v, name: "E2E colleague loses" });
   expect(stale.status).toBe(409);
   expect(stale.error?.code).toBe("conflict");
   expect(JSON.stringify(stale.error?.current)).toContain(ownerName);
   // Stale status changes are rejected the same way.
-  const staleCancel = await manager.raw("POST", `/api/jobs/${job.id}/cancel`, { expectedVersion: v, reason: "E2E stale cancel" });
+  const staleCancel = await colleague.raw("POST", `/api/jobs/${job.id}/cancel`, { expectedVersion: v, reason: "E2E stale cancel" });
   expect(staleCancel.status).toBe(409);
 
   const now = await api.job(job.id);

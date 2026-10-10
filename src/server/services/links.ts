@@ -24,9 +24,10 @@ import { jobLinks } from "@/db/schema";
 import { LINK_KINDS, LINK_KIND_META, type LinkKind, type StatusCategory } from "@/lib/constants";
 import type { AuthContext, JobLink, JobPermissionRef, LinkSlot, LinkView } from "@/lib/types";
 import { AddLinkInput, RemoveLinkInput, ReplaceLinkInput, UpdateLinkInput, deriveLinkProvider } from "@/lib/validation/links";
-import { assertCan } from "@/server/auth/permissions";
+import { assertCan, can, type LinkPermissionRef } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { ConflictError, ValidationError } from "@/server/errors";
+import { editorReadCutoff, loadEditorAssignmentFacts, passesCutoff } from "@/server/queries/scope";
 import { jobMeta, loadJobWithRef, loadUserRefMap, unknownUserRef } from "./_collab";
 import { loadLinkInOrg, parseInput } from "./_shared";
 
@@ -43,6 +44,27 @@ async function assertCurrent(tx: Tx, ctx: AuthContext, link: JobLink): Promise<v
       await loadLinkInOrg(tx, ctx, link.id),
     );
   }
+}
+
+/** The permission ref of an existing link row (kind, adder, currency, client visibility). */
+function linkRef(ref: JobPermissionRef, link: JobLink): LinkPermissionRef {
+  return { job: ref, kind: link.kind, addedByUserId: link.addedByUserId, isCurrent: isCurrent(link), sharedWithClient: link.sharedWithClient };
+}
+
+/** `added_by_sharer` of a new row: the adder could share links on this job at insert time (§7.3). */
+function addedBySharer(ctx: AuthContext, ref: JobPermissionRef, kind: LinkKind): boolean {
+  return ctx.isSystem || can(ctx, "link.share_with_client", { job: ref, kind, isCurrent: true });
+}
+
+/**
+ * Client visibility of a replacement row (§7.3 inheritance): the new row keeps
+ * `shared_with_client` only when the actor may share links on the job; else it
+ * starts unshared and the event says `sharingDropped`.
+ */
+function inheritedSharing(ctx: AuthContext, ref: JobPermissionRef, old: JobLink): { shared: boolean; dropped: boolean } {
+  if (!old.sharedWithClient) return { shared: false, dropped: false };
+  const may = can(ctx, "link.share_with_client", { job: ref, kind: old.kind, isCurrent: true, sharedWithClient: true });
+  return { shared: may, dropped: !may };
 }
 
 async function setActivityEventId(tx: Tx, linkId: string, eventId: string): Promise<void> {
@@ -67,9 +89,12 @@ async function supersede(tx: Tx, ctx: AuthContext, oldId: string, at: string, ne
 /* ------------------------------------------------------------------ */
 
 /**
- * Adds a new link (a new slot). Permission `link.add`: owners/managers any
- * kind; photographers on own jobs (any kind); editors on assigned jobs,
- * kinds in EDITOR_LINK_KINDS.
+ * Adds a new link (a new slot). Permission `link.add` (docs/ROLES.md §3.3 †):
+ * admins any kind; team members on jobs they manage (client-facing kinds once
+ * the job is in review need Review submissions); editors while working
+ * (EDITOR_LINK_KINDS) or in their draft window (+ raw files). New links are
+ * never client-visible; `added_by_sharer` records whether the adder could
+ * share (drives the default delivery share set).
  */
 export async function addLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobLink> {
   const data = parseInput(AddLinkInput, input);
@@ -88,6 +113,8 @@ export async function addLink(tx: Tx, ctx: AuthContext, input: unknown): Promise
         label: data.label ?? null,
         provider: deriveLinkProvider(data.url),
         addedByUserId,
+        // roles v2 §7.3: the adder could share links on this job at insert time (immutable).
+        addedBySharer: addedBySharer(ctx, ref, data.kind),
         createdAt: ctx.now(),
       })
       .returning(),
@@ -111,16 +138,20 @@ export async function addLink(tx: Tx, ctx: AuthContext, input: unknown): Promise
 /**
  * Replaces a current link: inserts the new row (`supersedes_link_id`) then
  * fills the old row's `superseded_at` / `superseded_by_link_id` (fill-once).
- * Permission `link.replace`: O/M any; photographer own job; editor assigned
- * job and a link they added. A stale (already replaced/removed) link → 409.
+ * Permission `link.replace`: admins any; team members on managed jobs (shared
+ * or client-facing links once in review: + Review submissions); editors their
+ * own unshared links while working / in draft. A stale (already
+ * replaced/removed) link → 409. Client visibility is inherited only when the
+ * actor may share (else `metadata.sharingDropped`).
  */
 export async function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ link: JobLink; previous: JobLink }> {
   const data = parseInput(ReplaceLinkInput, input);
   const old = await loadLinkInOrg(tx, ctx, data.linkId);
   const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
-  assertCan(ctx, "link.replace", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
+  assertCan(ctx, "link.replace", linkRef(ref, old));
   await assertCurrent(tx, ctx, old);
   const addedByUserId = requireActor(ctx);
+  const sharing = inheritedSharing(ctx, ref, old);
 
   const at = ctx.now();
   const label = data.label === undefined ? old.label : data.label;
@@ -135,6 +166,8 @@ export async function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): Pro
         label,
         provider: deriveLinkProvider(data.url),
         addedByUserId,
+        addedBySharer: addedBySharer(ctx, ref, old.kind),
+        sharedWithClient: sharing.shared,
         createdAt: at,
         supersedesLinkId: old.id,
       })
@@ -152,7 +185,13 @@ export async function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): Pro
     action: "superseded",
     previousValue: { linkId: old.id, url: old.url, label: old.label, provider: old.provider },
     newValue: { linkId: link.id, url: link.url, label: link.label, provider: link.provider },
-    metadata: { kind: link.kind, supersedesLinkId: old.id, ...jobMeta(job) },
+    metadata: {
+      kind: link.kind,
+      supersedesLinkId: old.id,
+      ...(old.sharedWithClient ? { sharedWithClient: sharing.shared } : {}),
+      ...(sharing.dropped ? { sharingDropped: true } : {}),
+      ...jobMeta(job),
+    },
   });
   await setActivityEventId(tx, link.id, eventId);
   return { link: { ...link, activityEventId: eventId }, previous };
@@ -170,13 +209,14 @@ export async function updateLink(tx: Tx, ctx: AuthContext, input: unknown): Prom
   const data = parseInput(UpdateLinkInput, input);
   const old = await loadLinkInOrg(tx, ctx, data.linkId);
   const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
-  assertCan(ctx, "link.replace", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
+  assertCan(ctx, "link.replace", linkRef(ref, old));
+  await assertCurrent(tx, ctx, old);
   const kind = data.kind ?? old.kind;
   if (kind !== old.kind) assertCan(ctx, "link.add", { job: ref, kind });
-  await assertCurrent(tx, ctx, old);
   const label = data.label === undefined ? old.label : data.label;
   if (kind === old.kind && label === old.label) return old;
   const addedByUserId = requireActor(ctx);
+  const sharing = inheritedSharing(ctx, ref, old);
 
   const at = ctx.now();
   const link = await one(
@@ -190,6 +230,8 @@ export async function updateLink(tx: Tx, ctx: AuthContext, input: unknown): Prom
         label,
         provider: old.provider ?? deriveLinkProvider(old.url),
         addedByUserId,
+        addedBySharer: addedBySharer(ctx, ref, kind),
+        sharedWithClient: sharing.shared,
         createdAt: at,
         supersedesLinkId: old.id,
       })
@@ -206,7 +248,15 @@ export async function updateLink(tx: Tx, ctx: AuthContext, input: unknown): Prom
     action: "updated",
     previousValue: { linkId: old.id, kind: old.kind, label: old.label },
     newValue: { linkId: link.id, kind: link.kind, label: link.label },
-    metadata: { kind: link.kind, previousKind: old.kind, supersedesLinkId: old.id, url: link.url, ...jobMeta(job) },
+    metadata: {
+      kind: link.kind,
+      previousKind: old.kind,
+      supersedesLinkId: old.id,
+      url: link.url,
+      ...(old.sharedWithClient ? { sharedWithClient: sharing.shared } : {}),
+      ...(sharing.dropped ? { sharingDropped: true } : {}),
+      ...jobMeta(job),
+    },
   });
   await setActivityEventId(tx, link.id, eventId);
   return { ...link, activityEventId: eventId };
@@ -217,7 +267,7 @@ export async function removeLink(tx: Tx, ctx: AuthContext, input: unknown): Prom
   const data = parseInput(RemoveLinkInput, input);
   const old = await loadLinkInOrg(tx, ctx, data.linkId);
   const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
-  assertCan(ctx, "link.remove", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
+  assertCan(ctx, "link.remove", linkRef(ref, old));
   await assertCurrent(tx, ctx, old);
 
   const removed = await first(
@@ -237,7 +287,7 @@ export async function removeLink(tx: Tx, ctx: AuthContext, input: unknown): Prom
     action: "removed",
     previousValue: { linkId: old.id, kind: old.kind, url: old.url, label: old.label },
     newValue: null,
-    metadata: { kind: old.kind, reason: data.reason ?? null, ...jobMeta(job) },
+    metadata: { kind: old.kind, reason: data.reason ?? null, ...(old.sharedWithClient ? { wasSharedWithClient: true } : {}), ...jobMeta(job) },
   });
   return removed;
 }
@@ -257,12 +307,19 @@ async function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): Prom
   return ref;
 }
 
-async function allLinks(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobLink[]> {
-  return db
+/** Editor read cut-off (docs/ROLES.md §2.3): rows after it are hidden unless the editor added them. */
+async function cutoffFor(db: DbLike, ctx: AuthContext, ref: JobPermissionRef): Promise<string | null> {
+  if (ctx.role !== "editor") return null;
+  return editorReadCutoff(ctx, ref, (await loadEditorAssignmentFacts(db, ctx, [ref.id])).get(ref.id) ?? []);
+}
+
+async function allLinks(db: DbLike, ctx: AuthContext, jobId: string, cutoff: string | null = null): Promise<JobLink[]> {
+  const rows = await db
     .select()
     .from(jobLinks)
     .where(and(eq(jobLinks.jobId, jobId), eq(jobLinks.organisationId, ctx.organisationId)))
     .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
+  return rows.filter((l) => passesCutoff(cutoff, l.createdAt, l.addedByUserId, ctx.userId));
 }
 
 async function toViews(db: DbLike, ctx: AuthContext, rows: readonly JobLink[]): Promise<Map<string, LinkView>> {
@@ -286,6 +343,7 @@ async function toViews(db: DbLike, ctx: AuthContext, rows: readonly JobLink[]): 
         removedBy: l.removedByUserId ? person(l.removedByUserId) : null,
         removeReason: l.removeReason,
         isCurrent: isCurrent(l),
+        sharedWithClient: l.sharedWithClient,
       },
     ]),
   );
@@ -329,16 +387,19 @@ export function buildLinkSlots(views: ReadonlyMap<string, LinkView>, withHistory
 
 /** The job's link slots (Links tab). Permission: `job.view`. `history: true` includes replaced/removed chains. */
 export async function listLinks(db: DbLike, ctx: AuthContext, jobId: string, opts: { history?: boolean } = {}): Promise<LinkSlot[]> {
-  await loadVisibleJob(db, ctx, jobId);
-  const rows = await allLinks(db, ctx, jobId);
+  const ref = await loadVisibleJob(db, ctx, jobId);
+  const rows = await allLinks(db, ctx, jobId, await cutoffFor(db, ctx, ref));
   return buildLinkSlots(await toViews(db, ctx, rows), opts.history ?? false);
 }
 
 /** Current finished-work links (finished files, gallery, client delivery) — the Overview "Finished Work" panel. */
 export async function finishedWorkLinks(db: DbLike, ctx: AuthContext, jobId: string): Promise<LinkView[]> {
-  await loadVisibleJob(db, ctx, jobId);
+  const ref = await loadVisibleJob(db, ctx, jobId);
+  const cutoff = await cutoffFor(db, ctx, ref);
   const finishedKinds = LINK_KINDS.filter((k) => LINK_KIND_META[k].finishedWork);
-  const rows = (await currentLinksOfKinds(db, jobId, finishedKinds)).filter((l) => l.organisationId === ctx.organisationId);
+  const rows = (await currentLinksOfKinds(db, jobId, finishedKinds)).filter(
+    (l) => l.organisationId === ctx.organisationId && passesCutoff(cutoff, l.createdAt, l.addedByUserId, ctx.userId),
+  );
   const views = await toViews(db, ctx, rows);
   return rows
     .map((l) => views.get(l.id))

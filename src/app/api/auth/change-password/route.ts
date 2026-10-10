@@ -1,4 +1,4 @@
-import { requireContext } from "@/server/auth/session";
+import { requireAnyContext } from "@/server/auth/session";
 import { bodyOrNull, handle } from "@/server/http";
 import { changePassword } from "@/server/services/auth";
 import { methodNotAllowed } from "@/app/api/_lib/route";
@@ -8,7 +8,7 @@ import { methodNotAllowed } from "@/app/api/_lib/route";
  * (signs out every other browser) and re-issues this browser's cookie.
  */
 export const POST = handle(async (req) => {
-  const ctx = await requireContext();
+  const ctx = await requireAnyContext();
   return changePassword(ctx, await bodyOrNull(req));
 });
 

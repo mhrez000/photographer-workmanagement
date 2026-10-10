@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { jobs, users } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { jobComments } from "@/db/schema";
+import { contextFor, fakeClock, insertJobFixture, inviteDefaultsMember, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import { CATEGORY_GROUPS } from "@/lib/constants";
 import type { Job } from "@/lib/types";
 import { getDashboardLayout } from "@/server/services/dashboards";
@@ -85,8 +86,8 @@ beforeEach(async () => {
 afterEach(() => fakeClock.reset());
 
 describe("getDashboard / KPIs", () => {
-  it("management KPIs equal brute-force counts over every job", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+  it("admin KPIs equal brute-force counts over every job", async () => {
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const all = await db.select().from(jobs);
     const expected = bruteForce(all);
     const kpis = await getKpis(db, ctx);
@@ -134,9 +135,10 @@ describe("getDashboard / KPIs", () => {
   });
 
   it("due-today and overdue lists agree with the KPI counts and flags", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const d = await getDashboard(db, ctx);
-    expect(d.variant).toBe("management");
+    expect(d.variant).toBe("business");
+    expect(d.scope).toBe("business");
     expect(d.dueToday).toHaveLength(d.kpis.dueToday);
     expect(d.overdue).toHaveLength(d.kpis.overdue);
     expect(d.dueToday.every((j) => j.isDueToday && !j.isOverdue)).toBe(true);
@@ -154,7 +156,7 @@ describe("getDashboard / KPIs", () => {
     expect(d.variant).toBe("personal");
     expect({ ...d.kpis, asOf: undefined, completedWeek: undefined }).toEqual({ ...bruteForce(mine), asOf: undefined });
     expect(d.kpis.active).toBe(1);
-    expect(d.workloads).toBeNull(); // editors_see_team_workloads is off
+    expect(d.workloads).toBeNull(); // editors never see team workloads
     expect(d.bottlenecks).toEqual([]);
     expect(d.editorPerformance).toBeNull();
     expect(d.personal?.myWorkload?.editor.id).toBe(ids.users.editor2);
@@ -175,7 +177,7 @@ describe("getDashboard / KPIs", () => {
   });
 
   it("returns the same layout as the dashboard layout service (role default, allowed widgets only)", async () => {
-    for (const key of ["editor1", "photographer1", "manager", "owner"] as const) {
+    for (const key of ["editor1", "photographer1", "coAdmin", "owner"] as const) {
       const ctx = await contextFor(db, ids.users[key]);
       expect((await getDashboard(db, ctx)).layout).toEqual((await getDashboardLayout(db, ctx)).layout);
     }
@@ -183,5 +185,115 @@ describe("getDashboard / KPIs", () => {
     expect(editorLayout.widgets[0].type).toBe("kpis");
     // an editor never gets widgets they may not load
     expect(editorLayout.widgets.some((w) => ["team_workload", "editor_performance", "bottlenecks", "revision_rate"].includes(w.type))).toBe(false);
+  });
+});
+
+describe("getDashboard — roles v2 view scope and widgets", () => {
+  it("scope mine = the owner's shoots (KPIs, lists, variant); a job the owner created for photographer2 is not one", async () => {
+    const own = (await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: END_TODAY, photographerId: ids.users.owner, createdByUserId: ids.users.owner })).job;
+    const forP2 = (await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: END_TODAY, photographerId: ids.users.photographer2, createdByUserId: ids.users.owner })).job;
+    const owner = await contextFor(db, ids.users.owner);
+    const business = await getDashboard(db, owner);
+    expect(business.variant).toBe("business");
+    const mine = await getDashboard(db, owner, { scope: "mine" });
+    expect(mine.variant).toBe("personal");
+    expect(mine.scope).toBe("mine");
+    expect(mine.kpis.active).toBe(1);
+    expect(mine.dueToday.map((j) => j.id)).toEqual([own.id]);
+    expect(mine.myShoots.map((j) => j.id)).toEqual([own.id]);
+    expect(business.dueToday.map((j) => j.id)).toEqual(expect.arrayContaining([own.id, forP2.id]));
+    // the cookie applies when no param is given; the param wins
+    expect((await getDashboard(db, owner, { scopeCookie: "mine" })).kpis).toEqual(mine.kpis);
+    expect((await getDashboard(db, owner, { scope: "business", scopeCookie: "mine" })).kpis).toEqual(business.kpis);
+    expect((await getKpis(db, owner, { scope: "mine" })).active).toBe(1);
+  });
+
+  it("members without See all jobs and editors ignore ?scope (same numbers as no param)", async () => {
+    for (const key of ["photographer1", "editor1", "editor2"] as const) {
+      const ctx = await contextFor(db, ids.users[key]);
+      const plain = await getDashboard(db, ctx);
+      expect(plain.scope).toBeNull();
+      for (const scope of ["mine", "business"]) {
+        const d = await getDashboard(db, ctx, { scope });
+        expect(d.kpis).toEqual(plain.kpis);
+        expect(d.dueToday.map((j) => j.id)).toEqual(plain.dueToday.map((j) => j.id));
+        expect(d.variant).toBe("personal");
+      }
+    }
+    // the lead (See all jobs) gets the switch and the business variant
+    expect((await getDashboard(db, await contextFor(db, ids.users.lead))).variant).toBe("business");
+  });
+
+  it("awaiting review: admin mine scope keeps a photographer12-style job and counts the rest as more in the business", async () => {
+    const junior = await inviteDefaultsMember(db, ids); // create ✓, assign ✓, review ✗ → the owner reviews
+    const juniorJob = (await insertJobFixture(db, ids, { statusKey: "submitted", photographerId: junior, createdByUserId: junior })).job;
+    const owner = await contextFor(db, ids.users.owner);
+    const business = await getDashboard(db, owner);
+    const mine = await getDashboard(db, owner, { scope: "mine" });
+    expect(business.awaitingReview?.items.map((j) => j.id)).toContain(juniorJob.id);
+    expect(mine.awaitingReview?.items.map((j) => j.id)).toEqual([juniorJob.id]);
+    expect(mine.awaitingReview?.moreInBusiness).toBe((business.awaitingReview?.total ?? 0) - 1);
+    // photographer1 (review ✓) sees the jobs they manage; editors and review-less members get no widget
+    const p1 = await getDashboard(db, await contextFor(db, ids.users.photographer1));
+    expect(p1.awaitingReview?.total).toBe(3); // submitted, review, resubmitted fixtures (photographer1 manages them)
+    expect((await getDashboard(db, await contextFor(db, junior))).awaitingReview).toBeNull();
+    expect((await getDashboard(db, await contextFor(db, ids.users.editor1))).awaitingReview).toBeNull();
+  });
+
+  it("questions: open editor questions and waiting client feedback on jobs the viewer steers", async () => {
+    const j = (await insertJobFixture(db, ids, { statusKey: "in_progress", photographerId: ids.users.photographer1 })).job;
+    const at = (m: number) => new Date(Date.parse(NOW) + m * 60_000).toISOString();
+    const q = await db
+      .insert(jobComments)
+      .values({ organisationId: ids.organisationId, jobId: j.id, authorUserId: ids.users.editor1, kind: "question", body: "Which LUT?", createdAt: at(1) })
+      .returning();
+    const answered = await db
+      .insert(jobComments)
+      .values({ organisationId: ids.organisationId, jobId: j.id, authorUserId: ids.users.editor1, kind: "question", body: "Crop?", createdAt: at(2) })
+      .returning();
+    await db.insert(jobComments).values({
+      organisationId: ids.organisationId,
+      jobId: j.id,
+      parentCommentId: answered[0].id,
+      rootCommentId: answered[0].id,
+      authorUserId: ids.users.photographer1,
+      kind: "question",
+      body: "Square",
+      createdAt: at(3),
+    });
+    const fb = await db
+      .insert(jobComments)
+      .values({ organisationId: ids.organisationId, jobId: j.id, authorUserId: ids.users.client, kind: "client_feedback", body: "Brighter please", createdAt: at(4) })
+      .returning();
+    const p1 = await getDashboard(db, await contextFor(db, ids.users.photographer1));
+    expect(p1.questions?.items.map((x) => [x.commentId, x.kind])).toEqual([
+      [q[0].id, "question"],
+      [fb[0].id, "client_feedback"],
+    ]);
+    expect((await getDashboard(db, await contextFor(db, ids.users.owner))).questions?.total).toBe(2);
+    expect((await getDashboard(db, await contextFor(db, ids.users.photographer2))).questions?.total).toBe(0);
+    expect((await getDashboard(db, await contextFor(db, ids.users.editor1))).questions).toBeNull();
+  });
+
+  it("upcoming deadlines, revisions, turnaround and business widgets follow the switches", async () => {
+    const owner = await getDashboard(db, await contextFor(db, ids.users.owner));
+    expect(owner.upcomingDeadlines.length).toBeGreaterThan(0);
+    expect(owner.upcomingDeadlines.every((d) => d.at > NOW)).toBe(true);
+    expect(owner.revisions.map((j) => j.statusCategory).sort()).toEqual(["resubmitted", "revision", "revision"]);
+    expect(owner.turnaround).not.toBeNull();
+    const p1 = await getDashboard(db, await contextFor(db, ids.users.photographer1));
+    expect(p1.turnaround).toBeNull();
+    expect(p1.workloads).toBeNull();
+    await setUserFlags(db, ids.users.photographer1, { canViewAnalytics: true });
+    expect((await getDashboard(db, await contextFor(db, ids.users.photographer1))).turnaround).not.toBeNull();
+    const editor = await getDashboard(db, await contextFor(db, ids.users.editor2));
+    expect(editor.myShoots).toEqual([]);
+    expect(editor.upcomingDeadlines.every((d) => d.job.editor?.id === ids.users.editor2)).toBe(true);
+  });
+
+  it("clients get 403 from the dashboard and the KPIs", async () => {
+    const client = await contextFor(db, ids.users.client);
+    await expect(getDashboard(db, client)).rejects.toThrow(/staff/);
+    await expect(getKpis(db, client)).rejects.toThrow(/staff/);
   });
 });

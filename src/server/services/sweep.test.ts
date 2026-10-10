@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Tx } from "@/db/index";
 import { activityEvents, automationRuns, notifications, organisationSettings, workSessions } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, systemContextFor, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, systemContextFor, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
 import { verifyDerived } from "@/db/verify";
 import type { NotificationType } from "@/lib/constants";
 import type { AuthContext } from "@/lib/types";
@@ -29,7 +29,7 @@ const runAs = async <T>(actor: FixtureUserKey, fn: (tx: Tx, ctx: AuthContext) =>
   const ctx = await ctxOf(actor);
   return withTx((tx) => fn(tx, ctx), { db });
 };
-const sweep = async () => runSweep(db, await ctxOf("manager"));
+const sweep = async () => runSweep(db, await ctxOf("coAdmin"));
 const eventsOf = (type: string, jobId?: string) =>
   db
     .select()
@@ -46,8 +46,8 @@ async function expectClean() {
 
 describe("job.became_overdue", () => {
   it("emits once per (job, dueDate), notifies editor + photographer, fires job_overdue rules, re-arms after a deadline change", async () => {
-    const rule = await runAs("manager", (tx, ctx) =>
-      createAutomation(tx, ctx, { name: "Overdue → managers", trigger: { type: "job_overdue" }, actions: [{ type: "notify", target: "managers" }] }),
+    const rule = await runAs("coAdmin", (tx, ctx) =>
+      createAutomation(tx, ctx, { name: "Overdue → admins", trigger: { type: "job_overdue" }, actions: [{ type: "notify", target: "admins" }] }),
     );
     const late = (await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: "2026-10-07T12:59:59.999Z" })).job;
     const later = (await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: "2026-10-09T12:59:59.999Z" })).job; // not yet due
@@ -76,7 +76,7 @@ describe("job.became_overdue", () => {
     const {
       rows: [version],
     } = await db.$client.query<{ version: number }>("SELECT version FROM jobs WHERE id = $1", [late.id]);
-    await runAs("manager", (tx, ctx) => setDueDate(tx, ctx, { jobId: late.id, expectedVersion: version?.version, value: "2026-10-09" }));
+    await runAs("coAdmin", (tx, ctx) => setDueDate(tx, ctx, { jobId: late.id, expectedVersion: version?.version, value: "2026-10-09" }));
     expect((await sweep()).overdueJobIds).toEqual([]);
     fakeClock.set("2026-10-10T00:00:00.000Z");
     expect((await sweep()).overdueJobIds.sort()).toEqual([late.id, later.id].sort());
@@ -96,13 +96,13 @@ describe("job.review_overdue", () => {
     expect((await sweep()).reviewOverdueJobIds).toEqual([job.id]);
     expect((await sweep()).reviewOverdueJobIds).toEqual([]);
     expect(await eventsOf("job.review_overdue")).toMatchObject([{ jobId: job.id, newValue: { reviewDueDate: "2026-10-07T00:00:00.000Z" } }]);
-    expect((await noticesOf("review_overdue")).map((n) => n.userId).sort()).toEqual([ids.users.manager, ids.users.owner, ids.users.photographer1].sort());
+    expect((await noticesOf("review_overdue")).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.owner, ids.users.photographer1].sort());
     await expectClean();
   });
 });
 
 describe("workload bands", () => {
-  it("emits user.workload_band_changed only when the band changes; notifies managers and fires workload_threshold rules", async () => {
+  it("emits user.workload_band_changed only when the band changes; notifies the workload watchers and fires workload_threshold rules", async () => {
     const rule = await runAs("owner", (tx, ctx) =>
       createAutomation(tx, ctx, {
         name: "Overloaded → tell the editor",
@@ -119,7 +119,8 @@ describe("workload bands", () => {
     expect(evt).toMatchObject({ entityType: "user", entityId: ids.users.editor2, jobId: null, visibility: "management", previousValue: { band: "healthy" } });
     expect(evt?.newValue).toMatchObject({ band: "overloaded", active: 3 });
     expect(evt?.summary).toContain("Ed Editor");
-    expect((await noticesOf("workload_threshold")).map((n) => n.userId).sort()).toEqual([ids.users.manager, ids.users.owner].sort());
+    // watchers = admins ∪ team members with "View team workload" (lead)
+    expect((await noticesOf("workload_threshold")).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.lead, ids.users.owner].sort());
     expect(await noticesOf("automation")).toMatchObject([{ userId: ids.users.editor2, body: "Your queue is overloaded", linkPath: `/team/users/${ids.users.editor2}` }]);
     expect(await db.select().from(automationRuns).where(eq(automationRuns.automationId, rule.id))).toMatchObject([{ status: "succeeded", jobId: null }]);
 
@@ -130,23 +131,27 @@ describe("workload bands", () => {
     // thresholds relaxed → back to healthy: one event, no threshold notification
     await db.update(organisationSettings).set({ maxActiveJobsPerEditor: 50 }).where(eq(organisationSettings.organisationId, ids.organisationId));
     const { rows: due } = await db.$client.query<{ id: string; version: number }>("SELECT id, version FROM jobs WHERE editor_id = $1 ORDER BY id", [ids.users.editor2]);
-    for (const j of due) await runAs("manager", (tx, ctx) => setDueDate(tx, ctx, { jobId: j.id, expectedVersion: j.version, value: "2026-11-30" }));
+    for (const j of due) await runAs("coAdmin", (tx, ctx) => setDueDate(tx, ctx, { jobId: j.id, expectedVersion: j.version, value: "2026-11-30" }));
     expect((await sweep()).bandChanges).toEqual([{ userId: ids.users.editor2, from: "overloaded", to: "healthy" }]);
-    expect(await noticesOf("workload_threshold")).toHaveLength(2);
+    expect(await noticesOf("workload_threshold")).toHaveLength(3);
     await expectClean();
   });
 });
 
 describe("editor_unavailable + session timeout + scheduling", () => {
-  it("notifies managers about active jobs held by a deactivated editor, once per civil day", async () => {
+  it("notifies admins (+ workload-watching members who can see the jobs) about jobs held by a deactivated editor, once per civil day", async () => {
     await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.inactiveEditor });
+    // photographer2 watches workloads but cannot see photographer1's job → nothing for them
+    await setUserFlags(db, ids.users.photographer2, { canViewTeamWorkloads: true });
     const firstSweep = await sweep();
-    expect(firstSweep.editorUnavailable).toMatchObject([{ editorId: ids.users.inactiveEditor, notified: 2 }]);
+    // owner + coAdmin + lead (See all jobs)
+    expect(firstSweep.editorUnavailable).toMatchObject([{ editorId: ids.users.inactiveEditor, notified: 3 }]);
+    expect((await noticesOf("editor_unavailable")).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.lead, ids.users.owner].sort());
     expect((await sweep()).editorUnavailable).toMatchObject([{ editorId: ids.users.inactiveEditor, notified: 0 }]);
-    expect(await noticesOf("editor_unavailable")).toHaveLength(2);
+    expect(await noticesOf("editor_unavailable")).toHaveLength(3);
     fakeClock.advanceDays(1);
     await sweep();
-    expect(await noticesOf("editor_unavailable")).toHaveLength(4);
+    expect(await noticesOf("editor_unavailable")).toHaveLength(6);
   });
 
   it("auto-closes work sessions older than the org timeout at started_at + timeout", async () => {
@@ -183,7 +188,7 @@ describe("editor_unavailable + session timeout + scheduling", () => {
       expect(err).toBeInstanceOf(AppError);
       expect((err as AppError).status).toBe(403);
     }
-    await runAs("manager", (tx, ctx) =>
+    await runAs("coAdmin", (tx, ctx) =>
       createAutomation(tx, ctx, { name: "New job", trigger: { type: "job_created" }, actions: [{ type: "notify", target: "photographer" }] }),
     );
     await insertJobFixture(db, ids);

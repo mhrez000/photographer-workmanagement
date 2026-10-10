@@ -1,18 +1,19 @@
 /**
  * Dashboard layouts (ARCHITECTURE.md §2.5 dashboard_layouts, §10 /dashboard,
- * §5 dashboard.updated). One row per user; no row = the role default.
+ * §5 dashboard.updated; docs/ROLES.md §9). One row per user; no row = the
+ * persona default (admin / team member / editor).
  * Widgets a role may not see (e.g. editor_performance for an editor) are
  * rejected on save, so a stored layout never asks for data the user cannot
  * load.
  */
 import { and, eq } from "drizzle-orm";
 import { dashboardLayouts } from "@/db/schema";
-import type { DashboardWidgetType, Role } from "@/lib/constants";
+import type { DashboardWidgetType, Persona, Role } from "@/lib/constants";
 import type { AuthContext, DashboardLayout } from "@/lib/types";
 import { DashboardLayoutSchema, parseJsonColumn } from "@/lib/validation/json";
 import { PutDashboardLayoutInput } from "@/lib/validation/views";
 import { recordEvent } from "@/server/audit";
-import { assertCan, can } from "@/server/auth/permissions";
+import { assertCan, can, personaOf } from "@/server/auth/permissions";
 import { ConflictError, ForbiddenError } from "@/server/errors";
 import { first, one, parseInput, type DbLike, type Tx } from "./_shared";
 import { ruleViolation } from "./_admin";
@@ -21,69 +22,106 @@ type Widget = DashboardLayout["widgets"][number];
 
 const w = (id: string, type: DashboardWidgetType, x: number, y: number, width: number, h: number): Widget => ({ id, type, x, y, w: width, h });
 
-const MANAGEMENT_LAYOUT: DashboardLayout = {
-  widgets: [
-    w("kpis", "kpis", 0, 0, 12, 2),
-    w("bottlenecks", "bottlenecks", 0, 2, 12, 2),
-    w("team_workload", "team_workload", 0, 4, 8, 4),
-    w("due_today", "due_today", 8, 4, 4, 4),
-    w("overdue", "overdue", 0, 8, 6, 4),
-    w("recent_activity", "recent_activity", 6, 8, 6, 4),
-    w("editor_performance", "editor_performance", 0, 12, 6, 4),
-    w("revision_rate", "revision_rate", 6, 12, 3, 4),
-    w("completion_rate", "completion_rate", 9, 12, 3, 4),
-    w("recent_completed", "recent_completed", 0, 16, 12, 4),
-  ],
-};
+/** Stacks widgets in a 12-column grid in the given order (full / half rows). */
+function stack(items: readonly [DashboardWidgetType, number, number][]): DashboardLayout {
+  const widgets: Widget[] = [];
+  let x = 0;
+  let y = 0;
+  let rowH = 0;
+  for (const [type, width, h] of items) {
+    if (x + width > 12) {
+      x = 0;
+      y += rowH;
+      rowH = 0;
+    }
+    widgets.push(w(type, type, x, y, width, h));
+    x += width;
+    rowH = Math.max(rowH, h);
+  }
+  return { widgets };
+}
 
-const PHOTOGRAPHER_LAYOUT: DashboardLayout = {
-  widgets: [
-    w("kpis", "kpis", 0, 0, 12, 2),
-    w("my_workload", "my_workload", 0, 2, 6, 4),
-    w("my_performance", "my_performance", 6, 2, 6, 4),
-    w("due_today", "due_today", 0, 6, 6, 4),
-    w("overdue", "overdue", 6, 6, 6, 4),
-    w("recent_activity", "recent_activity", 0, 10, 8, 4),
-    w("calendar", "calendar", 8, 10, 4, 4),
-    w("recent_completed", "recent_completed", 0, 14, 12, 4),
-  ],
-};
+/** docs/ROLES.md §9 admin order. */
+const ADMIN_LAYOUT: DashboardLayout = stack([
+  ["kpis", 12, 2],
+  ["my_shoots", 6, 4],
+  ["awaiting_review", 6, 4],
+  ["questions", 6, 4],
+  ["overdue", 6, 4],
+  ["upcoming_deadlines", 6, 4],
+  ["team_workload", 6, 4],
+  ["revisions", 6, 4],
+  ["recent_completed", 6, 4],
+  ["recent_activity", 6, 4],
+  ["turnaround", 6, 4],
+  ["bottlenecks", 12, 2],
+  ["completion_rate", 4, 4],
+  ["revision_rate", 4, 4],
+  ["editor_performance", 4, 4],
+]);
 
-const EDITOR_LAYOUT: DashboardLayout = {
-  widgets: [
-    w("kpis", "kpis", 0, 0, 12, 2),
-    w("my_workload", "my_workload", 0, 2, 6, 3),
-    w("my_performance", "my_performance", 6, 2, 6, 3),
-    w("due_today", "due_today", 0, 5, 6, 4),
-    w("overdue", "overdue", 6, 5, 6, 4),
-    w("recent_activity", "recent_activity", 0, 9, 8, 4),
-    w("calendar", "calendar", 8, 9, 4, 4),
-  ],
-};
+/** §9 member order (+ flagged widgets: they are filtered out when the switch is off). */
+const MEMBER_LAYOUT: DashboardLayout = stack([
+  ["kpis", 12, 2],
+  ["my_shoots", 6, 4],
+  ["awaiting_review", 6, 4],
+  ["questions", 6, 4],
+  ["due_today", 6, 4],
+  ["overdue", 6, 4],
+  ["upcoming_deadlines", 6, 4],
+  ["revisions", 6, 4],
+  ["recent_completed", 6, 4],
+  ["my_performance", 6, 4],
+  ["recent_activity", 6, 4],
+  ["team_workload", 12, 4],
+  ["turnaround", 6, 4],
+  ["bottlenecks", 6, 4],
+]);
 
-/** Default layout for a role (deep copy). */
-export function defaultLayoutFor(role: Role): DashboardLayout {
-  const base = role === "owner" || role === "manager" ? MANAGEMENT_LAYOUT : role === "photographer" ? PHOTOGRAPHER_LAYOUT : EDITOR_LAYOUT;
+/** §9 editor order (the queue preview lives in the KPI / My queue card). */
+const EDITOR_LAYOUT: DashboardLayout = stack([
+  ["kpis", 12, 2],
+  ["due_today", 6, 4],
+  ["overdue", 6, 4],
+  ["upcoming_deadlines", 6, 4],
+  ["my_workload", 6, 3],
+  ["my_performance", 6, 3],
+  ["recent_completed", 6, 4],
+  ["recent_activity", 12, 4],
+]);
+
+/** Default layout for a persona (deep copy). Roles map to their base persona (photographer → member). */
+export function defaultLayoutFor(who: Persona | Role): DashboardLayout {
+  const base = who === "admin" ? ADMIN_LAYOUT : who === "member" || who === "photographer" ? MEMBER_LAYOUT : EDITOR_LAYOUT;
   return { widgets: base.widgets.map((x) => ({ ...x })) };
 }
 
-/** Widget types this actor may place (data behind each widget must be visible to them). */
+/** Widget types this actor may place (data behind each widget must be visible to them; docs/ROLES.md §9). */
 export function allowedWidgetTypes(ctx: AuthContext): Set<DashboardWidgetType> {
   const allowed = new Set<DashboardWidgetType>([
     "kpis",
-    "my_workload",
     "due_today",
     "overdue",
+    "upcoming_deadlines",
+    "revisions",
     "recent_activity",
     "calendar",
     "recent_completed",
-    "my_performance",
   ]);
+  const persona = personaOf(ctx);
+  if (persona === "editor") allowed.add("my_workload");
+  if (persona === "member" || persona === "editor") allowed.add("my_performance");
+  if (persona === "admin" || persona === "member") {
+    allowed.add("my_shoots");
+    allowed.add("questions");
+  }
+  if (persona === "admin" || (persona === "member" && ctx.canReviewSubmissions)) allowed.add("awaiting_review");
   if (can(ctx, "workloads.view_team")) allowed.add("team_workload");
   if (can(ctx, "performance.view")) allowed.add("editor_performance");
   if (can(ctx, "analytics.view")) {
     allowed.add("completion_rate");
     allowed.add("revision_rate");
+    allowed.add("turnaround");
   }
   if (can(ctx, "bottlenecks.view")) allowed.add("bottlenecks");
   return allowed;
@@ -112,7 +150,7 @@ export async function getDashboardLayout(db: DbLike, ctx: AuthContext): Promise<
       .from(dashboardLayouts)
       .where(and(eq(dashboardLayouts.userId, me), eq(dashboardLayouts.organisationId, ctx.organisationId))),
   );
-  const fallback = defaultLayoutFor(ctx.role);
+  const fallback = defaultLayoutFor(personaOf(ctx));
   const layout = row ? parseJsonColumn(DashboardLayoutSchema, row.layout, fallback) : fallback;
   return {
     layout: { widgets: layout.widgets.filter((x) => allowed.has(x.type)) },
@@ -132,7 +170,7 @@ export async function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknow
 
   const row = await first(tx.select().from(dashboardLayouts).where(eq(dashboardLayouts.userId, me)));
   if (data.expectedVersion !== undefined && (row?.version ?? 0) !== data.expectedVersion) {
-    throw new ConflictError(undefined, row ? { layout: row.layout, version: row.version } : { layout: defaultLayoutFor(ctx.role), version: 0 });
+    throw new ConflictError(undefined, row ? { layout: row.layout, version: row.version } : { layout: defaultLayoutFor(personaOf(ctx)), version: 0 });
   }
   const now = ctx.now();
   const previous = row ? row.layout : null;
@@ -160,6 +198,6 @@ export async function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknow
 /** Restores the role default (saved as the user's row so the change is audited). */
 export async function resetDashboardLayout(tx: Tx, ctx: AuthContext): Promise<DashboardLayoutView> {
   const allowed = allowedWidgetTypes(ctx);
-  const layout = defaultLayoutFor(ctx.role);
+  const layout = defaultLayoutFor(personaOf(ctx));
   return putDashboardLayout(tx, ctx, { layout: { widgets: layout.widgets.filter((x) => allowed.has(x.type)) } });
 }

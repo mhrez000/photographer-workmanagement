@@ -28,7 +28,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { api, type ApiError } from "@/lib/api-client";
-import { ROLE_LABELS, type Role } from "@/lib/constants";
+import { TRANSITION_ROLES, TRANSITION_ROLE_CHIPS, TRANSITION_ROLE_LABELS, type TransitionRole } from "@/lib/constants";
 import type { WorkflowGraph, WorkflowStatusView, WorkflowTransitionView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CATEGORY_MEANING } from "./category-meaning";
@@ -42,7 +42,8 @@ export interface WorkflowEditorProps {
   timeZone: string;
 }
 
-const ROLE_INITIAL: Record<Role, string> = { owner: "O", manager: "M", photographer: "P", editor: "E" };
+/** Chip initials per transition role (docs/ROLES.md §5.2): Owner / admins, Photographers, Editor. */
+const ROLE_INITIAL: Record<TransitionRole, string> = { admin: "A", photographer: "P", editor: "E" };
 
 /* ------------------------------------------------------------------ */
 /*  Header: rename, default, archive                                   */
@@ -342,10 +343,10 @@ function EdgeChip({ edge }: { edge: WorkflowTransitionView }) {
   return (
     <span className="flex flex-col items-start gap-1">
       <span className="flex gap-0.5">
-        {(["owner", "manager", "photographer", "editor"] as const).map((r) => (
+        {TRANSITION_ROLES.map((r) => (
           <span
             key={r}
-            title={ROLE_LABELS[r]}
+            title={`${TRANSITION_ROLE_CHIPS[r]}: ${TRANSITION_ROLE_LABELS[r]}`}
             className={cn(
               "flex size-4 items-center justify-center rounded-xs text-[9px] font-semibold leading-none",
               edge.allowedRoles.includes(r) ? "bg-accent-soft text-accent-ink" : "text-ink-subtle/50",
@@ -368,7 +369,7 @@ function EdgeChip({ edge }: { edge: WorkflowTransitionView }) {
 function edgeLabel(edge: WorkflowTransitionView, from?: WorkflowStatusView, to?: WorkflowStatusView): string {
   const parts = [`${from?.name ?? "?"} → ${to?.name ?? "?"}`];
   if (edge.label) parts.push(`“${edge.label}”`);
-  parts.push(edge.allowedRoles.map((r) => ROLE_LABELS[r]).join(", "));
+  parts.push(edge.allowedRoles.map((r) => TRANSITION_ROLE_CHIPS[r]).join(", "));
   if (edge.assigneeOnly) parts.push("assigned editor only");
   if (edge.requiresAssignedEditor) parts.push("needs an editor");
   if (edge.isReopen) parts.push("reopen");
@@ -390,7 +391,7 @@ function TransitionsSection({ graph, canManage }: { graph: WorkflowGraph; canMan
     <SectionCard
       id="transitions"
       title="Transitions"
-      description={`${storedCount} transitions${edges.length > storedCount ? ` + ${edges.length - storedCount} generated cancel edges` : ""}. Rows are “from”, columns are “to”.`}
+      description={`${storedCount} transitions${edges.length > storedCount ? ` + ${edges.length - storedCount} generated cancel edges` : ""}. Rows are “from”, columns are “to”. Chips: A = Owner / admins, P = Photographers, E = Editor. Each move also needs the matching permission (e.g. approving needs Review submissions).`}
       actions={
         <div className="flex items-center gap-2">
           <SegmentedControl
@@ -593,7 +594,7 @@ export function WorkflowEditor({ graph, canManage, timeZone }: WorkflowEditorPro
       {!canManage ? (
         <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-sunken px-4 py-3 text-sm text-ink-secondary">
           <Lock aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-muted" />
-          <p>Read-only: only an owner can change workflows.</p>
+          <p>Read-only: only the owner or an admin can change workflows.</p>
         </div>
       ) : null}
       <ValidationPanel problems={graph.validation} />

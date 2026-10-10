@@ -13,7 +13,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useNow } from "@/hooks";
 import { api } from "@/lib/api-client";
-import { COMMENT_EDIT_WINDOW_MINUTES, COMMENT_KINDS, type CommentKind } from "@/lib/constants";
+import { COMMENT_EDIT_WINDOW_MINUTES, STAFF_COMMENT_KINDS, type CommentKind } from "@/lib/constants";
 import { formatDateTime, formatRelative } from "@/lib/dates";
 import type { CommentNode, RevisionView, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -24,6 +24,8 @@ const KIND_META: Record<CommentKind, { label: string; icon: LucideIcon | null; v
   question: { label: "Question", icon: CircleHelp, variant: "info" },
   clarification_request: { label: "Clarification request", icon: MessageSquareDashed, variant: "warning" },
   revision_response: { label: "Revision response", icon: RotateCcw, variant: "danger" },
+  // Client threads are answered from the job's "Client access" card (docs/ROLES.md §7.5); here they are read-only.
+  client_feedback: { label: "Client feedback", icon: MessagesSquare, variant: "info" },
 };
 
 export interface CommentsTabProps {
@@ -169,7 +171,7 @@ function Composer({ jobId, revisions, parent = null, initialKind = "comment", in
               onChange={(e) => setKind(e.target.value as CommentKind)}
               aria-label="Comment type"
               wrapperClassName="w-auto"
-              options={COMMENT_KINDS.filter((k) => k !== "revision_response" || revisions.length > 0).map((k) => ({ value: k, label: KIND_META[k].label }))}
+              options={STAFF_COMMENT_KINDS.filter((k) => k !== "revision_response" || revisions.length > 0).map((k) => ({ value: k, label: KIND_META[k].label }))}
             />
           ) : null}
           {kind === "revision_response" && !parent && revisions.length > 0 ? (
@@ -332,7 +334,7 @@ function CommentItem({ node, jobId, revisions, revisionLabel, canComment, deleta
 
           {!deleted && !editing ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-              {canComment ? (
+              {canComment && node.kind !== "client_feedback" ? (
                 <button type="button" onClick={() => setReplying((r) => !r)} className="inline-flex items-center gap-1 rounded-xs text-xs font-medium text-ink-muted hover:text-ink focus-ring">
                   <Reply aria-hidden="true" className="size-3.5" /> Reply
                 </button>
