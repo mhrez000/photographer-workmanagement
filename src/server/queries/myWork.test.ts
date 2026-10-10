@@ -12,15 +12,15 @@ const NOW = "2026-10-08T13:30:00.000Z";
 let db: TestDb;
 let ids: SeedIds;
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set(NOW);
-  db = makeTestDb();
-  ids = seedMinimalOrg(db);
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db);
 });
-afterEach(() => fakeClock.reset());
+afterEach(async () => fakeClock.reset());
 
 const sydney = (civil: string) => endOfCivilDayIso(civil, "Australia/Sydney");
-const job = (opts: JobFixtureOptions) => insertJobFixture(db, ids, { editorId: ids.users.editor1, ...opts }).job;
+const job = async (opts: JobFixtureOptions) => (await insertJobFixture(db, ids, { editorId: ids.users.editor1, ...opts })).job;
 
 function sections(q: MyWorkQueue): Record<string, string[]> {
   const out: Record<string, string[]> = {};
@@ -31,21 +31,21 @@ function sections(q: MyWorkQueue): Record<string, string[]> {
 }
 
 describe("getMyWorkQueue", () => {
-  it("buckets an editor's jobs by the organisation's civil day (Sydney)", () => {
-    job({ name: "overdue", statusKey: "in_progress", dueDate: sydney("2026-10-08") });
-    job({ name: "today", statusKey: "in_progress", dueDate: sydney("2026-10-09") });
-    job({ name: "tomorrow", statusKey: "accepted", dueDate: sydney("2026-10-10") });
-    job({ name: "later", statusKey: "assigned", dueDate: sydney("2026-10-14") });
-    job({ name: "no-due", statusKey: "in_progress", dueDate: null });
-    job({ name: "review", statusKey: "submitted", dueDate: sydney("2026-10-12") });
-    job({ name: "revision", statusKey: "revision", dueDate: sydney("2026-10-12") });
-    job({ name: "revision-overdue", statusKey: "revision", dueDate: sydney("2026-10-01") });
-    job({ name: "paused", statusKey: "in_progress", isPaused: true, dueDate: sydney("2026-10-09") });
-    job({ name: "approved", statusKey: "approved" });
-    job({ name: "completed", statusKey: "completed" });
-    job({ name: "someone-else", statusKey: "in_progress", editorId: ids.users.editor2 });
+  it("buckets an editor's jobs by the organisation's civil day (Sydney)", async () => {
+    await job({ name: "overdue", statusKey: "in_progress", dueDate: sydney("2026-10-08") });
+    await job({ name: "today", statusKey: "in_progress", dueDate: sydney("2026-10-09") });
+    await job({ name: "tomorrow", statusKey: "accepted", dueDate: sydney("2026-10-10") });
+    await job({ name: "later", statusKey: "assigned", dueDate: sydney("2026-10-14") });
+    await job({ name: "no-due", statusKey: "in_progress", dueDate: null });
+    await job({ name: "review", statusKey: "submitted", dueDate: sydney("2026-10-12") });
+    await job({ name: "revision", statusKey: "revision", dueDate: sydney("2026-10-12") });
+    await job({ name: "revision-overdue", statusKey: "revision", dueDate: sydney("2026-10-01") });
+    await job({ name: "paused", statusKey: "in_progress", isPaused: true, dueDate: sydney("2026-10-09") });
+    await job({ name: "approved", statusKey: "approved" });
+    await job({ name: "completed", statusKey: "completed" });
+    await job({ name: "someone-else", statusKey: "in_progress", editorId: ids.users.editor2 });
 
-    const q = getMyWorkQueue(db, contextFor(db, ids.users.editor1));
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.editor1));
     expect(sections(q)).toEqual({
       overdue: ["overdue", "revision-overdue"],
       dueToday: ["today"],
@@ -60,44 +60,42 @@ describe("getMyWorkQueue", () => {
     expect(q.overdue.find((r) => r.name === "overdue")).toMatchObject({ isOverdue: true, daysRemaining: -1 });
   });
 
-  it("uses the organisation timezone, not UTC or the server clock", () => {
-    db.update(organisationSettings).set({ timezone: "UTC" }).where(eq(organisationSettings.organisationId, ids.organisationId)).run();
+  it("uses the organisation timezone, not UTC or the server clock", async () => {
+    await db.update(organisationSettings).set({ timezone: "UTC" }).where(eq(organisationSettings.organisationId, ids.organisationId));
     const utc = (civil: string) => endOfCivilDayIso(civil, "UTC");
-    job({ name: "today-utc", statusKey: "in_progress", dueDate: utc("2026-10-08") });
-    job({ name: "tomorrow-utc", statusKey: "in_progress", dueDate: utc("2026-10-09") });
-    const q = getMyWorkQueue(db, contextFor(db, ids.users.editor1));
+    await job({ name: "today-utc", statusKey: "in_progress", dueDate: utc("2026-10-08") });
+    await job({ name: "tomorrow-utc", statusKey: "in_progress", dueDate: utc("2026-10-09") });
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.editor1));
     expect(q.dueToday.map((r) => r.name)).toEqual(["today-utc"]);
     expect(q.dueTomorrow.map((r) => r.name)).toEqual(["tomorrow-utc"]);
   });
 
-  it("photographers get their own active jobs (incl. approved), never others'", () => {
-    job({ name: "mine-approved", statusKey: "approved", photographerId: ids.users.photographer1 });
-    job({ name: "mine-review", statusKey: "review", photographerId: ids.users.photographer1 });
-    job({ name: "created-by-me", statusKey: "new", editorId: null, photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer1 });
-    job({ name: "theirs", statusKey: "in_progress", photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer2 });
-    job({ name: "mine-done", statusKey: "completed", photographerId: ids.users.photographer1 });
-    const q = getMyWorkQueue(db, contextFor(db, ids.users.photographer1));
+  it("photographers get their own active jobs (incl. approved), never others'", async () => {
+    await job({ name: "mine-approved", statusKey: "approved", photographerId: ids.users.photographer1 });
+    await job({ name: "mine-review", statusKey: "review", photographerId: ids.users.photographer1 });
+    await job({ name: "created-by-me", statusKey: "new", editorId: null, photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer1 });
+    await job({ name: "theirs", statusKey: "in_progress", photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer2 });
+    await job({ name: "mine-done", statusKey: "completed", photographerId: ids.users.photographer1 });
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.photographer1));
     const all = Object.values(sections(q)).flat().sort();
     expect(all).toEqual(["created-by-me", "mine-approved", "mine-review"]);
     expect(q.waitingForReview.map((r) => r.name)).toEqual(["mine-review"]);
   });
 
-  it("returns the actor's running timer", () => {
-    const fx = insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 });
-    db.insert(workSessions)
-      .values({
-        organisationId: ids.organisationId,
-        jobId: fx.job.id,
-        userId: ids.users.editor1,
-        statusIdAtStart: ids.statuses.in_progress,
-        categoryAtStart: "in_progress",
-        transitionId: fx.transitionId,
-        startedAt: NOW,
-      })
-      .run();
+  it("returns the actor's running timer", async () => {
+    const fx = await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 });
+    await db.insert(workSessions).values({
+      organisationId: ids.organisationId,
+      jobId: fx.job.id,
+      userId: ids.users.editor1,
+      statusIdAtStart: ids.statuses.in_progress,
+      categoryAtStart: "in_progress",
+      transitionId: fx.transitionId,
+      startedAt: NOW,
+    });
     fakeClock.advanceMinutes(10);
-    const q = getMyWorkQueue(db, contextFor(db, ids.users.editor1));
+    const q = await getMyWorkQueue(db, await contextFor(db, ids.users.editor1));
     expect(q.runningSession).toMatchObject({ isRunning: true, durationSeconds: 600, user: { id: ids.users.editor1 } });
-    expect(getMyWorkQueue(db, contextFor(db, ids.users.editor2)).runningSession).toBeNull();
+    expect((await getMyWorkQueue(db, await contextFor(db, ids.users.editor2))).runningSession).toBeNull();
   });
 });

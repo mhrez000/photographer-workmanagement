@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   ACTIONS,
   LINK_KINDS,
@@ -489,7 +489,7 @@ describe("users, org resources, self, flags", () => {
 /* ------------------------------------------------------------------ */
 
 describe("visibleJobsWhere", () => {
-  const dialect = new SQLiteSyncDialect();
+  const dialect = new PgDialect();
   const render = (c: AuthContext) => dialect.sqlToQuery(visibleJobsWhere(c));
 
   const FLAG_COMBOS: Partial<ContextSettings>[] = [
@@ -509,7 +509,7 @@ describe("visibleJobsWhere", () => {
   it("owner/manager/system: organisation filter only", () => {
     for (const c of [ctx("owner"), ctx("manager"), ctx("owner", { isSystem: true, userId: null })]) {
       const q = render(c);
-      expect(q.sql).toBe('"jobs"."organisation_id" = ?');
+      expect(q.sql).toBe('"jobs"."organisation_id" = $1');
       expect(q.params).toEqual([ORG]);
     }
   });
@@ -523,12 +523,12 @@ describe("visibleJobsWhere", () => {
     expect(team.sql).toContain('"editor_id" in');
     expect(team.params).toContain(TEAMMATE);
     const all = render(ctx("photographer", {}, { photographersSeeAllJobs: true }));
-    expect(all.sql).toBe('"jobs"."organisation_id" = ?');
+    expect(all.sql).toBe('"jobs"."organisation_id" = $1');
   });
 
   it("editor: assigned or past (EXISTS on job_assignments), team only with the flag", () => {
     const plain = render(ctx("editor"));
-    expect(plain.sql).toContain('"editor_id" = ?');
+    expect(plain.sql).toMatch(/"editor_id" = \$\d+/);
     expect(plain.sql).toMatch(/exists \(select 1 from "job_assignments"/);
     expect(plain.sql).toContain('"job_assignments"."user_id"');
     expect(plain.sql).toContain("'editor'");

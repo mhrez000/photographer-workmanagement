@@ -1,16 +1,18 @@
-import Database from "better-sqlite3";
-import { count, eq } from "drizzle-orm";
+import fs from "node:fs";
+import path from "node:path";
+import { count, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "./schema";
-import { GUARDS, listInstalledGuards } from "./guard";
+import { GUARDS, ROW_GUARDS, listInstalledGuards } from "./guard";
+import { execRows, RootDbInTransactionError } from "./index";
 import { verifyDerived } from "./verify";
 import {
   addTeamFixture,
   contextFor,
+  dbRejection,
   fakeClock,
   insertJobFixture,
   makeTestDb,
-  schemaStatements,
   seedMinimalOrg,
   testPasswordHash,
   type TestDb,
@@ -18,102 +20,107 @@ import {
 import { DEFAULT_JOB_TYPES, DEFAULT_WORKFLOW_STATUSES, DEFAULT_WORKFLOW_TRANSITIONS, STATUS_CATEGORY_META } from "@/lib/constants";
 import { verifyPassword } from "@/server/auth/password";
 
-function shape(sqlite: Database.Database) {
-  const tables = (sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all() as {
-    name: string;
-  }[]).map((t) => t.name);
-  const columns = Object.fromEntries(
-    tables.map((t) => [
-      t,
-      (sqlite.prepare(`PRAGMA table_info(${t})`).all() as { name: string; type: string; notnull: number; dflt_value: unknown; pk: number }[])
-        .map((c) => `${c.name}:${c.type}:${c.notnull}:${String(c.dflt_value)}:${c.pk}`)
-        .sort(),
-    ]),
+async function publicTables(db: TestDb): Promise<string[]> {
+  const rows = await execRows<{ name: string }>(
+    db,
+    sql`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`,
   );
-  const indexes = (sqlite.prepare(`SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name`).all() as {
-    name: string;
-    tbl_name: string;
-    sql: string;
-  }[]).map((i) => `${i.tbl_name}.${i.name}:${i.sql.replace(/\s+/g, " ")}`);
-  return { tables, columns, indexes };
+  return rows.map((r) => r.name);
 }
 
 describe("makeTestDb", () => {
-  it("creates every table of the schema and installs every guard trigger", () => {
-    const db = makeTestDb();
-    const { tables } = shape(db.$client);
+  it("creates every table of the schema and installs every guard trigger", async () => {
+    const db = await makeTestDb();
+    const tables = await publicTables(db);
     expect(tables).toHaveLength(27);
     expect(tables).toContain("activity_events");
-    expect(listInstalledGuards(db.$client).sort()).toEqual(GUARDS.map((g) => g.name).sort());
-    expect(db.$client.pragma("foreign_keys", { simple: true })).toBe(1);
+    expect(tables.sort()).toEqual([...schema.TABLE_NAMES].sort());
+    expect(ROW_GUARDS).toHaveLength(28);
+    expect((await listInstalledGuards(db)).sort()).toEqual(GUARDS.map((g) => g.name).sort());
+    // FKs are enforced (restrict): a job type pointing at a missing workflow is rejected.
+    expect(
+      await dbRejection(
+        db.insert(schema.jobTypes).values({ organisationId: "nope", name: "x", workflowId: "missing" }),
+      ),
+    ).toMatch(/foreign key/);
   });
 
-  it("returns isolated databases", () => {
-    const a = makeTestDb();
-    const b = makeTestDb();
-    seedMinimalOrg(a);
-    expect(a.select({ n: count() }).from(schema.users).get()?.n).toBe(7);
-    expect(b.select({ n: count() }).from(schema.users).get()?.n).toBe(0);
+  it("returns isolated databases", async () => {
+    const a = await makeTestDb();
+    const b = await makeTestDb();
+    await seedMinimalOrg(a);
+    expect((await a.select({ n: count() }).from(schema.users))[0]?.n).toBe(7);
+    expect((await b.select({ n: count() }).from(schema.users))[0]?.n).toBe(0);
+  });
+
+  it("throws instead of deadlocking when the root db is used inside a transaction", async () => {
+    const db = await makeTestDb();
+    await expect(
+      db.transaction(async () => {
+        await db.select().from(schema.users);
+      }),
+    ).rejects.toBeInstanceOf(RootDbInTransactionError);
+    // the handle is still usable afterwards
+    expect(await db.select().from(schema.users)).toEqual([]);
   });
 
   it("committed drizzle migrations are in sync with src/db/schema.ts (run `npx drizzle-kit generate` if this fails)", async () => {
-    const { generateSQLiteDrizzleJson, generateSQLiteMigration } = await import("drizzle-kit/api");
-    const empty = await generateSQLiteDrizzleJson({});
-    const current = await generateSQLiteDrizzleJson(schema as unknown as Record<string, unknown>);
-    const statements = await generateSQLiteMigration(empty, current);
-    const fromSchema = new Database(":memory:");
-    for (const s of statements) fromSchema.exec(s);
-    const fromMigrations = new Database(":memory:");
-    for (const s of schemaStatements()) fromMigrations.exec(s);
-    expect(shape(fromSchema).tables).toHaveLength(27);
-    expect(shape(fromMigrations)).toEqual(shape(fromSchema));
+    const { generateDrizzleJson, generateMigration } = await import("drizzle-kit/api");
+    const metaDir = path.resolve(process.cwd(), "drizzle", "meta");
+    const journal = JSON.parse(fs.readFileSync(path.join(metaDir, "_journal.json"), "utf8")) as { entries: { idx: number }[] };
+    const lastIdx = Math.max(...journal.entries.map((e) => e.idx));
+    const snapshotFile = path.join(metaDir, `${String(lastIdx).padStart(4, "0")}_snapshot.json`);
+    const previous = JSON.parse(fs.readFileSync(snapshotFile, "utf8")) as Parameters<typeof generateMigration>[0];
+    const current = generateDrizzleJson(schema as unknown as Record<string, unknown>, previous.id);
+    const statements = await generateMigration(previous, current);
+    expect(statements).toEqual([]);
   }, 30_000);
 });
 
 describe("seedMinimalOrg", () => {
   let db: TestDb;
-  beforeEach(() => {
+  beforeEach(async () => {
     fakeClock.set("2026-10-08T00:00:00.000Z");
-    db = makeTestDb();
+    db = await makeTestDb();
   });
   afterEach(() => fakeClock.reset());
 
-  it("creates the org, settings, 7 users, default workflow, job types, client and project with known ids", () => {
-    const ids = seedMinimalOrg(db);
+  it("creates the org, settings, 7 users, default workflow, job types, client and project with known ids", async () => {
+    const ids = await seedMinimalOrg(db);
     expect(ids.organisationId).toBe("studio-org");
     expect(ids.users.owner).toBe("studio-owner");
     expect(ids.emails.owner).toBe("owner@studio.test");
     expect(ids.emails.manager).toBe("manager1@studio.test");
     expect(ids.emails.editor1).toBe("editor01@studio.test");
 
-    const users = db.select().from(schema.users).all();
+    const users = await db.select().from(schema.users);
     expect(users).toHaveLength(7);
     expect(users.filter((u) => !u.isActive).map((u) => u.id)).toEqual([ids.users.inactiveEditor]);
-    expect(db.select().from(schema.organisationSettings).get()?.timezone).toBe("Australia/Sydney");
+    expect((await db.select().from(schema.organisationSettings))[0]?.timezone).toBe("Australia/Sydney");
 
-    const statuses = db.select().from(schema.workflowStatuses).all();
+    const statuses = await db.select().from(schema.workflowStatuses);
     expect(statuses).toHaveLength(DEFAULT_WORKFLOW_STATUSES.length);
     expect(statuses.filter((s) => s.isInitial).map((s) => s.key)).toEqual(["new"]);
     const activeCount = DEFAULT_WORKFLOW_STATUSES.filter((s) => STATUS_CATEGORY_META[s.category].open).length;
-    const transitions = db.select().from(schema.workflowTransitions).all();
+    const transitions = await db.select().from(schema.workflowTransitions);
     expect(transitions).toHaveLength(DEFAULT_WORKFLOW_TRANSITIONS.length + activeCount);
     expect(ids.transitions["in_progress->cancelled"]).toBeDefined();
     expect(ids.transitions["completed->cancelled"]).toBeUndefined();
     expect(Object.keys(ids.jobTypes)).toHaveLength(DEFAULT_JOB_TYPES.length);
-    expect(db.select().from(schema.projects).get()?.clientId).toBe(ids.clientId);
+    expect((await db.select().from(schema.projects))[0]?.clientId).toBe(ids.clientId);
   });
 
-  it("can seed a second organisation alongside (cross-org tests)", () => {
-    const a = seedMinimalOrg(db);
-    const b = seedMinimalOrg(db, { slug: "other" });
+  it("can seed a second organisation alongside (cross-org tests)", async () => {
+    const a = await seedMinimalOrg(db);
+    const b = await seedMinimalOrg(db, { slug: "other" });
     expect(b.emails.owner).toBe("owner@other.test");
     expect(a.organisationId).not.toBe(b.organisationId);
-    expect(db.select({ n: count() }).from(schema.organisations).get()?.n).toBe(2);
+    expect((await db.select({ n: count() }).from(schema.organisations))[0]?.n).toBe(2);
   });
 
   it("stores a bcrypt hash that verifies TEST_PASSWORD", async () => {
-    const ids = seedMinimalOrg(db);
-    const owner = db.select().from(schema.users).where(eq(schema.users.id, ids.users.owner)).get();
+    const ids = await seedMinimalOrg(db);
+    const [owner] = await db.select().from(schema.users).where(eq(schema.users.id, ids.users.owner));
     expect(owner?.passwordHash).toBe(testPasswordHash());
     expect(await verifyPassword(ids.password, owner?.passwordHash ?? "")).toBe(true);
   });
@@ -121,51 +128,51 @@ describe("seedMinimalOrg", () => {
 
 describe("insertJobFixture", () => {
   let db: TestDb;
-  beforeEach(() => {
+  beforeEach(async () => {
     fakeClock.set("2026-10-08T00:00:00.000Z");
-    db = makeTestDb();
+    db = await makeTestDb();
   });
   afterEach(() => fakeClock.reset());
 
-  it("inserts a job in every default status that satisfies the triggers and db:verify (zero drift)", () => {
-    const ids = seedMinimalOrg(db);
+  it("inserts a job in every default status that satisfies the triggers and db:verify (zero drift)", async () => {
+    const ids = await seedMinimalOrg(db);
     for (const s of DEFAULT_WORKFLOW_STATUSES) {
       fakeClock.advanceMinutes(5);
-      const { job } = insertJobFixture(db, ids, { statusKey: s.key, dueDate: "2026-10-12T12:59:59.999Z" });
+      const { job } = await insertJobFixture(db, ids, { statusKey: s.key, dueDate: "2026-10-12T12:59:59.999Z" });
       expect(job.statusCategory).toBe(s.category);
     }
-    const report = verifyDerived(db.$client);
+    const report = await verifyDerived(db);
     expect(report.jobsChecked).toBe(DEFAULT_WORKFLOW_STATUSES.length);
     expect(report.drift).toEqual([]);
     expect(report.structural).toEqual([]);
     expect(report.ok).toBe(true);
   });
 
-  it("allocates gap-free job numbers and writes the creation ledger + event", () => {
-    const ids = seedMinimalOrg(db);
-    const first = insertJobFixture(db, ids);
-    const second = insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor2 });
+  it("allocates gap-free job numbers and writes the creation ledger + event", async () => {
+    const ids = await seedMinimalOrg(db);
+    const first = await insertJobFixture(db, ids);
+    const second = await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor2 });
     expect(first.job.jobNumber).toBe("PJ-0001");
     expect(second.job.jobNumber).toBe("PJ-0002");
     expect(second.job.editorId).toBe(ids.users.editor2);
     expect(second.assignmentIds.editor).not.toBeNull();
     expect(first.job.editorId).toBeNull();
 
-    const rows = db.select().from(schema.jobStatusTransitions).where(eq(schema.jobStatusTransitions.jobId, second.job.id)).all();
+    const rows = await db.select().from(schema.jobStatusTransitions).where(eq(schema.jobStatusTransitions.jobId, second.job.id));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sequence: 1, kind: "creation", exitedAt: null, activityEventId: second.eventId });
-    const event = db.select().from(schema.activityEvents).where(eq(schema.activityEvents.id, second.eventId)).get();
+    const [event] = await db.select().from(schema.activityEvents).where(eq(schema.activityEvents.id, second.eventId));
     expect(event).toMatchObject({ eventType: "job.created", jobId: second.job.id, actorUserId: ids.users.photographer1 });
     expect(event?.summary).toBe(`created job PJ-0002 “${second.job.name}”`);
   });
 
-  it("contextFor builds a usable context and teams are opt-in", () => {
-    const ids = seedMinimalOrg(db);
-    expect(contextFor(db, ids.users.editor1).teamUserIds.size).toBe(0);
-    addTeamFixture(db, ids, { name: "Crew", memberIds: [ids.users.editor1, ids.users.photographer1] });
-    const ctx = contextFor(db, ids.users.editor1);
+  it("contextFor builds a usable context and teams are opt-in", async () => {
+    const ids = await seedMinimalOrg(db);
+    expect((await contextFor(db, ids.users.editor1)).teamUserIds.size).toBe(0);
+    await addTeamFixture(db, ids, { name: "Crew", memberIds: [ids.users.editor1, ids.users.photographer1] });
+    const ctx = await contextFor(db, ids.users.editor1);
     expect([...ctx.teamUserIds]).toEqual([ids.users.photographer1]);
     expect(ctx.now()).toBe("2026-10-08T00:00:00.000Z");
-    expect(() => contextFor(db, ids.users.inactiveEditor)).toThrow(/inactive/);
+    await expect(contextFor(db, ids.users.inactiveEditor)).rejects.toThrow(/inactive/);
   });
 });

@@ -6,6 +6,6 @@ export default async function Layout({ children, params }: LayoutProps<"/project
   const { id } = await params;
   const { ctx, db } = await pageContext();
   guard(ctx, "project.view");
-  load(() => getProjectDetail(db, ctx, decodeURIComponent(id)));
+  await load(() => getProjectDetail(db, ctx, decodeURIComponent(id)));
   return children;
 }

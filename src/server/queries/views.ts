@@ -13,7 +13,7 @@ import { SavedViewConfigSchema, parseJsonColumn } from "@/lib/validation/json";
 import { assertCan } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
 import { loadSavedViewInOrg, parseInput } from "@/server/services/_shared";
-import { loadUserRefs } from "./metrics";
+import { binaryAsc, loadUserRefs } from "./metrics";
 
 const one = <T extends z.ZodType>(item: T) => z.preprocess((v) => (Array.isArray(v) ? v[0] : v === "" ? undefined : v), item);
 
@@ -38,11 +38,11 @@ function toItem(v: SavedView, ctx: AuthContext, owner: SavedViewItem["owner"] | 
 }
 
 /** `GET /api/views?scope` — own views first, then shared ones, each by name. */
-export function listSavedViews(db: DbLike, ctx: AuthContext, input: unknown = {}): SavedViewItem[] {
+export async function listSavedViews(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<SavedViewItem[]> {
   if (ctx.userId === null) return [];
   assertCan(ctx, "saved_view.manage", { userId: ctx.userId, organisationId: ctx.organisationId });
   const f = parseInput(SavedViewFiltersSchema, input ?? {});
-  const rows = db
+  const rows = await db
     .select()
     .from(savedViews)
     .where(
@@ -53,9 +53,8 @@ export function listSavedViews(db: DbLike, ctx: AuthContext, input: unknown = {}
         f.scope ? eq(savedViews.scope, f.scope) : undefined,
       ),
     )
-    .orderBy(desc(savedViews.isDefault), asc(savedViews.name), asc(savedViews.id))
-    .all();
-  const owners = loadUserRefs(
+    .orderBy(desc(savedViews.isDefault), binaryAsc(savedViews.name), asc(savedViews.id));
+  const owners = await loadUserRefs(
     db,
     ctx,
     rows.map((r) => r.ownerUserId),
@@ -65,8 +64,8 @@ export function listSavedViews(db: DbLike, ctx: AuthContext, input: unknown = {}
 }
 
 /** One view (own or shared, not archived); otherwise 404. */
-export function getSavedView(db: DbLike, ctx: AuthContext, viewId: string): SavedViewItem {
-  const v = loadSavedViewInOrg(db, ctx, viewId);
+export async function getSavedView(db: DbLike, ctx: AuthContext, viewId: string): Promise<SavedViewItem> {
+  const v = await loadSavedViewInOrg(db, ctx, viewId);
   if (v.archivedAt !== null || (v.ownerUserId !== ctx.userId && !v.isShared)) throw new NotFoundError("Saved view");
-  return toItem(v, ctx, loadUserRefs(db, ctx, [v.ownerUserId]).get(v.ownerUserId));
+  return toItem(v, ctx, (await loadUserRefs(db, ctx, [v.ownerUserId])).get(v.ownerUserId));
 }

@@ -13,7 +13,7 @@
  * `users.last_login_at` is an audit exemption (§5).
  */
 import { and, eq, sql } from "drizzle-orm";
-import { getDb, type Db, type Tx } from "@/db/index";
+import { first, getDb, type Db, type Tx } from "@/db/index";
 import { users } from "@/db/schema";
 import type { AuthContext, User } from "@/lib/types";
 import { ChangePasswordInput, LoginInput } from "@/lib/validation/auth";
@@ -35,9 +35,9 @@ export interface AuthenticatedUser {
   sessionVersion: number;
 }
 
-function auditFailure(db: Db, user: User, input: { email: string; ip?: string | null; userAgent?: string | null }, reason: string): void {
-  const ctx = systemContext(user.organisationId, { db, cause: "user" });
-  withTx(
+async function auditFailure(db: Db, user: User, input: { email: string; ip?: string | null; userAgent?: string | null }, reason: string): Promise<void> {
+  const ctx = await systemContext(user.organisationId, { db, cause: "user" });
+  await withTx(
     (tx) =>
       recordEvent(tx, ctx, {
         entityType: "auth",
@@ -63,7 +63,7 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
   const limit = checkLoginAttempt(input.email, input.ip);
   if (!limit.allowed) throw new RateLimitedError(limit.retryAfterSeconds);
 
-  const user = db.select().from(users).where(eq(users.email, input.email)).get();
+  const user = await first(db.select().from(users).where(eq(users.email, input.email)));
   if (!user) {
     await verifyAgainstDummy(input.password);
     const after = recordLoginAttemptFailure(input.email, input.ip);
@@ -74,19 +74,19 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
   const passwordOk = await verifyPassword(input.password, user.passwordHash);
   const inactive = !user.isActive || user.anonymisedAt !== null;
   if (!passwordOk || inactive) {
-    auditFailure(db, user, input, inactive ? "inactive" : "bad_password");
+    await auditFailure(db, user, input, inactive ? "inactive" : "bad_password");
     const after = recordLoginAttemptFailure(input.email, input.ip);
     if (!after.allowed) throw new RateLimitedError(after.retryAfterSeconds);
     throw new UnauthorizedError(INVALID_CREDENTIALS);
   }
 
   resetLoginAttempts(input.email, input.ip);
-  const ctx = buildContextFromDb(db, user.id, { sessionVersion: user.sessionVersion });
+  const ctx = await buildContextFromDb(db, user.id, { sessionVersion: user.sessionVersion });
   if (!ctx) throw new UnauthorizedError(INVALID_CREDENTIALS);
-  withTx(
-    (tx) => {
-      tx.update(users).set({ lastLoginAt: ctx.now() }).where(eq(users.id, user.id)).run();
-      recordEvent(tx, ctx, {
+  await withTx(
+    async (tx) => {
+      await tx.update(users).set({ lastLoginAt: ctx.now() }).where(eq(users.id, user.id));
+      await recordEvent(tx, ctx, {
         entityType: "auth",
         entityId: user.id,
         eventType: "auth.logged_in",
@@ -127,16 +127,17 @@ export async function login(raw: unknown, db: Db = getDb()): Promise<Authenticat
  * Trade-off: signing out signs the user out on ALL devices (the session is a
  * stateless `{ sub, sv }` cookie; per-device revocation would need a session table).
  */
-export function recordLogout(tx: Tx, ctx: AuthContext, meta: { ip?: string | null; userAgent?: string | null } = {}): number | null {
+export async function recordLogout(tx: Tx, ctx: AuthContext, meta: { ip?: string | null; userAgent?: string | null } = {}): Promise<number | null> {
   if (!ctx.userId || ctx.isSystem) return null;
-  const updated = tx
-    .update(users)
-    .set({ sessionVersion: sql`${users.sessionVersion} + 1` })
-    .where(and(eq(users.id, ctx.userId), eq(users.organisationId, ctx.organisationId)))
-    .returning({ sessionVersion: users.sessionVersion })
-    .get();
+  const updated = await first(
+    tx
+      .update(users)
+      .set({ sessionVersion: sql`${users.sessionVersion} + 1` })
+      .where(and(eq(users.id, ctx.userId), eq(users.organisationId, ctx.organisationId)))
+      .returning({ sessionVersion: users.sessionVersion }),
+  );
   if (!updated) return null;
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "auth",
     entityId: ctx.userId,
     eventType: "auth.logged_out",
@@ -150,13 +151,9 @@ export function recordLogout(tx: Tx, ctx: AuthContext, meta: { ip?: string | nul
 }
 
 /** Logout: revoke every session + audit (when signed in), then expire the cookie. Always succeeds. */
-export async function logout(
-  ctx: AuthContext | null,
-  meta: { ip?: string | null; userAgent?: string | null } = {},
-  db: Db = getDb(),
-): Promise<void> {
+export async function logout(ctx: AuthContext | null, meta: { ip?: string | null; userAgent?: string | null } = {}, db: Db = getDb()): Promise<void> {
   if (ctx?.userId) {
-    withTx((tx) => recordLogout(tx, ctx, meta), { db });
+    await withTx((tx) => recordLogout(tx, ctx, meta), { db });
   }
   await clearSession();
 }
@@ -172,7 +169,12 @@ export async function preparePasswordChange(
 ): Promise<{ userId: string; expectedVersion: number; passwordHash: string }> {
   if (!ctx.userId || ctx.isSystem) throw new UnauthorizedError();
   const input = parseInput(ChangePasswordInput, raw);
-  const user = db.select().from(users).where(and(eq(users.id, ctx.userId), eq(users.organisationId, ctx.organisationId))).get();
+  const user = await first(
+    db
+      .select()
+      .from(users)
+      .where(and(eq(users.id, ctx.userId), eq(users.organisationId, ctx.organisationId))),
+  );
   if (!user || !user.isActive) throw new UnauthorizedError();
   if (!(await verifyPassword(input.current, user.passwordHash))) {
     throw new ValidationError("Current password is incorrect", {
@@ -187,26 +189,27 @@ export async function preparePasswordChange(
  * Writes the new hash, bumps `session_version` (every other cookie dies) and
  * `version`, audits `user.password_changed`. Returns the new session version.
  */
-export function changePasswordInDb(
+export async function changePasswordInDb(
   tx: Tx,
   ctx: AuthContext,
   prepared: { userId: string; expectedVersion: number; passwordHash: string },
-): { sessionVersion: number } {
+): Promise<{ sessionVersion: number }> {
   if (!ctx.userId || ctx.userId !== prepared.userId) throw new UnauthorizedError();
   const now = ctx.now();
-  const updated = tx
-    .update(users)
-    .set({
-      passwordHash: prepared.passwordHash,
-      sessionVersion: sql`${users.sessionVersion} + 1`,
-      version: sql`${users.version} + 1`,
-      updatedAt: now,
-    })
-    .where(and(eq(users.id, prepared.userId), eq(users.organisationId, ctx.organisationId), eq(users.version, prepared.expectedVersion)))
-    .returning({ sessionVersion: users.sessionVersion, name: users.name })
-    .get();
+  const updated = await first(
+    tx
+      .update(users)
+      .set({
+        passwordHash: prepared.passwordHash,
+        sessionVersion: sql`${users.sessionVersion} + 1`,
+        version: sql`${users.version} + 1`,
+        updatedAt: now,
+      })
+      .where(and(eq(users.id, prepared.userId), eq(users.organisationId, ctx.organisationId), eq(users.version, prepared.expectedVersion)))
+      .returning({ sessionVersion: users.sessionVersion, name: users.name }),
+  );
   if (!updated) throw new ConflictError("Your account was changed elsewhere. Reload and try again.");
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: prepared.userId,
     eventType: "user.password_changed",
@@ -226,7 +229,7 @@ export function changePasswordInDb(
  */
 export async function changePassword(ctx: AuthContext, raw: unknown, db: Db = getDb()): Promise<{ ok: true }> {
   const prepared = await preparePasswordChange(db, ctx, raw);
-  const { sessionVersion } = withTx((tx) => changePasswordInDb(tx, ctx, prepared), { db });
+  const { sessionVersion } = await withTx((tx) => changePasswordInDb(tx, ctx, prepared), { db });
   await createSession(prepared.userId, sessionVersion);
   return { ok: true };
 }

@@ -43,27 +43,33 @@ export const UserOptionsQuerySchema = z.object({
 });
 
 /** People picker (`user.view`; reduced projection; editors carry workload when the actor may see team workloads). */
-export function getUserOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): UserOption[] {
+export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<UserOption[]> {
   const f = parseInput(UserOptionsQuerySchema, input ?? {});
   const roles = f.role && f.role.length > 0 ? new Set(f.role) : null;
-  let people: UserRef[] = listUsers(db, ctx, {
-    role: roles && roles.size === 1 ? [...roles][0] : undefined,
-    active: f.includeInactive ? undefined : "1",
-    q: f.q,
-  }).map((u) => ({ id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive }));
+  let people: UserRef[] = (
+    await listUsers(db, ctx, {
+      role: roles && roles.size === 1 ? [...roles][0] : undefined,
+      active: f.includeInactive ? undefined : "1",
+      q: f.q,
+    })
+  ).map((u) => ({ id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive }));
   if (roles) people = people.filter((u) => roles.has(u.role));
   if (f.excludeSelf && ctx.userId) people = people.filter((u) => u.id !== ctx.userId);
 
   if (f.jobId) {
     // 404 when the actor cannot see the job (existence never leaks).
-    const { ref } = loadVisibleJob(db, ctx, f.jobId);
-    people = people.filter((u) => u.isActive && userCanViewJob(db, ctx, u.id, ref));
+    const { ref } = await loadVisibleJob(db, ctx, f.jobId);
+    const viewers: UserRef[] = [];
+    for (const u of people) {
+      if (u.isActive && (await userCanViewJob(db, ctx, u.id, ref))) viewers.push(u);
+    }
+    people = viewers;
   }
 
   const editorIds = people.filter((u) => u.role === "editor").map((u) => u.id);
   const workloads = new Map<string, UserOption["workload"]>();
   if (editorIds.length > 0 && canViewTeamWorkloads(ctx)) {
-    for (const row of computeWorkloads(db, ctx, { editorIds }).rows) {
+    for (const row of (await computeWorkloads(db, ctx, { editorIds })).rows) {
       workloads.set(row.editor.id, { band: row.band, active: row.active, overdue: row.overdue });
     }
   }
@@ -71,15 +77,16 @@ export function getUserOptions(db: DbLike, ctx: AuthContext, input: unknown = {}
 }
 
 /** Non-archived clients the actor can see (`client.view`; editors: clients of visible jobs). */
-export function getClientOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): ClientOption[] {
+export async function getClientOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<ClientOption[]> {
   const q = input && typeof input === "object" ? (input as Record<string, unknown>).q : undefined;
-  return listClients(db, ctx, { q }).map((c) => ({ id: c.client.id, name: c.client.name, colour: c.client.colour }));
+  return (await listClients(db, ctx, { q })).map((c) => ({ id: c.client.id, name: c.client.name, colour: c.client.colour }));
 }
 
 /** Non-archived projects (optionally of one client) the actor can see (`project.view`). */
-export function getProjectOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): ProjectOption[] {
+export async function getProjectOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<ProjectOption[]> {
   const o = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-  return listProjects(db, ctx, { clientId: o.clientId, q: o.q }).map((p) => ({
+  return (await listProjects(db, ctx, { clientId: o.clientId, q: o.q })).map((p) => ({
+
     id: p.project.id,
     name: p.project.name,
     clientId: p.project.clientId,

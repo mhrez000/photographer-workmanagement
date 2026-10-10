@@ -18,7 +18,7 @@ import type { AuthContext, Client, Project } from "@/lib/types";
 import { ArchiveProjectInput, CreateProjectInput, UpdateProjectInput } from "@/lib/validation/projects";
 import { recordEvent } from "@/server/audit";
 import { assertCan, type OrgResourceRef } from "@/server/auth/permissions";
-import { loadClientInOrg, loadProjectInOrg, parseInput, type DbLike, type Tx } from "./_shared";
+import { first, loadClientInOrg, loadProjectInOrg, one, parseInput, type DbLike, type Tx } from "./_shared";
 import { checkVersion, diffFields, ruleViolation, toStoredDate } from "./_admin";
 import { assertRoleMayEver } from "./clients";
 
@@ -28,18 +28,19 @@ export function projectResourceRef(row: Project): OrgResourceRef {
   return { organisationId: row.organisationId, createdByUserId: row.createdByUserId ?? undefined };
 }
 
-function jobCountForProject(db: DbLike, ctx: AuthContext, projectId: string, activeOnly: boolean): number {
-  const row = db
-    .select({ n: count() })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.organisationId, ctx.organisationId),
-        eq(jobs.projectId, projectId),
-        activeOnly ? inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE]) : undefined,
+async function jobCountForProject(db: DbLike, ctx: AuthContext, projectId: string, activeOnly: boolean): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: count() })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.organisationId, ctx.organisationId),
+          eq(jobs.projectId, projectId),
+          activeOnly ? inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE]) : undefined,
+        ),
       ),
-    )
-    .get();
+  );
   return row?.n ?? 0;
 }
 
@@ -48,9 +49,9 @@ function jobCountForProject(db: DbLike, ctx: AuthContext, projectId: string, act
  * archived, and its client not archived (else 400). Returns both rows so
  * the caller can copy `clientId` onto the job.
  */
-export function resolveProjectForJob(db: DbLike, ctx: AuthContext, projectId: string): { project: Project; client: Client } {
-  const project = loadProjectInOrg(db, ctx, projectId);
-  const client = loadClientInOrg(db, ctx, project.clientId);
+export async function resolveProjectForJob(db: DbLike, ctx: AuthContext, projectId: string): Promise<{ project: Project; client: Client }> {
+  const project = await loadProjectInOrg(db, ctx, projectId);
+  const client = await loadClientInOrg(db, ctx, project.clientId);
   if (project.archivedAt) throw ruleViolation("This project is archived", {}, "projectId");
   if (client.archivedAt) throw ruleViolation("This project's client is archived", {}, "projectId");
   return { project, client };
@@ -60,33 +61,34 @@ function eventValues(p: Pick<Project, "clientId" | "name" | "address" | "descrip
   return { clientId: p.clientId, name: p.name, address: p.address, description: p.description, startDate: p.startDate, endDate: p.endDate };
 }
 
-export function createProject(tx: Tx, ctx: AuthContext, input: unknown): Project {
+export async function createProject(tx: Tx, ctx: AuthContext, input: unknown): Promise<Project> {
   assertCan(ctx, "project.create");
   const data = parseInput(CreateProjectInput, input);
-  const client = loadClientInOrg(tx, ctx, data.clientId);
+  const client = await loadClientInOrg(tx, ctx, data.clientId);
   if (client.archivedAt) throw ruleViolation("This client is archived", {}, "clientId");
   const tz = ctx.settings.timezone;
   const startDate = toStoredDate(data.startDate, tz) ?? null;
   const endDate = toStoredDate(data.endDate, tz) ?? null;
   if (startDate && endDate && endDate < startDate) throw ruleViolation("End date must be on or after the start date", {}, "endDate");
   const now = ctx.now();
-  const row = tx
-    .insert(projects)
-    .values({
-      organisationId: ctx.organisationId,
-      clientId: client.id,
-      name: data.name,
-      address: data.address ?? null,
-      description: data.description ?? null,
-      startDate,
-      endDate,
-      createdByUserId: ctx.userId,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .insert(projects)
+      .values({
+        organisationId: ctx.organisationId,
+        clientId: client.id,
+        name: data.name,
+        address: data.address ?? null,
+        description: data.description ?? null,
+        startDate,
+        endDate,
+        createdByUserId: ctx.userId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "project",
     entityId: row.id,
     eventType: "project.created",
@@ -98,10 +100,10 @@ export function createProject(tx: Tx, ctx: AuthContext, input: unknown): Project
   return row;
 }
 
-export function updateProject(tx: Tx, ctx: AuthContext, input: unknown): Project {
+export async function updateProject(tx: Tx, ctx: AuthContext, input: unknown): Promise<Project> {
   assertRoleMayEver(ctx, "project.edit");
   const data = parseInput(UpdateProjectInput, input);
-  const project = loadProjectInOrg(tx, ctx, data.projectId);
+  const project = await loadProjectInOrg(tx, ctx, data.projectId);
   assertCan(ctx, "project.edit", projectResourceRef(project));
   checkVersion(project, data.expectedVersion, project);
 
@@ -116,9 +118,9 @@ export function updateProject(tx: Tx, ctx: AuthContext, input: unknown): Project
 
   const meta: Record<string, unknown> = { projectId: project.id };
   if (diff.changed.includes("clientId")) {
-    const nextClient = loadClientInOrg(tx, ctx, diff.set.clientId as string);
+    const nextClient = await loadClientInOrg(tx, ctx, diff.set.clientId as string);
     if (nextClient.archivedAt) throw ruleViolation("That client is archived", {}, "clientId");
-    const jobCount = jobCountForProject(tx, ctx, project.id, false);
+    const jobCount = await jobCountForProject(tx, ctx, project.id, false);
     if (jobCount > 0) {
       throw ruleViolation(
         `This project has ${jobCount} job${jobCount === 1 ? "" : "s"}; it cannot be moved to another client. Create a new project instead.`,
@@ -126,20 +128,21 @@ export function updateProject(tx: Tx, ctx: AuthContext, input: unknown): Project
         "clientId",
       );
     }
-    meta.fromLabel = loadClientInOrg(tx, ctx, project.clientId).name;
+    meta.fromLabel = (await loadClientInOrg(tx, ctx, project.clientId)).name;
     meta.toLabel = nextClient.name;
   }
   const startDate = diff.changed.includes("startDate") ? (diff.set.startDate ?? null) : project.startDate;
   const endDate = diff.changed.includes("endDate") ? (diff.set.endDate ?? null) : project.endDate;
   if (startDate && endDate && endDate < startDate) throw ruleViolation("End date must be on or after the start date", {}, "endDate");
 
-  const row = tx
-    .update(projects)
-    .set({ ...diff.set, updatedAt: ctx.now(), version: project.version + 1 })
-    .where(eq(projects.id, project.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(projects)
+      .set({ ...diff.set, updatedAt: ctx.now(), version: project.version + 1 })
+      .where(eq(projects.id, project.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "project",
     entityId: project.id,
     eventType: "project.updated",
@@ -151,27 +154,28 @@ export function updateProject(tx: Tx, ctx: AuthContext, input: unknown): Project
   return row;
 }
 
-export function archiveProject(tx: Tx, ctx: AuthContext, input: unknown): Project {
+export async function archiveProject(tx: Tx, ctx: AuthContext, input: unknown): Promise<Project> {
   assertCan(ctx, "project.archive");
   const data = parseInput(ArchiveProjectInput, input);
-  const project = loadProjectInOrg(tx, ctx, data.projectId);
+  const project = await loadProjectInOrg(tx, ctx, data.projectId);
   assertCan(ctx, "project.archive", projectResourceRef(project));
   checkVersion(project, data.expectedVersion, project);
   if (project.archivedAt) throw ruleViolation("This project is already archived");
-  const active = jobCountForProject(tx, ctx, project.id, true);
+  const active = await jobCountForProject(tx, ctx, project.id, true);
   if (active > 0) {
     throw ruleViolation(`This project has ${active} active job${active === 1 ? "" : "s"}. Complete or cancel them before archiving.`, {
       activeJobCount: active,
     });
   }
   const now = ctx.now();
-  const row = tx
-    .update(projects)
-    .set({ archivedAt: now, updatedAt: now, version: project.version + 1 })
-    .where(eq(projects.id, project.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(projects)
+      .set({ archivedAt: now, updatedAt: now, version: project.version + 1 })
+      .where(eq(projects.id, project.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "project",
     entityId: project.id,
     eventType: "project.archived",
@@ -183,22 +187,23 @@ export function archiveProject(tx: Tx, ctx: AuthContext, input: unknown): Projec
   return row;
 }
 
-export function restoreProject(tx: Tx, ctx: AuthContext, input: unknown): Project {
+export async function restoreProject(tx: Tx, ctx: AuthContext, input: unknown): Promise<Project> {
   assertCan(ctx, "project.archive");
   const data = parseInput(ArchiveProjectInput, input);
-  const project = loadProjectInOrg(tx, ctx, data.projectId);
+  const project = await loadProjectInOrg(tx, ctx, data.projectId);
   assertCan(ctx, "project.archive", projectResourceRef(project));
   checkVersion(project, data.expectedVersion, project);
   if (!project.archivedAt) throw ruleViolation("This project is not archived");
-  const client = loadClientInOrg(tx, ctx, project.clientId);
+  const client = await loadClientInOrg(tx, ctx, project.clientId);
   if (client.archivedAt) throw ruleViolation("Restore the client first: it is archived");
-  const row = tx
-    .update(projects)
-    .set({ archivedAt: null, updatedAt: ctx.now(), version: project.version + 1 })
-    .where(eq(projects.id, project.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(projects)
+      .set({ archivedAt: null, updatedAt: ctx.now(), version: project.version + 1 })
+      .where(eq(projects.id, project.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "project",
     entityId: project.id,
     eventType: "project.restored",

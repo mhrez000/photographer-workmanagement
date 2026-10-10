@@ -11,9 +11,9 @@
  * REVIEWER_HOLDS ∧ review_due < now; delivery_due → not yet delivered /
  * completed ∧ delivery_due < now; revision_due → revision still open ∧ due < now.
  */
-import { and, eq, gt, inArray, isNull, lte, ne, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lte, ne, or, type SQL } from "drizzle-orm";
+import type { PgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import type { DbLike } from "@/db/index";
 import { jobRevisions, jobs } from "@/db/schema";
 import { CATEGORY_GROUPS } from "@/lib/constants";
@@ -71,15 +71,15 @@ function jobPart(raw: RawJobRow): CalendarEvent["job"] {
  * Calendar events between `from` and `to` (civil days inclusive, org tz).
  * Every date kind is an end-of-day instant, so the instant window is (from, to].
  */
-export function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown = {}): CalendarEvent[] {
+export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<CalendarEvent[]> {
   const q = parseInput(CalendarQuerySchema, input ?? {});
   const now = ctx.now();
   const range = rangeOf(ctx, q.from, q.to, now);
   const kinds = new Set<CalendarEventKind>(q.kinds?.length ? q.kinds : CALENDAR_EVENT_KINDS);
-  const bounds = orgDayBounds(ctx, now, loadOrgSettingsRow(db, ctx)?.weekStartsOn ?? 1);
+  const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
   // Deadlines / shoot dates are end-of-civil-day instants: civil day d is stored in
   // (start(d), end(d)], so the window is (from, to] (holds for both end-of-day encodings).
-  const inRangeDeadline = (col: SQLiteColumn): SQL => and(gt(col, range.from), lte(col, range.to)) as SQL;
+  const inRangeDeadline = (col: PgColumn): SQL => and(gt(col, range.from), lte(col, range.to)) as SQL;
 
   const dateParts: SQL[] = [];
   if (kinds.has("shoot")) dateParts.push(inRangeDeadline(jobs.shootDate));
@@ -94,7 +94,7 @@ export function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown =
   const inWindow = (at: string | null): at is string => at !== null && at > range.from && at <= range.to;
 
   if (dateParts.length > 0) {
-    const raws = selectRawJobs(db, ctx, { where: and(base, or(...dateParts)), limit: MAX_JOBS });
+    const raws = await selectRawJobs(db, ctx, { where: and(base, or(...dateParts)), limit: MAX_JOBS });
     for (const raw of raws) {
       const j = raw.job;
       const job = jobPart(raw);
@@ -127,13 +127,14 @@ export function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown =
   }
 
   if (kinds.has("revision_due")) {
-    const revs = db
+    const revs = await db
       .select({ id: jobRevisions.id, jobId: jobRevisions.jobId, dueDate: jobRevisions.dueDate, revisionNumber: jobRevisions.revisionNumber, resolvedAt: jobRevisions.resolvedAt })
       .from(jobRevisions)
       .where(and(eq(jobRevisions.organisationId, ctx.organisationId), isNull(jobRevisions.resolvedAt), inRangeDeadline(jobRevisions.dueDate)))
-      .all();
+      .orderBy(asc(jobRevisions.dueDate), asc(jobRevisions.id));
     if (revs.length > 0) {
-      const raws = selectRawJobs(db, ctx, { where: and(base, inArray(jobs.id, [...new Set(revs.map((r) => r.jobId))])) });
+      const raws = await selectRawJobs(db, ctx, { where: and(base, inArray(jobs.id, [...new Set(revs.map((r) => r.jobId))])) });
+
       const byId = new Map(raws.map((r) => [r.job.id, r]));
       for (const r of revs) {
         const raw = byId.get(r.jobId);

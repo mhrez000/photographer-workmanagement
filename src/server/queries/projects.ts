@@ -8,13 +8,13 @@
  */
 import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
-import type { DbLike } from "@/db/index";
+import { first, type DbLike } from "@/db/index";
 import { clients, jobs, projects } from "@/db/schema";
 import type { AuthContext, ProjectDetail, ProjectListItem } from "@/lib/types";
 import { assertCan, can, isManagement, visibleJobsWhere } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
 import { loadProjectInOrg, parseInput, userRef } from "@/server/services/_shared";
-import { EMPTY_COUNTS, jobCountsBy, loadUserRefs } from "./metrics";
+import { binaryAsc, EMPTY_COUNTS, jobCountsBy, loadUserRefs } from "./metrics";
 import { likeSql, selectJobRows } from "./scope";
 
 export const DETAIL_JOB_LIMIT = 200;
@@ -51,7 +51,7 @@ const PROJECT_FIELDS = {
 };
 
 /** `GET /api/projects?clientId&q&includeArchived` (project.view). */
-export function listProjects(db: DbLike, ctx: AuthContext, input: unknown = {}): ProjectListItem[] {
+export async function listProjects(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<ProjectListItem[]> {
   assertCan(ctx, "project.view");
   const f = parseInput(ProjectListFiltersSchema, input ?? {});
   const parts: (SQL | undefined)[] = [eq(projects.organisationId, ctx.organisationId)];
@@ -59,14 +59,13 @@ export function listProjects(db: DbLike, ctx: AuthContext, input: unknown = {}):
   if (f.clientId) parts.push(eq(projects.clientId, f.clientId));
   if (f.q) parts.push(or(likeSql(projects.name, f.q), likeSql(projects.address, f.q), likeSql(clients.name, f.q)));
   if (ctx.role === "editor") parts.push(hasVisibleJobSql(ctx, "projectId", projects.id));
-  const rows = db
+  const rows = await db
     .select(PROJECT_FIELDS)
     .from(projects)
     .innerJoin(clients, eq(clients.id, projects.clientId))
     .where(and(...parts))
-    .orderBy(asc(projects.name), asc(projects.id))
-    .all();
-  const counts = jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible" });
+    .orderBy(binaryAsc(projects.name), asc(projects.id));
+  const counts = await jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible" });
   return rows.map((r) => toItem(r, counts.get(r.id)));
 }
 
@@ -78,19 +77,20 @@ function toItem(row: ProjectSelectRow, counts = EMPTY_COUNTS): ProjectListItem {
 }
 
 /** `GET /api/projects/:id` → ProjectDetail with the visible jobs table. Foreign / not visible → 404. */
-export function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: string): ProjectDetail {
-  const project = loadProjectInOrg(db, ctx, projectId);
+export async function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: string): Promise<ProjectDetail> {
+  const project = await loadProjectInOrg(db, ctx, projectId);
   const hasVisibleJob =
     ctx.role === "editor"
-      ? db.select({ one: sql<number>`1` }).from(jobs).where(and(eq(jobs.projectId, project.id), visibleJobsWhere(ctx))).limit(1).get() !== undefined
+      ? (await first(db.select({ one: sql<number>`1` }).from(jobs).where(and(eq(jobs.projectId, project.id), visibleJobsWhere(ctx))).limit(1))) !== undefined
       : undefined;
   if (!can(ctx, "project.view", { organisationId: project.organisationId, createdByUserId: project.createdByUserId ?? undefined, hasVisibleJob })) {
     if (ctx.role === "editor") throw new NotFoundError("Project");
     assertCan(ctx, "project.view");
   }
-  const client = db.select({ id: clients.id, name: clients.name }).from(clients).where(eq(clients.id, project.clientId)).get();
-  const counts = jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible", where: eq(jobs.projectId, project.id) });
-  const createdBy = project.createdByUserId ? (loadUserRefs(db, ctx, [project.createdByUserId]).get(project.createdByUserId) ?? null) : null;
+  const client = await first(db.select({ id: clients.id, name: clients.name }).from(clients).where(eq(clients.id, project.clientId)));
+  const counts = await jobCountsBy(db, ctx, "projectId", { scope: isManagement(ctx) ? "org" : "visible", where: eq(jobs.projectId, project.id) });
+  const createdBy = project.createdByUserId ? ((await loadUserRefs(db, ctx, [project.createdByUserId])).get(project.createdByUserId) ?? null) : null;
+  const jobRows = await selectJobRows(db, ctx, { where: eq(jobs.projectId, project.id), limit: DETAIL_JOB_LIMIT });
   return {
     project: {
       id: project.id,
@@ -108,6 +108,6 @@ export function getProjectDetail(db: DbLike, ctx: AuthContext, projectId: string
     counts: { ...(counts.get(project.id) ?? EMPTY_COUNTS) },
     description: project.description,
     createdBy: createdBy ? userRef(createdBy) : null,
-    jobs: selectJobRows(db, ctx, { where: eq(jobs.projectId, project.id), limit: DETAIL_JOB_LIMIT }),
+    jobs: jobRows,
   };
 }

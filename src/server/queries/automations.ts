@@ -18,7 +18,7 @@ import {
 } from "@/lib/validation/json";
 import { assertCan, can } from "@/server/auth/permissions";
 import { loadAutomationInOrg, parseInput } from "@/server/services/_shared";
-import { loadUserRefs } from "./metrics";
+import { binaryAsc, loadUserRefs } from "./metrics";
 
 export const RUNS_DEFAULT_LIMIT = 50;
 export const RUNS_MAX_LIMIT = 200;
@@ -36,8 +36,8 @@ export const AutomationRunFiltersSchema = z.object({
 
 const emptyCounts = (): AutomationRunCounts => ({ total: 0, pending: 0, matched: 0, skipped: 0, succeeded: 0, failed: 0 });
 
-function runStats(db: DbLike, ctx: AuthContext, automationId?: string): Map<string, { counts: AutomationRunCounts; lastRunAt: string | null }> {
-  const rows = db
+async function runStats(db: DbLike, ctx: AuthContext, automationId?: string): Promise<Map<string, { counts: AutomationRunCounts; lastRunAt: string | null }>> {
+  const rows = await db
     .select({
       automationId: automationRuns.automationId,
       status: automationRuns.status,
@@ -46,8 +46,7 @@ function runStats(db: DbLike, ctx: AuthContext, automationId?: string): Map<stri
     })
     .from(automationRuns)
     .where(and(eq(automationRuns.organisationId, ctx.organisationId), automationId ? eq(automationRuns.automationId, automationId) : undefined))
-    .groupBy(automationRuns.automationId, automationRuns.status)
-    .all();
+    .groupBy(automationRuns.automationId, automationRuns.status);
   const out = new Map<string, { counts: AutomationRunCounts; lastRunAt: string | null }>();
   for (const r of rows) {
     const cur = out.get(r.automationId) ?? { counts: emptyCounts(), lastRunAt: null };
@@ -82,16 +81,15 @@ function toItem(a: Automation, stats: { counts: AutomationRunCounts; lastRunAt: 
 }
 
 /** `GET /api/automations?includeArchived` (automation.manage). */
-export function listAutomations(db: DbLike, ctx: AuthContext, opts: { includeArchived?: boolean } = {}): AutomationListItem[] {
+export async function listAutomations(db: DbLike, ctx: AuthContext, opts: { includeArchived?: boolean } = {}): Promise<AutomationListItem[]> {
   assertCan(ctx, "automation.manage");
-  const rows = db
+  const rows = await db
     .select()
     .from(automations)
     .where(and(eq(automations.organisationId, ctx.organisationId), opts.includeArchived ? undefined : isNull(automations.archivedAt)))
-    .orderBy(asc(automations.sortOrder), asc(automations.name))
-    .all();
-  const stats = runStats(db, ctx);
-  const creators = loadUserRefs(
+    .orderBy(asc(automations.sortOrder), binaryAsc(automations.name), asc(automations.id));
+  const stats = await runStats(db, ctx);
+  const creators = await loadUserRefs(
     db,
     ctx,
     rows.map((r) => r.createdByUserId),
@@ -100,12 +98,12 @@ export function listAutomations(db: DbLike, ctx: AuthContext, opts: { includeArc
 }
 
 /** `GET /api/automations/:id` with the latest runs (automation.manage). Foreign ids → 404. */
-export function getAutomationDetail(db: DbLike, ctx: AuthContext, automationId: string): AutomationDetail {
+export async function getAutomationDetail(db: DbLike, ctx: AuthContext, automationId: string): Promise<AutomationDetail> {
   assertCan(ctx, "automation.manage");
-  const a = loadAutomationInOrg(db, ctx, automationId);
-  const creator = loadUserRefs(db, ctx, [a.createdByUserId]).get(a.createdByUserId) ?? null;
-  const item = toItem(a, runStats(db, ctx, a.id).get(a.id), creator);
-  const recentRuns = can(ctx, "automation.view_runs") ? listAutomationRuns(db, ctx, { automationId: a.id, limit: DETAIL_RUNS }).items : [];
+  const a = await loadAutomationInOrg(db, ctx, automationId);
+  const creator = (await loadUserRefs(db, ctx, [a.createdByUserId])).get(a.createdByUserId) ?? null;
+  const item = toItem(a, (await runStats(db, ctx, a.id)).get(a.id), creator);
+  const recentRuns = can(ctx, "automation.view_runs") ? (await listAutomationRuns(db, ctx, { automationId: a.id, limit: DETAIL_RUNS })).items : [];
   return { ...item, recentRuns };
 }
 
@@ -129,7 +127,7 @@ function decodeCursor(cursor: string | undefined): { createdAt: string; id: stri
  * `GET /api/automations/:id/runs` (automation.view_runs). Newest first,
  * keyset cursor over (created_at, id).
  */
-export function listAutomationRuns(db: DbLike, ctx: AuthContext, input: unknown = {}): Paginated<AutomationRunView> {
+export async function listAutomationRuns(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<Paginated<AutomationRunView>> {
   assertCan(ctx, "automation.view_runs");
   const f = parseInput(AutomationRunFiltersSchema, input ?? {});
   const limit = f.limit ?? RUNS_DEFAULT_LIMIT;
@@ -141,7 +139,7 @@ export function listAutomationRuns(db: DbLike, ctx: AuthContext, input: unknown 
   if (cursor) {
     parts.push(or(lt(automationRuns.createdAt, cursor.createdAt), and(eq(automationRuns.createdAt, cursor.createdAt), lt(automationRuns.id, cursor.id))));
   }
-  const rows = db
+  const rows = await db
     .select({
       run: automationRuns,
       automation: { id: automations.id, name: automations.name },
@@ -154,8 +152,7 @@ export function listAutomationRuns(db: DbLike, ctx: AuthContext, input: unknown 
     .leftJoin(activityEvents, eq(activityEvents.id, automationRuns.triggerEventId))
     .where(and(...parts))
     .orderBy(desc(automationRuns.createdAt), desc(automationRuns.id))
-    .limit(limit + 1)
-    .all();
+    .limit(limit + 1);
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];

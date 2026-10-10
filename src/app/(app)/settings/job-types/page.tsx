@@ -13,11 +13,11 @@ export default async function JobTypesSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "job_type.manage");
   const canManage = allowed(ctx, "job_type.manage");
-  const jobTypes = load(() => listJobTypes(db, ctx, { includeArchived: true }));
-  const workflows = load(() => listWorkflows(db, ctx))
+  const jobTypes = await load(() => listJobTypes(db, ctx, { includeArchived: true }));
+  const workflows = (await load(() => listWorkflows(db, ctx)))
     .filter((w) => w.archivedAt === null)
     .map((w) => ({ id: w.id, name: w.name, isDefault: w.isDefault }));
-  const settings = load(() => getSettingsView(db, ctx)).settings;
+  const settings = (await load(() => getSettingsView(db, ctx))).settings;
 
   return (
     <PageContainer width="narrow">

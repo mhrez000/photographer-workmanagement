@@ -75,7 +75,7 @@ function WorkflowRow({ w }: { w: WorkflowListItem }) {
 export default async function WorkflowsSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "workflow.view");
-  const workflows = load(() => listWorkflows(db, ctx));
+  const workflows = await load(() => listWorkflows(db, ctx));
   const canManage = allowed(ctx, "workflow.manage");
   const live = workflows.filter((w) => w.archivedAt === null);
   const archived = workflows.filter((w) => w.archivedAt !== null);

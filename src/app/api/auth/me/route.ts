@@ -22,7 +22,7 @@ export const GET = handle(async () => {
     },
     organisation: { id: viewer.organisationId, name: viewer.organisationName, timezone: ctx.settings.timezone },
     settings: ctx.settings,
-    unreadCount: unreadCount(ctx),
+    unreadCount: await unreadCount(ctx),
   };
 });
 

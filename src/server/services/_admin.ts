@@ -69,3 +69,23 @@ export function slugify(name: string): string {
     .slice(0, 48);
   return /^[a-z]/.test(slug) ? slug : `s_${slug || "status"}`.slice(0, 48);
 }
+
+/**
+ * Structural JSON equality that ignores object key order. jsonb columns
+ * normalise key order on write, so `JSON.stringify(stored) === JSON.stringify(input)`
+ * would report a change for an identical value read back from Postgres.
+ */
+export function jsonEqual(a: unknown, b: unknown): boolean {
+  return canonicalJson(a) === canonicalJson(b);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}

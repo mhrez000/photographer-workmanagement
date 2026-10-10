@@ -10,8 +10,12 @@
  * deactivated at the right moment, one running timer per user, automations
  * and sweeps see the world as it was) and guarantees no ledger row is ever
  * dated before its predecessor.
+ *
+ * Everything is async (Postgres): steps are awaited strictly one after
+ * another, so the PRNG is consumed in the same order on every run.
  */
 import type { Db } from "@/db/index";
+import { rootErrorMessage } from "@/db/errors";
 import type { AuthContext } from "@/lib/types";
 import { AppError } from "@/server/errors";
 import { setClock } from "@/server/clock";
@@ -28,7 +32,7 @@ interface QueuedStep {
   at: number;
   seq: number;
   label: string;
-  run: () => void;
+  run: () => Promise<void> | void;
 }
 
 export class SeedRuntime {
@@ -76,35 +80,36 @@ export class SeedRuntime {
     return id;
   }
 
-  /** Fresh AuthContext for a real user (clock-driven `now`, cause "seed"). */
-  ctxFor(userId: string): AuthContext {
-    const ctx = buildContextFromDb(this.db, userId, { cause: "seed", requestId: `seed-${String(++this.requestSeq).padStart(6, "0")}` });
+  /** Fresh AuthContext for a real user (clock-driven `now`, cause "seed"). Built on the root db: call it OUTSIDE transactions. */
+  async ctxFor(userId: string): Promise<AuthContext> {
+    const ctx = await buildContextFromDb(this.db, userId, { cause: "seed", requestId: `seed-${String(++this.requestSeq).padStart(6, "0")}` });
     if (!ctx) throw new Error(`seed: user ${userId} is missing or inactive`);
     return ctx;
   }
 
-  isActive(userId: string): boolean {
-    return buildContextFromDb(this.db, userId) !== null;
+  async isActive(userId: string): Promise<boolean> {
+    return (await buildContextFromDb(this.db, userId)) !== null;
   }
 
   /**
-   * Runs `fn` as `userId` in one IMMEDIATE transaction, then drains the
-   * organisation's pending automation runs (post-commit, like route handlers).
+   * Runs `fn` as `userId` in one transaction, then drains the organisation's
+   * pending automation runs (post-commit, like route handlers). `fn` must use
+   * the `tx` only: read anything it needs from `rt.db` BEFORE calling act().
    */
-  act<T>(userId: string, fn: (tx: Tx, ctx: AuthContext) => T): T {
-    const ctx = this.ctxFor(userId);
-    const result = withTx((tx) => fn(tx, ctx), { db: this.db });
-    this.drain(ctx.organisationId);
+  async act<T>(userId: string, fn: (tx: Tx, ctx: AuthContext) => Promise<T> | T): Promise<T> {
+    const ctx = await this.ctxFor(userId);
+    const result = await withTx((tx) => fn(tx, ctx), { db: this.db });
+    await this.drain(ctx.organisationId);
     return result;
   }
 
-  drain(organisationId: string): void {
-    runPendingAutomations(this.db, organisationId);
+  async drain(organisationId: string): Promise<void> {
+    await runPendingAutomations(this.db, organisationId);
   }
 
   /* ----------------------------- queue ----------------------------- */
 
-  schedule(at: number, label: string, run: () => void): void {
+  schedule(at: number, label: string, run: () => Promise<void> | void): void {
     this.queue.push({ at: Math.round(at), seq: this.seq++, label, run });
   }
 
@@ -113,16 +118,16 @@ export class SeedRuntime {
   }
 
   /** Executes every queued step in (time, insertion) order. Throws on the first failure. */
-  runQueue(): void {
+  async runQueue(): Promise<void> {
     const steps = this.queue.splice(0).sort((a, b) => a.at - b.at || a.seq - b.seq);
     const started = Date.now();
-    steps.forEach((step, i) => {
+    for (const [i, step] of steps.entries()) {
       if (i > 0 && i % 500 === 0) this.log(`seed: ${i}/${steps.length} steps (${this.iso(step.at).slice(0, 10)}) ${((Date.now() - started) / 1000).toFixed(1)}s`);
       if (step.at > this.nowMs) throw new Error(`seed: step "${step.label}" is scheduled in the future (${this.iso(step.at)})`);
       this.setTime(step.at);
       const t = Date.now();
       try {
-        step.run();
+        await step.run();
         this.stepsRun += 1;
         const parts = step.label.split(" ");
         const key = (step.label.startsWith("#") ? parts[2] : parts[0]) ?? "?";
@@ -133,7 +138,7 @@ export class SeedRuntime {
       } catch (err) {
         throw new Error(`seed step "${step.label}" at ${this.iso(step.at)} failed: ${describeError(err)}`, { cause: err });
       }
-    });
+    }
   }
 
   skip(reason: string): void {
@@ -146,5 +151,5 @@ export function describeError(err: unknown): string {
     const details = err.details;
     return `${err.name} ${err.status} ${err.code}: ${err.message}${details ? ` ${JSON.stringify(details)}` : ""}`;
   }
-  return err instanceof Error ? err.message : String(err);
+  return rootErrorMessage(err);
 }

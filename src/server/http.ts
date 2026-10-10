@@ -3,7 +3,8 @@
  *
  *   export const POST = handle(async (req) => {
  *     const ctx = await requireContext();
- *     return withTx((tx) => service(tx, ctx, await bodyOrNull(req)));   // → { data }
+ *     const body = await bodyOrNull(req);
+ *     return withTx((tx) => service(tx, ctx, body));   // async service → { data }
  *   });
  *
  * - success: a returned `Response` passes through; anything else → `{ data }` 200

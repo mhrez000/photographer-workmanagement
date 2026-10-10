@@ -6,7 +6,7 @@ export default async function Layout({ children, params }: LayoutProps<"/setting
   const { id } = await params;
   if (id !== "new") {
     const { ctx, db } = await pageContext();
-    load(() => getAutomationDetail(db, ctx, decodeURIComponent(id)));
+    await load(() => getAutomationDetail(db, ctx, decodeURIComponent(id)));
   }
   return children;
 }

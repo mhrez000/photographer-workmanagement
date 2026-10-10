@@ -36,10 +36,10 @@ export default async function CalendarPage({ searchParams }: PageProps<"/workspa
   const colourMode = normaliseColourMode(param(sp, "colour"));
   const kindParam = params(sp, "kinds").filter((k): k is CalendarEventKind => (EVENT_KINDS as string[]).includes(k));
   const kinds = kindParam.length > 0 ? kindParam : EVENT_KINDS;
-  const weekStartsOn = normaliseWeekStart(load(() => loadOrgSettingsRow(db, ctx))?.weekStartsOn);
+  const weekStartsOn = normaliseWeekStart((await load(() => loadOrgSettingsRow(db, ctx)))?.weekStartsOn);
   const range = viewRange(view, date, weekStartsOn);
 
-  const events = load(() =>
+  const events = await load(() =>
     getCalendarEvents(db, ctx, {
       from: range.from,
       to: range.to,

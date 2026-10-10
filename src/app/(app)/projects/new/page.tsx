@@ -15,7 +15,7 @@ export default async function NewProjectPage({ searchParams }: PageProps<"/proje
   const { ctx, db } = await pageContext();
   guard(ctx, "project.create");
   const sp = await searchParams;
-  const clients = load(() => getClientOptions(db, ctx));
+  const clients = await load(() => getClientOptions(db, ctx));
   const defaultClientId = param(sp, "clientId");
   const canCreateClient = allowed(ctx, "client.create");
   const client = defaultClientId ? clients.find((c) => c.id === defaultClientId) : undefined;

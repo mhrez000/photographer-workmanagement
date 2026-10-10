@@ -8,35 +8,33 @@ import { getKanbanBoard, previewKanbanDrop } from "./kanban";
 let db: TestDb;
 let ids: SeedIds;
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  db = makeTestDb();
-  ids = seedMinimalOrg(db);
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db);
 });
-afterEach(() => fakeClock.reset());
+afterEach(async () => fakeClock.reset());
 
-const ctxOf = (key: keyof SeedIds["users"]) => contextFor(db, ids.users[key]);
-const job = (opts: JobFixtureOptions) => insertJobFixture(db, ids, opts).job;
+const ctxOf = async (key: keyof SeedIds["users"]) => await contextFor(db, ids.users[key]);
+const job = async (opts: JobFixtureOptions) => (await insertJobFixture(db, ids, opts)).job;
 
-function card(key: keyof SeedIds["users"], jobId: string): KanbanCard | undefined {
-  return getKanbanBoard(db, ctxOf(key))
-    .columns.flatMap((c) => c.cards)
-    .find((c) => c.id === jobId);
+async function card(key: keyof SeedIds["users"], jobId: string): Promise<KanbanCard | undefined> {
+  return (await getKanbanBoard(db, await ctxOf(key))).columns.flatMap((c) => c.cards).find((c) => c.id === jobId);
 }
 
 describe("getKanbanBoard", () => {
-  it("places cards in the column of their category and counts them", () => {
-    job({ statusKey: "new" });
-    job({ statusKey: "ready" });
-    job({ statusKey: "accepted" });
-    job({ statusKey: "in_progress" });
-    job({ statusKey: "submitted" });
-    job({ statusKey: "resubmitted" });
-    job({ statusKey: "revision" });
-    job({ statusKey: "delivered" });
-    job({ statusKey: "completed" });
-    job({ statusKey: "cancelled" });
-    const board = getKanbanBoard(db, ctxOf("owner"));
+  it("places cards in the column of their category and counts them", async () => {
+    await job({ statusKey: "new" });
+    await job({ statusKey: "ready" });
+    await job({ statusKey: "accepted" });
+    await job({ statusKey: "in_progress" });
+    await job({ statusKey: "submitted" });
+    await job({ statusKey: "resubmitted" });
+    await job({ statusKey: "revision" });
+    await job({ statusKey: "delivered" });
+    await job({ statusKey: "completed" });
+    await job({ statusKey: "cancelled" });
+    const board = await getKanbanBoard(db, await ctxOf("owner"));
     expect(board.columns.map((c) => c.column)).toEqual([...KANBAN_COLUMNS]);
     expect(Object.fromEntries(board.columns.map((c) => [c.column, c.count]))).toEqual({
       new: 2,
@@ -48,59 +46,59 @@ describe("getKanbanBoard", () => {
       completed: 1,
     });
     expect(board.cancelled).toBeNull();
-    const withCancelled = getKanbanBoard(db, ctxOf("owner"), { includeCancelled: "1" });
+    const withCancelled = await getKanbanBoard(db, await ctxOf("owner"), { includeCancelled: "1" });
     expect(withCancelled.cancelled?.count).toBe(1);
     expect(withCancelled.cancelled?.cards[0].allowedColumns).toEqual(["new"]); // restore → initial status
   });
 
-  it("computes allowedColumns per actor from the workflow edges", () => {
-    const inProgress = job({ statusKey: "in_progress", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
-    const submitted = job({ statusKey: "submitted", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
-    const fresh = job({ statusKey: "new", editorId: null, photographerId: ids.users.photographer1 });
-    const completed = job({ statusKey: "completed", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+  it("computes allowedColumns per actor from the workflow edges", async () => {
+    const inProgress = await job({ statusKey: "in_progress", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const submitted = await job({ statusKey: "submitted", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const fresh = await job({ statusKey: "new", editorId: null, photographerId: ids.users.photographer1 });
+    const completed = await job({ statusKey: "completed", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
 
-    expect(card("editor1", inProgress.id)?.allowedColumns).toEqual(["review"]);
-    expect(card("manager", inProgress.id)?.allowedColumns).toEqual(["review"]);
-    expect(card("photographer1", inProgress.id)?.allowedColumns).toEqual([]);
+    expect((await card("editor1", inProgress.id))?.allowedColumns).toEqual(["review"]);
+    expect((await card("manager", inProgress.id))?.allowedColumns).toEqual(["review"]);
+    expect((await card("photographer1", inProgress.id))?.allowedColumns).toEqual([]);
 
-    expect(card("photographer1", submitted.id)?.allowedColumns).toEqual(["revision", "approved"]);
-    expect(card("editor1", submitted.id)?.allowedColumns).toEqual([]);
+    expect((await card("photographer1", submitted.id))?.allowedColumns).toEqual(["revision", "approved"]);
+    expect((await card("editor1", submitted.id))?.allowedColumns).toEqual([]);
 
     // new → assigned only happens through assignment (engine-internal), new → ready stays in the column.
-    expect(card("photographer1", fresh.id)?.allowedColumns).toEqual([]);
+    expect((await card("photographer1", fresh.id))?.allowedColumns).toEqual([]);
 
-    expect(card("photographer1", completed.id)?.allowedColumns).toEqual(["in_progress", "revision", "approved"]);
-    expect(card("editor1", completed.id)?.allowedColumns).toEqual([]);
+    expect((await card("photographer1", completed.id))?.allowedColumns).toEqual(["in_progress", "revision", "approved"]);
+    expect((await card("editor1", completed.id))?.allowedColumns).toEqual([]);
   });
 
-  it("is row-scoped by visibility and never shows another organisation's jobs", () => {
-    const mine = job({ statusKey: "in_progress", editorId: ids.users.editor1 });
-    job({ statusKey: "in_progress", editorId: ids.users.editor2, photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer2 });
-    const other = seedMinimalOrg(db, { slug: "other" });
-    insertJobFixture(db, other, { statusKey: "in_progress" });
-    const editorBoard = getKanbanBoard(db, ctxOf("editor1"));
+  it("is row-scoped by visibility and never shows another organisation's jobs", async () => {
+    const mine = await job({ statusKey: "in_progress", editorId: ids.users.editor1 });
+    await job({ statusKey: "in_progress", editorId: ids.users.editor2, photographerId: ids.users.photographer2, createdByUserId: ids.users.photographer2 });
+    const other = await seedMinimalOrg(db, { slug: "other" });
+    await insertJobFixture(db, other, { statusKey: "in_progress" });
+    const editorBoard = await getKanbanBoard(db, await ctxOf("editor1"));
     expect(editorBoard.columns.flatMap((c) => c.cards).map((c) => c.id)).toEqual([mine.id]);
-    expect(getKanbanBoard(db, ctxOf("owner")).columns.find((c) => c.column === "in_progress")?.count).toBe(2);
+    expect((await getKanbanBoard(db, await ctxOf("owner"))).columns.find((c) => c.column === "in_progress")?.count).toBe(2);
   });
 
-  it("honours filters and the per-column limit", () => {
-    job({ statusKey: "in_progress", priority: "urgent" });
-    job({ statusKey: "in_progress", priority: "low" });
-    job({ statusKey: "in_progress", priority: "high" });
-    const col = getKanbanBoard(db, ctxOf("owner"), { perColumnLimit: 2 }).columns.find((c) => c.column === "in_progress");
+  it("honours filters and the per-column limit", async () => {
+    await job({ statusKey: "in_progress", priority: "urgent" });
+    await job({ statusKey: "in_progress", priority: "low" });
+    await job({ statusKey: "in_progress", priority: "high" });
+    const col = (await getKanbanBoard(db, await ctxOf("owner"), { perColumnLimit: 2 })).columns.find((c) => c.column === "in_progress");
     expect(col?.count).toBe(3);
     expect(col?.cards.map((c) => c.priority)).toEqual(["urgent", "high"]);
-    const filtered = getKanbanBoard(db, ctxOf("owner"), { priority: "low" }).columns.find((c) => c.column === "in_progress");
+    const filtered = (await getKanbanBoard(db, await ctxOf("owner"), { priority: "low" })).columns.find((c) => c.column === "in_progress");
     expect(filtered?.cards.map((c) => c.priority)).toEqual(["low"]);
   });
 });
 
 describe("previewKanbanDrop", () => {
-  it("mirrors resolveKanbanDrop for the actor and 404s on invisible jobs", () => {
-    const j = job({ statusKey: "in_progress", editorId: ids.users.editor1 });
-    expect(previewKanbanDrop(db, ctxOf("editor1"), j.id, "review")).toMatchObject({ kind: "single", toStatus: { key: "submitted" } });
-    expect(previewKanbanDrop(db, ctxOf("editor1"), j.id, "in_progress")).toEqual({ kind: "noop" });
-    expect(previewKanbanDrop(db, ctxOf("editor1"), j.id, "completed").kind).toBe("none");
-    expect(() => previewKanbanDrop(db, ctxOf("editor2"), j.id, "review")).toThrow(NotFoundError);
+  it("mirrors resolveKanbanDrop for the actor and 404s on invisible jobs", async () => {
+    const j = await job({ statusKey: "in_progress", editorId: ids.users.editor1 });
+    expect(await previewKanbanDrop(db, await ctxOf("editor1"), j.id, "review")).toMatchObject({ kind: "single", toStatus: { key: "submitted" } });
+    expect(await previewKanbanDrop(db, await ctxOf("editor1"), j.id, "in_progress")).toEqual({ kind: "noop" });
+    expect((await previewKanbanDrop(db, await ctxOf("editor1"), j.id, "completed")).kind).toBe("none");
+    await expect(previewKanbanDrop(db, await ctxOf("editor2"), j.id, "review")).rejects.toThrow(NotFoundError);
   });
 });

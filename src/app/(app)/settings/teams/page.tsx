@@ -18,8 +18,9 @@ export default async function TeamsSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "settings.view");
   const canManage = allowed(ctx, "team.manage");
-  const teams = load(() => listTeams(db, ctx, { includeArchived: canManage ? "1" : undefined })).map((t) => load(() => getTeamDetail(db, ctx, t.id)));
-  const people = load(() => listUsers(db, ctx, { active: "1" })).map(toRef);
+  const list = await load(() => listTeams(db, ctx, { includeArchived: canManage ? "1" : undefined }));
+  const teams = await Promise.all(list.map((t) => load(() => getTeamDetail(db, ctx, t.id))));
+  const people = (await load(() => listUsers(db, ctx, { active: "1" }))).map(toRef);
   const activeCount = teams.filter((t) => t.archivedAt === null).length;
 
   return (

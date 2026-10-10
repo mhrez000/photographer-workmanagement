@@ -58,17 +58,17 @@ export default async function ManageUserPage({ params }: PageProps<"/settings/us
   guard(ctx, "settings.view");
   const { id } = await params;
   const tz = ctx.settings.timezone;
-  const detail = load(() => getUserDetail(db, ctx, id));
+  const detail = await load(() => getUserDetail(db, ctx, id));
   const profile = detail.profile;
   if (!profile) return null; // management always gets the profile; defensive.
-  const settings = load(() => getSettingsView(db, ctx)).settings;
+  const settings = (await load(() => getSettingsView(db, ctx))).settings;
   const isSelf = profile.id === ctx.userId;
 
   const active = [...CATEGORY_GROUPS.ACTIVE];
-  const editorJobs = profile.role === "editor" ? listJobs(db, ctx, { editorId: [profile.id], statusCategory: active, limit: 200 }).rows : [];
+  const editorJobs = profile.role === "editor" ? (await listJobs(db, ctx, { editorId: [profile.id], statusCategory: active, limit: 200 })).rows : [];
   const photographerJobs =
-    profile.role !== "editor" ? listJobs(db, ctx, { photographerId: [profile.id], statusCategory: active, limit: 200 }).rows : [];
-  const activity = allowed(ctx, "activity.view_global") ? listActivity(db, ctx, { userId: profile.id, limit: 12 }).items : [];
+    profile.role !== "editor" ? (await listJobs(db, ctx, { photographerId: [profile.id], statusCategory: active, limit: 200 })).rows : [];
+  const activity = allowed(ctx, "activity.view_global") ? (await listActivity(db, ctx, { userId: profile.id, limit: 12 })).items : [];
   const workload = detail.workload;
 
   return (

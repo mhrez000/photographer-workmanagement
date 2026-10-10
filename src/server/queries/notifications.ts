@@ -30,7 +30,7 @@ export const NotificationListSchema = z.object({
 });
 export type NotificationListInput = z.input<typeof NotificationListSchema>;
 
-export function listNotifications(db: DbLike, ctx: AuthContext, input: unknown = {}): Paginated<NotificationView> {
+export async function listNotifications(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<Paginated<NotificationView>> {
   const f = parseInput(NotificationListSchema, input ?? {});
   if (!ctx.userId) return { items: [], nextCursor: null, total: 0 };
   const limit = f.limit ?? NOTIFICATIONS_DEFAULT_LIMIT;
@@ -40,7 +40,7 @@ export function listNotifications(db: DbLike, ctx: AuthContext, input: unknown =
   if (cursor) {
     parts.push(or(lt(notifications.createdAt, cursor.createdAt), and(eq(notifications.createdAt, cursor.createdAt), lt(notifications.id, cursor.id))));
   }
-  const rows = db
+  const rows = await db
     .select({
       n: notifications,
       job: { id: jobs.id, jobNumber: jobs.jobNumber, name: jobs.name },
@@ -51,8 +51,7 @@ export function listNotifications(db: DbLike, ctx: AuthContext, input: unknown =
     .leftJoin(users, eq(users.id, notifications.actorUserId))
     .where(and(...parts))
     .orderBy(desc(notifications.createdAt), desc(notifications.id))
-    .limit(limit + 1)
-    .all();
+    .limit(limit + 1);
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
@@ -75,6 +74,7 @@ export function listNotifications(db: DbLike, ctx: AuthContext, input: unknown =
 }
 
 /** Unread badge count for the actor (delegates to the notifications service). */
-export function unreadCount(db: DbLike, ctx: AuthContext): number {
+export async function unreadCount(db: DbLike, ctx: AuthContext): Promise<number> {
   return serviceUnreadCount(ctx, db);
 }
+

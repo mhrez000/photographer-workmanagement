@@ -42,7 +42,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const isManagement = ctx.role === "owner" || ctx.role === "manager";
 
   const weeks = normaliseWindow(param(sp, "weeks"));
-  const rawWeekStart = load(() => loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1;
+  const rawWeekStart = (await load(() => loadOrgSettingsRow(db, ctx)))?.weekStartsOn ?? 1;
   const weekStartsOn = (rawWeekStart >= 0 && rawWeekStart <= 6 ? rawWeekStart : 1) as WeekStart;
   const defaultFrom = defaultWindowStart(today, weeks, weekStartsOn);
   const fromParam = param(sp, "from");
@@ -63,7 +63,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
   const photographerIds = params(sp, "photographerId");
   // Unknown priority values in a hand-edited link are ignored rather than failing the page.
   const priorities = params(sp, "priority").filter((p): p is Priority => (PRIORITIES as readonly string[]).includes(p));
-  const all = load(() =>
+  const all = await load(() =>
     getTimelineRows(db, ctx, {
       from,
       to,
@@ -74,7 +74,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
       priority: priorities,
     }),
   );
-  const baselines = load(() => orgCategoryBaselines(db, ctx));
+  const baselines = await load(() => orgCategoryBaselines(db, ctx));
 
   // Role scope (page map: "managers; P own; E assigned").
   const me = ctx.userId;

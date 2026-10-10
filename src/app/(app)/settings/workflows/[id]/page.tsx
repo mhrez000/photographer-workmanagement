@@ -13,11 +13,11 @@ export default async function WorkflowDetailPage({ params }: PageProps<"/setting
   const { ctx, db } = await pageContext();
   guard(ctx, "workflow.view");
   const { id } = await params;
-  const graph = load(() => getWorkflowGraph(db, ctx, id));
+  const graph = await load(() => getWorkflowGraph(db, ctx, id));
   const canManage = allowed(ctx, "workflow.manage");
   const w = graph.workflow;
   const sources = canManage
-    ? listWorkflows(db, ctx)
+    ? (await listWorkflows(db, ctx))
         .filter((x) => x.archivedAt === null)
         .map((x) => ({ id: x.id, name: x.name, isDefault: x.isDefault }))
     : [];

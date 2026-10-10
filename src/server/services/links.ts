@@ -19,7 +19,7 @@
  * finished files" / "no delivery link" warnings (§4.3 step 5).
  */
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
-import type { DbLike, Tx } from "@/db/index";
+import { first, one, type DbLike, type Tx } from "@/db/index";
 import { jobLinks } from "@/db/schema";
 import { LINK_KINDS, LINK_KIND_META, type LinkKind, type StatusCategory } from "@/lib/constants";
 import type { AuthContext, JobLink, JobPermissionRef, LinkSlot, LinkView } from "@/lib/types";
@@ -36,17 +36,30 @@ function isCurrent(link: Pick<JobLink, "supersededAt" | "removedAt">): boolean {
   return link.supersededAt === null && link.removedAt === null;
 }
 
-function assertCurrent(tx: Tx, ctx: AuthContext, link: JobLink): void {
+async function assertCurrent(tx: Tx, ctx: AuthContext, link: JobLink): Promise<void> {
   if (!isCurrent(link)) {
     throw new ConflictError(
       link.removedAt ? "This link was removed. Reload and try again." : "This link was already replaced. Reload and try again.",
-      loadLinkInOrg(tx, ctx, link.id),
+      await loadLinkInOrg(tx, ctx, link.id),
     );
   }
 }
 
-function setActivityEventId(tx: Tx, linkId: string, eventId: string): void {
-  tx.update(jobLinks).set({ activityEventId: eventId }).where(and(eq(jobLinks.id, linkId), isNull(jobLinks.activityEventId))).run();
+async function setActivityEventId(tx: Tx, linkId: string, eventId: string): Promise<void> {
+  await tx.update(jobLinks).set({ activityEventId: eventId }).where(and(eq(jobLinks.id, linkId), isNull(jobLinks.activityEventId)));
+}
+
+/** Fills the old row's fill-once supersession columns; 409 when it is no longer current. */
+async function supersede(tx: Tx, ctx: AuthContext, oldId: string, at: string, newLinkId: string): Promise<JobLink> {
+  const previous = await first(
+    tx
+      .update(jobLinks)
+      .set({ supersededAt: at, supersededByLinkId: newLinkId })
+      .where(and(eq(jobLinks.id, oldId), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
+      .returning(),
+  );
+  if (!previous) throw new ConflictError("This link was changed by someone else. Reload and try again.", await loadLinkInOrg(tx, ctx, oldId));
+  return previous;
 }
 
 /* ------------------------------------------------------------------ */
@@ -58,28 +71,30 @@ function setActivityEventId(tx: Tx, linkId: string, eventId: string): void {
  * kind; photographers on own jobs (any kind); editors on assigned jobs,
  * kinds in EDITOR_LINK_KINDS.
  */
-export function addLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
+export async function addLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobLink> {
   const data = parseInput(AddLinkInput, input);
-  const { job, ref } = loadJobWithRef(tx, ctx, data.jobId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, data.jobId);
   assertCan(ctx, "link.add", { job: ref, kind: data.kind });
   const addedByUserId = requireActor(ctx);
 
-  const link = tx
-    .insert(jobLinks)
-    .values({
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      kind: data.kind,
-      url: data.url,
-      label: data.label ?? null,
-      provider: deriveLinkProvider(data.url),
-      addedByUserId,
-      createdAt: ctx.now(),
-    })
-    .returning()
-    .get();
+  const link = await one(
+    tx
+      .insert(jobLinks)
+      .values({
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        kind: data.kind,
+        url: data.url,
+        label: data.label ?? null,
+        provider: deriveLinkProvider(data.url),
+        addedByUserId,
+        createdAt: ctx.now(),
+      })
+      .returning(),
+    "link",
+  );
 
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "link",
     entityId: link.id,
     jobId: job.id,
@@ -89,7 +104,7 @@ export function addLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
     newValue: { linkId: link.id, kind: link.kind, url: link.url, label: link.label, provider: link.provider },
     metadata: { kind: link.kind, ...jobMeta(job) },
   });
-  setActivityEventId(tx, link.id, eventId);
+  await setActivityEventId(tx, link.id, eventId);
   return { ...link, activityEventId: eventId };
 }
 
@@ -99,41 +114,37 @@ export function addLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
  * Permission `link.replace`: O/M any; photographer own job; editor assigned
  * job and a link they added. A stale (already replaced/removed) link → 409.
  */
-export function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): { link: JobLink; previous: JobLink } {
+export async function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ link: JobLink; previous: JobLink }> {
   const data = parseInput(ReplaceLinkInput, input);
-  const old = loadLinkInOrg(tx, ctx, data.linkId);
-  const { job, ref } = loadJobWithRef(tx, ctx, old.jobId);
+  const old = await loadLinkInOrg(tx, ctx, data.linkId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
   assertCan(ctx, "link.replace", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
-  assertCurrent(tx, ctx, old);
+  await assertCurrent(tx, ctx, old);
   const addedByUserId = requireActor(ctx);
 
   const at = ctx.now();
   const label = data.label === undefined ? old.label : data.label;
-  const link = tx
-    .insert(jobLinks)
-    .values({
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      kind: old.kind,
-      url: data.url,
-      label,
-      provider: deriveLinkProvider(data.url),
-      addedByUserId,
-      createdAt: at,
-      supersedesLinkId: old.id,
-    })
-    .returning()
-    .get();
+  const link = await one(
+    tx
+      .insert(jobLinks)
+      .values({
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        kind: old.kind,
+        url: data.url,
+        label,
+        provider: deriveLinkProvider(data.url),
+        addedByUserId,
+        createdAt: at,
+        supersedesLinkId: old.id,
+      })
+      .returning(),
+    "link",
+  );
 
-  const previous = tx
-    .update(jobLinks)
-    .set({ supersededAt: at, supersededByLinkId: link.id })
-    .where(and(eq(jobLinks.id, old.id), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
-    .returning()
-    .get();
-  if (!previous) throw new ConflictError("This link was changed by someone else. Reload and try again.", loadLinkInOrg(tx, ctx, old.id));
+  const previous = await supersede(tx, ctx, old.id, at, link.id);
 
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "link",
     entityId: link.id,
     jobId: job.id,
@@ -143,7 +154,7 @@ export function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): { link: J
     newValue: { linkId: link.id, url: link.url, label: link.label, provider: link.provider },
     metadata: { kind: link.kind, supersedesLinkId: old.id, ...jobMeta(job) },
   });
-  setActivityEventId(tx, link.id, eventId);
+  await setActivityEventId(tx, link.id, eventId);
   return { link: { ...link, activityEventId: eventId }, previous };
 }
 
@@ -155,43 +166,39 @@ export function replaceLink(tx: Tx, ctx: AuthContext, input: unknown): { link: J
  * kind changes — `link.add` for the NEW kind (editors: EDITOR_LINK_KINDS
  * only). Stale link → 409. Event `link.updated` with before/after `{kind,label}`.
  */
-export function updateLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
+export async function updateLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobLink> {
   const data = parseInput(UpdateLinkInput, input);
-  const old = loadLinkInOrg(tx, ctx, data.linkId);
-  const { job, ref } = loadJobWithRef(tx, ctx, old.jobId);
+  const old = await loadLinkInOrg(tx, ctx, data.linkId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
   assertCan(ctx, "link.replace", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
   const kind = data.kind ?? old.kind;
   if (kind !== old.kind) assertCan(ctx, "link.add", { job: ref, kind });
-  assertCurrent(tx, ctx, old);
+  await assertCurrent(tx, ctx, old);
   const label = data.label === undefined ? old.label : data.label;
   if (kind === old.kind && label === old.label) return old;
   const addedByUserId = requireActor(ctx);
 
   const at = ctx.now();
-  const link = tx
-    .insert(jobLinks)
-    .values({
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      kind,
-      url: old.url,
-      label,
-      provider: old.provider ?? deriveLinkProvider(old.url),
-      addedByUserId,
-      createdAt: at,
-      supersedesLinkId: old.id,
-    })
-    .returning()
-    .get();
-  const previous = tx
-    .update(jobLinks)
-    .set({ supersededAt: at, supersededByLinkId: link.id })
-    .where(and(eq(jobLinks.id, old.id), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
-    .returning()
-    .get();
-  if (!previous) throw new ConflictError("This link was changed by someone else. Reload and try again.", loadLinkInOrg(tx, ctx, old.id));
+  const link = await one(
+    tx
+      .insert(jobLinks)
+      .values({
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        kind,
+        url: old.url,
+        label,
+        provider: old.provider ?? deriveLinkProvider(old.url),
+        addedByUserId,
+        createdAt: at,
+        supersedesLinkId: old.id,
+      })
+      .returning(),
+    "link",
+  );
+  await supersede(tx, ctx, old.id, at, link.id);
 
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "link",
     entityId: link.id,
     jobId: job.id,
@@ -201,27 +208,28 @@ export function updateLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
     newValue: { linkId: link.id, kind: link.kind, label: link.label },
     metadata: { kind: link.kind, previousKind: old.kind, supersedesLinkId: old.id, url: link.url, ...jobMeta(job) },
   });
-  setActivityEventId(tx, link.id, eventId);
+  await setActivityEventId(tx, link.id, eventId);
   return { ...link, activityEventId: eventId };
 }
 
 /** Removes a current link without replacement (fill-once `removed_*`). Permission `link.remove`. */
-export function removeLink(tx: Tx, ctx: AuthContext, input: unknown): JobLink {
+export async function removeLink(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobLink> {
   const data = parseInput(RemoveLinkInput, input);
-  const old = loadLinkInOrg(tx, ctx, data.linkId);
-  const { job, ref } = loadJobWithRef(tx, ctx, old.jobId);
+  const old = await loadLinkInOrg(tx, ctx, data.linkId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, old.jobId);
   assertCan(ctx, "link.remove", { job: ref, kind: old.kind, addedByUserId: old.addedByUserId });
-  assertCurrent(tx, ctx, old);
+  await assertCurrent(tx, ctx, old);
 
-  const removed = tx
-    .update(jobLinks)
-    .set({ removedAt: ctx.now(), removedByUserId: ctx.userId, removeReason: data.reason ?? null })
-    .where(and(eq(jobLinks.id, old.id), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
-    .returning()
-    .get();
-  if (!removed) throw new ConflictError("This link was changed by someone else. Reload and try again.", loadLinkInOrg(tx, ctx, old.id));
+  const removed = await first(
+    tx
+      .update(jobLinks)
+      .set({ removedAt: ctx.now(), removedByUserId: ctx.userId, removeReason: data.reason ?? null })
+      .where(and(eq(jobLinks.id, old.id), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
+      .returning(),
+  );
+  if (!removed) throw new ConflictError("This link was changed by someone else. Reload and try again.", await loadLinkInOrg(tx, ctx, old.id));
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "link",
     entityId: old.id,
     jobId: job.id,
@@ -243,23 +251,22 @@ function requireActor(ctx: AuthContext): string {
 /*  Reads                                                              */
 /* ------------------------------------------------------------------ */
 
-function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): JobPermissionRef {
-  const { ref } = loadJobWithRef(db, ctx, jobId);
+async function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobPermissionRef> {
+  const { ref } = await loadJobWithRef(db, ctx, jobId);
   assertCan(ctx, "job.view", ref);
   return ref;
 }
 
-function allLinks(db: DbLike, ctx: AuthContext, jobId: string): JobLink[] {
+async function allLinks(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobLink[]> {
   return db
     .select()
     .from(jobLinks)
     .where(and(eq(jobLinks.jobId, jobId), eq(jobLinks.organisationId, ctx.organisationId)))
-    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id))
-    .all();
+    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
 }
 
-function toViews(db: DbLike, ctx: AuthContext, rows: readonly JobLink[]): Map<string, LinkView> {
-  const people = loadUserRefMap(db, ctx, rows.flatMap((l) => [l.addedByUserId, l.removedByUserId]));
+async function toViews(db: DbLike, ctx: AuthContext, rows: readonly JobLink[]): Promise<Map<string, LinkView>> {
+  const people = await loadUserRefMap(db, ctx, rows.flatMap((l) => [l.addedByUserId, l.removedByUserId]));
   const person = (id: string) => people.get(id) ?? unknownUserRef(id);
   return new Map(
     rows.map((l) => [
@@ -321,18 +328,18 @@ export function buildLinkSlots(views: ReadonlyMap<string, LinkView>, withHistory
 }
 
 /** The job's link slots (Links tab). Permission: `job.view`. `history: true` includes replaced/removed chains. */
-export function listLinks(db: DbLike, ctx: AuthContext, jobId: string, opts: { history?: boolean } = {}): LinkSlot[] {
-  loadVisibleJob(db, ctx, jobId);
-  const rows = allLinks(db, ctx, jobId);
-  return buildLinkSlots(toViews(db, ctx, rows), opts.history ?? false);
+export async function listLinks(db: DbLike, ctx: AuthContext, jobId: string, opts: { history?: boolean } = {}): Promise<LinkSlot[]> {
+  await loadVisibleJob(db, ctx, jobId);
+  const rows = await allLinks(db, ctx, jobId);
+  return buildLinkSlots(await toViews(db, ctx, rows), opts.history ?? false);
 }
 
 /** Current finished-work links (finished files, gallery, client delivery) — the Overview "Finished Work" panel. */
-export function finishedWorkLinks(db: DbLike, ctx: AuthContext, jobId: string): LinkView[] {
-  loadVisibleJob(db, ctx, jobId);
+export async function finishedWorkLinks(db: DbLike, ctx: AuthContext, jobId: string): Promise<LinkView[]> {
+  await loadVisibleJob(db, ctx, jobId);
   const finishedKinds = LINK_KINDS.filter((k) => LINK_KIND_META[k].finishedWork);
-  const rows = currentLinksOfKinds(db, jobId, finishedKinds).filter((l) => l.organisationId === ctx.organisationId);
-  const views = toViews(db, ctx, rows);
+  const rows = (await currentLinksOfKinds(db, jobId, finishedKinds)).filter((l) => l.organisationId === ctx.organisationId);
+  const views = await toViews(db, ctx, rows);
   return rows
     .map((l) => views.get(l.id))
     .filter((v): v is LinkView => v !== undefined)
@@ -344,20 +351,19 @@ export function finishedWorkLinks(db: DbLike, ctx: AuthContext, jobId: string): 
 /* ------------------------------------------------------------------ */
 
 /** Current link rows of the given kinds on a job, oldest first. */
-export function currentLinksOfKinds(db: DbLike, jobId: string, kinds: LinkKind | readonly LinkKind[]): JobLink[] {
+export async function currentLinksOfKinds(db: DbLike, jobId: string, kinds: LinkKind | readonly LinkKind[]): Promise<JobLink[]> {
   const list = typeof kinds === "string" ? [kinds] : [...kinds];
   if (list.length === 0) return [];
   return db
     .select()
     .from(jobLinks)
     .where(and(eq(jobLinks.jobId, jobId), inArray(jobLinks.kind, list), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
-    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id))
-    .all();
+    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
 }
 
 /** True when the job has at least one current link of any of `kinds`. */
-export function hasCurrentLinkOfKind(db: DbLike, jobId: string, kinds: LinkKind | readonly LinkKind[]): boolean {
-  return currentLinksOfKinds(db, jobId, kinds).length > 0;
+export async function hasCurrentLinkOfKind(db: DbLike, jobId: string, kinds: LinkKind | readonly LinkKind[]): Promise<boolean> {
+  return (await currentLinksOfKinds(db, jobId, kinds)).length > 0;
 }
 
 export interface LinkWarning {
@@ -391,9 +397,10 @@ export const TRANSITION_LINK_EXPECTATIONS: Partial<Record<StatusCategory, LinkWa
  * submitted/resubmitted without a current finished_files/editing_workspace
  * link, delivered without a current client_delivery/gallery link.
  */
-export function linkWarningsForTransition(db: DbLike, jobId: string, toCategory: StatusCategory): LinkWarning[] {
+export async function linkWarningsForTransition(db: DbLike, jobId: string, toCategory: StatusCategory): Promise<LinkWarning[]> {
   const expectation = TRANSITION_LINK_EXPECTATIONS[toCategory];
   if (!expectation) return [];
-  if (hasCurrentLinkOfKind(db, jobId, expectation.kinds)) return [];
+  if (await hasCurrentLinkOfKind(db, jobId, expectation.kinds)) return [];
+
   return [{ code: expectation.code, message: expectation.message, kinds: [...expectation.kinds] }];
 }

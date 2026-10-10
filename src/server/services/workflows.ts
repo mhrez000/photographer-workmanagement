@@ -49,7 +49,7 @@ import { EDITOR_REQUIRED_CATEGORIES, isEditorWorking, isTerminal, validateWorkfl
 import { recordEvent } from "@/server/audit";
 import { assertCan } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
-import { loadStatusInWorkflow, loadWorkflowInOrg, parseInput, type DbLike, type Tx } from "./_shared";
+import { first, loadStatusInWorkflow, loadWorkflowInOrg, one, parseInput, type DbLike, type Tx } from "./_shared";
 import { checkVersion, diffFields, ruleViolation, slugify } from "./_admin";
 
 /* ------------------------------------------------------------------ */
@@ -71,78 +71,81 @@ export interface WorkflowGraph {
   inUse: boolean;
 }
 
-function statusesOf(db: DbLike, workflowId: string): WorkflowStatus[] {
+async function statusesOf(db: DbLike, workflowId: string): Promise<WorkflowStatus[]> {
   return db
     .select()
     .from(workflowStatuses)
     .where(eq(workflowStatuses.workflowId, workflowId))
-    .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.createdAt))
-    .all();
+    .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.createdAt), asc(workflowStatuses.id));
 }
 
-function transitionsOf(db: DbLike, workflowId: string): WorkflowTransition[] {
-  return db.select().from(workflowTransitions).where(eq(workflowTransitions.workflowId, workflowId)).all();
+async function transitionsOf(db: DbLike, workflowId: string): Promise<WorkflowTransition[]> {
+  return db
+    .select()
+    .from(workflowTransitions)
+    .where(eq(workflowTransitions.workflowId, workflowId))
+    .orderBy(asc(workflowTransitions.createdAt), asc(workflowTransitions.id));
 }
 
-function jobCountsByStatus(db: DbLike, ctx: AuthContext, workflowId: string): Record<string, number> {
-  const rows = db
+async function jobCountsByStatus(db: DbLike, ctx: AuthContext, workflowId: string): Promise<Record<string, number>> {
+  const rows = await db
     .select({ statusId: jobs.statusId, n: count() })
     .from(jobs)
     .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.workflowId, workflowId)))
-    .groupBy(jobs.statusId)
-    .all();
+    .groupBy(jobs.statusId);
   return Object.fromEntries(rows.map((r) => [r.statusId, r.n]));
 }
 
-function boundJobTypeIds(db: DbLike, ctx: AuthContext, workflowId: string): string[] {
-  return db
+async function boundJobTypeIds(db: DbLike, ctx: AuthContext, workflowId: string): Promise<string[]> {
+  const rows = await db
     .select({ id: jobTypes.id })
     .from(jobTypes)
     .where(and(eq(jobTypes.organisationId, ctx.organisationId), eq(jobTypes.workflowId, workflowId), isNull(jobTypes.archivedAt)))
-    .all()
-    .map((r) => r.id);
+    .orderBy(asc(jobTypes.sortOrder), asc(jobTypes.name), asc(jobTypes.id));
+  return rows.map((r) => r.id);
 }
 
-function activeJobCount(db: DbLike, ctx: AuthContext, workflowId: string): number {
-  const row = db
-    .select({ n: count() })
-    .from(jobs)
-    .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.workflowId, workflowId), inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE])))
-    .get();
+async function activeJobCount(db: DbLike, ctx: AuthContext, workflowId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: count() })
+      .from(jobs)
+      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.workflowId, workflowId), inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE]))),
+  );
   return row?.n ?? 0;
 }
 
 /** validateWorkflowDefinition over the stored graph. */
-export function workflowProblems(db: DbLike, workflowId: string): string[] {
-  return validateWorkflowDefinition(statusesOf(db, workflowId), transitionsOf(db, workflowId));
+export async function workflowProblems(db: DbLike, workflowId: string): Promise<string[]> {
+  return validateWorkflowDefinition(await statusesOf(db, workflowId), await transitionsOf(db, workflowId));
 }
 
-function buildGraph(db: DbLike, ctx: AuthContext, workflow: Workflow): WorkflowGraph {
-  const statuses = statusesOf(db, workflow.id);
-  const transitions = transitionsOf(db, workflow.id);
-  const jobTypeIds = boundJobTypeIds(db, ctx, workflow.id);
+async function buildGraph(db: DbLike, ctx: AuthContext, workflow: Workflow): Promise<WorkflowGraph> {
+  const statuses = await statusesOf(db, workflow.id);
+  const transitions = await transitionsOf(db, workflow.id);
+  const jobTypeIds = await boundJobTypeIds(db, ctx, workflow.id);
   return {
     workflow,
     statuses,
     transitions,
     problems: validateWorkflowDefinition(statuses, transitions),
-    jobCountsByStatus: jobCountsByStatus(db, ctx, workflow.id),
+    jobCountsByStatus: await jobCountsByStatus(db, ctx, workflow.id),
     jobTypeIds,
-    inUse: jobTypeIds.length > 0 || activeJobCount(db, ctx, workflow.id) > 0,
+    inUse: jobTypeIds.length > 0 || (await activeJobCount(db, ctx, workflow.id)) > 0,
   };
 }
 
 /** Statuses, transitions, validation problems and usage of one workflow (owner / manager). */
-export function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: string): WorkflowGraph {
+export async function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: string): Promise<WorkflowGraph> {
   assertCan(ctx, "workflow.view");
-  return buildGraph(db, ctx, loadWorkflowInOrg(db, ctx, workflowId));
+  return await buildGraph(db, ctx, await loadWorkflowInOrg(db, ctx, workflowId));
 }
 
 /** Validation messages for a stored workflow (owner / manager). */
-export function validateWorkflow(db: DbLike, ctx: AuthContext, workflowId: string): string[] {
+export async function validateWorkflow(db: DbLike, ctx: AuthContext, workflowId: string): Promise<string[]> {
   assertCan(ctx, "workflow.view");
-  loadWorkflowInOrg(db, ctx, workflowId);
-  return workflowProblems(db, workflowId);
+  await loadWorkflowInOrg(db, ctx, workflowId);
+  return await workflowProblems(db, workflowId);
 }
 
 /* ------------------------------------------------------------------ */
@@ -154,17 +157,17 @@ export function validateWorkflow(db: DbLike, ctx: AuthContext, workflowId: strin
  * narrower than validateWorkflowDefinition so admins can add a status and
  * then wire its transitions in separate steps.
  */
-function criticalIssues(db: DbLike, ctx: AuthContext, workflowId: string): string[] {
-  const statuses = statusesOf(db, workflowId).filter((s) => s.archivedAt === null);
-  const edges = transitionsOf(db, workflowId).filter((e) => e.archivedAt === null);
+async function criticalIssues(db: DbLike, ctx: AuthContext, workflowId: string): Promise<string[]> {
+  const statuses = (await statusesOf(db, workflowId)).filter((s) => s.archivedAt === null);
+  const edges = (await transitionsOf(db, workflowId)).filter((e) => e.archivedAt === null);
   const issues: string[] = [];
   const initials = statuses.filter((s) => s.isInitial);
-  if (initials.length !== 1 || initials[0].category !== "new") issues.push("The workflow needs exactly one initial status in category \"new\"");
+  if (initials.length !== 1 || initials[0].category !== "new") issues.push('The workflow needs exactly one initial status in category "new"');
   for (const c of WORKFLOW_REQUIRED_CATEGORIES) {
     if (!statuses.some((s) => s.category === c)) issues.push(`The workflow needs a status in category "${c}"`);
   }
   const byId = new Map(statuses.map((s) => [s.id, s]));
-  const counts = jobCountsByStatus(db, ctx, workflowId);
+  const counts = await jobCountsByStatus(db, ctx, workflowId);
   for (const s of statuses) {
     if (isTerminal(s.category) || (counts[s.id] ?? 0) === 0) continue;
     const hasExit = edges.some((e) => e.fromStatusId === s.id && byId.has(e.toStatusId) && byId.get(e.toStatusId)?.category !== "cancelled");
@@ -173,52 +176,50 @@ function criticalIssues(db: DbLike, ctx: AuthContext, workflowId: string): strin
   return issues;
 }
 
-function isInUse(db: DbLike, ctx: AuthContext, workflowId: string): boolean {
-  return boundJobTypeIds(db, ctx, workflowId).length > 0 || activeJobCount(db, ctx, workflowId) > 0;
+async function isInUse(db: DbLike, ctx: AuthContext, workflowId: string): Promise<boolean> {
+  return (await boundJobTypeIds(db, ctx, workflowId)).length > 0 || (await activeJobCount(db, ctx, workflowId)) > 0;
 }
 
 /** Rejects (rolls back) an edit that introduced a critical issue in an in-use workflow. */
-function assertNoNewCriticalIssues(db: DbLike, ctx: AuthContext, workflowId: string, before: readonly string[]): void {
-  if (!isInUse(db, ctx, workflowId)) return;
-  const introduced = criticalIssues(db, ctx, workflowId).filter((i) => !before.includes(i));
+async function assertNoNewCriticalIssues(db: DbLike, ctx: AuthContext, workflowId: string, before: readonly string[]): Promise<void> {
+  if (!(await isInUse(db, ctx, workflowId))) return;
+  const introduced = (await criticalIssues(db, ctx, workflowId)).filter((i) => !before.includes(i));
   if (introduced.length > 0) {
     throw ruleViolation(`This change would break a workflow that is in use: ${introduced.join("; ")}`, { problems: introduced });
   }
 }
 
-function loadEditableWorkflow(db: DbLike, ctx: AuthContext, workflowId: string): Workflow {
-  const wf = loadWorkflowInOrg(db, ctx, workflowId);
+async function loadEditableWorkflow(db: DbLike, ctx: AuthContext, workflowId: string): Promise<Workflow> {
+  const wf = await loadWorkflowInOrg(db, ctx, workflowId);
   if (wf.archivedAt) throw ruleViolation("This workflow is archived");
   return wf;
 }
 
-function loadStatusInOrg(db: DbLike, ctx: AuthContext, statusId: string): WorkflowStatus {
-  const row = db
-    .select()
-    .from(workflowStatuses)
-    .where(and(eq(workflowStatuses.id, statusId), eq(workflowStatuses.organisationId, ctx.organisationId)))
-    .get();
+async function loadStatusInOrg(db: DbLike, ctx: AuthContext, statusId: string): Promise<WorkflowStatus> {
+  const row = await first(
+    db
+      .select()
+      .from(workflowStatuses)
+      .where(and(eq(workflowStatuses.id, statusId), eq(workflowStatuses.organisationId, ctx.organisationId))),
+  );
   if (!row) throw new NotFoundError("Status");
   return row;
 }
 
-export function loadTransitionInOrg(db: DbLike, ctx: AuthContext, transitionId: string): WorkflowTransition {
-  const row = db
-    .select()
-    .from(workflowTransitions)
-    .where(and(eq(workflowTransitions.id, transitionId), eq(workflowTransitions.organisationId, ctx.organisationId)))
-    .get();
+export async function loadTransitionInOrg(db: DbLike, ctx: AuthContext, transitionId: string): Promise<WorkflowTransition> {
+  const row = await first(
+    db
+      .select()
+      .from(workflowTransitions)
+      .where(and(eq(workflowTransitions.id, transitionId), eq(workflowTransitions.organisationId, ctx.organisationId))),
+  );
   if (!row) throw new NotFoundError("Transition");
   return row;
 }
 
-function assertWorkflowNameFree(db: DbLike, ctx: AuthContext, name: string, exceptId?: string): void {
-  const clash = db
-    .select({ id: workflows.id, name: workflows.name })
-    .from(workflows)
-    .where(eq(workflows.organisationId, ctx.organisationId))
-    .all()
-    .find((w) => w.name.trim().toLowerCase() === name.trim().toLowerCase() && w.id !== exceptId);
+async function assertWorkflowNameFree(db: DbLike, ctx: AuthContext, name: string, exceptId?: string): Promise<void> {
+  const rows = await db.select({ id: workflows.id, name: workflows.name }).from(workflows).where(eq(workflows.organisationId, ctx.organisationId));
+  const clash = rows.find((w) => w.name.trim().toLowerCase() === name.trim().toLowerCase() && w.id !== exceptId);
   if (clash) throw ruleViolation("A workflow with this name already exists", {}, "name");
 }
 
@@ -287,11 +288,11 @@ function blankTemplate(): { statuses: StatusSeed[]; edges: EdgeSeed[] } {
   return { statuses, edges: [] };
 }
 
-function copyTemplate(db: DbLike, ctx: AuthContext, sourceWorkflowId: string): { statuses: StatusSeed[]; edges: EdgeSeed[] } {
-  loadWorkflowInOrg(db, ctx, sourceWorkflowId);
-  const statuses = statusesOf(db, sourceWorkflowId).filter((s) => s.archivedAt === null);
+async function copyTemplate(db: DbLike, ctx: AuthContext, sourceWorkflowId: string): Promise<{ statuses: StatusSeed[]; edges: EdgeSeed[] }> {
+  await loadWorkflowInOrg(db, ctx, sourceWorkflowId);
+  const statuses = (await statusesOf(db, sourceWorkflowId)).filter((s) => s.archivedAt === null);
   const keyById = new Map(statuses.map((s) => [s.id, s.key]));
-  const edges = transitionsOf(db, sourceWorkflowId)
+  const edges = (await transitionsOf(db, sourceWorkflowId))
     .filter((e) => e.archivedAt === null && keyById.has(e.fromStatusId) && keyById.has(e.toStatusId))
     .map((e) => ({
       from: keyById.get(e.fromStatusId) as string,
@@ -317,20 +318,24 @@ function copyTemplate(db: DbLike, ctx: AuthContext, sourceWorkflowId: string): {
 }
 
 /** Makes `wf` the organisation default (unsets the previous one first: partial unique index). */
-function makeDefault(tx: Tx, ctx: AuthContext, wf: Workflow): Workflow {
+async function makeDefault(tx: Tx, ctx: AuthContext, wf: Workflow): Promise<Workflow> {
   if (wf.archivedAt) throw ruleViolation("An archived workflow cannot be the default");
-  const problems = workflowProblems(tx, wf.id);
+  const problems = await workflowProblems(tx, wf.id);
   if (problems.length > 0) throw ruleViolation("Fix the workflow's problems before making it the default", { problems });
   const now = ctx.now();
-  const previous = tx
-    .select()
-    .from(workflows)
-    .where(and(eq(workflows.organisationId, ctx.organisationId), eq(workflows.isDefault, true), isNull(workflows.archivedAt)))
-    .all()
-    .filter((w) => w.id !== wf.id);
+  const previous = (
+    await tx
+      .select()
+      .from(workflows)
+      .where(and(eq(workflows.organisationId, ctx.organisationId), eq(workflows.isDefault, true), isNull(workflows.archivedAt)))
+      .orderBy(asc(workflows.id))
+  ).filter((w) => w.id !== wf.id);
   for (const old of previous) {
-    tx.update(workflows).set({ isDefault: false, updatedAt: now, version: old.version + 1 }).where(eq(workflows.id, old.id)).run();
-    recordEvent(tx, ctx, {
+    await tx
+      .update(workflows)
+      .set({ isDefault: false, updatedAt: now, version: old.version + 1 })
+      .where(eq(workflows.id, old.id));
+    await recordEvent(tx, ctx, {
       entityType: "workflow",
       entityId: old.id,
       eventType: "workflow.updated",
@@ -340,76 +345,77 @@ function makeDefault(tx: Tx, ctx: AuthContext, wf: Workflow): Workflow {
       metadata: { workflowId: old.id, name: old.name },
     });
   }
-  return tx
-    .update(workflows)
-    .set({ isDefault: true, updatedAt: now, version: wf.version + 1 })
-    .where(eq(workflows.id, wf.id))
-    .returning()
-    .get();
+  return one(
+    tx
+      .update(workflows)
+      .set({ isDefault: true, updatedAt: now, version: wf.version + 1 })
+      .where(eq(workflows.id, wf.id))
+      .returning(),
+  );
 }
 
 /** Owner only. `from`: "default" template, copy of another "workflow", or "blank" (required statuses, no transitions). */
-export function createWorkflow(tx: Tx, ctx: AuthContext, input: unknown): WorkflowGraph {
+export async function createWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Promise<WorkflowGraph> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(CreateWorkflowInput, input);
-  assertWorkflowNameFree(tx, ctx, data.name);
+  await assertWorkflowNameFree(tx, ctx, data.name);
   const template =
-    data.from === "workflow" ? copyTemplate(tx, ctx, data.sourceWorkflowId as string) : data.from === "blank" ? blankTemplate() : defaultTemplate();
+    data.from === "workflow" ? await copyTemplate(tx, ctx, data.sourceWorkflowId as string) : data.from === "blank" ? blankTemplate() : defaultTemplate();
 
   const now = ctx.now();
-  let wf = tx
-    .insert(workflows)
-    .values({
-      organisationId: ctx.organisationId,
-      name: data.name,
-      description: data.description ?? null,
-      isDefault: false,
-      createdByUserId: ctx.userId,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
+  let wf = await one(
+    tx
+      .insert(workflows)
+      .values({
+        organisationId: ctx.organisationId,
+        name: data.name,
+        description: data.description ?? null,
+        isDefault: false,
+        createdByUserId: ctx.userId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
 
   const idByKey = new Map<string, string>();
   for (const s of template.statuses) {
-    const row = tx
-      .insert(workflowStatuses)
-      .values({
-        organisationId: ctx.organisationId,
-        workflowId: wf.id,
-        key: s.key,
-        name: s.name,
-        category: s.category,
-        colour: s.colour,
-        sortOrder: s.sortOrder,
-        isInitial: s.isInitial,
-        description: s.description ?? null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: workflowStatuses.id })
-      .get();
+    const row = await one(
+      tx
+        .insert(workflowStatuses)
+        .values({
+          organisationId: ctx.organisationId,
+          workflowId: wf.id,
+          key: s.key,
+          name: s.name,
+          category: s.category,
+          colour: s.colour,
+          sortOrder: s.sortOrder,
+          isInitial: s.isInitial,
+          description: s.description ?? null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: workflowStatuses.id }),
+    );
     idByKey.set(s.key, row.id);
   }
   for (const e of template.edges) {
-    tx.insert(workflowTransitions)
-      .values({
-        organisationId: ctx.organisationId,
-        workflowId: wf.id,
-        fromStatusId: idByKey.get(e.from) as string,
-        toStatusId: idByKey.get(e.to) as string,
-        label: e.label,
-        allowedRoles: e.allowedRoles,
-        requiresAssignedEditor: e.requiresAssignedEditor,
-        assigneeOnly: e.assigneeOnly,
-        isReopen: e.isReopen,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
+    await tx.insert(workflowTransitions).values({
+      organisationId: ctx.organisationId,
+      workflowId: wf.id,
+      fromStatusId: idByKey.get(e.from) as string,
+      toStatusId: idByKey.get(e.to) as string,
+      label: e.label,
+      allowedRoles: e.allowedRoles,
+      requiresAssignedEditor: e.requiresAssignedEditor,
+      assigneeOnly: e.assigneeOnly,
+      isReopen: e.isReopen,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "workflow",
     entityId: wf.id,
     eventType: "workflow.created",
@@ -426,25 +432,26 @@ export function createWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Workfl
     },
     metadata: { workflowId: wf.id },
   });
-  if (data.isDefault) wf = makeDefault(tx, ctx, wf);
-  return buildGraph(tx, ctx, wf);
+  if (data.isDefault) wf = await makeDefault(tx, ctx, wf);
+  return await buildGraph(tx, ctx, wf);
 }
 
-export function updateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): WorkflowGraph {
+export async function updateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Promise<WorkflowGraph> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(UpdateWorkflowInput, input);
-  let wf = loadEditableWorkflow(tx, ctx, data.workflowId);
+  let wf = await loadEditableWorkflow(tx, ctx, data.workflowId);
   checkVersion(wf, data.expectedVersion, wf);
-  if (data.name !== undefined) assertWorkflowNameFree(tx, ctx, data.name, wf.id);
+  if (data.name !== undefined) await assertWorkflowNameFree(tx, ctx, data.name, wf.id);
   const diff = diffFields(wf, data, ["name", "description"] as const);
   if (diff.changed.length > 0) {
-    wf = tx
-      .update(workflows)
-      .set({ ...diff.set, updatedAt: ctx.now(), version: wf.version + 1 })
-      .where(eq(workflows.id, wf.id))
-      .returning()
-      .get();
-    recordEvent(tx, ctx, {
+    wf = await one(
+      tx
+        .update(workflows)
+        .set({ ...diff.set, updatedAt: ctx.now(), version: wf.version + 1 })
+        .where(eq(workflows.id, wf.id))
+        .returning(),
+    );
+    await recordEvent(tx, ctx, {
       entityType: "workflow",
       entityId: wf.id,
       eventType: "workflow.updated",
@@ -455,8 +462,8 @@ export function updateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Workfl
     });
   }
   if (data.isDefault && !wf.isDefault) {
-    wf = makeDefault(tx, ctx, wf);
-    recordEvent(tx, ctx, {
+    wf = await makeDefault(tx, ctx, wf);
+    await recordEvent(tx, ctx, {
       entityType: "workflow",
       entityId: wf.id,
       eventType: "workflow.updated",
@@ -466,30 +473,31 @@ export function updateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Workfl
       metadata: { workflowId: wf.id, name: wf.name },
     });
   }
-  return buildGraph(tx, ctx, wf);
+  return await buildGraph(tx, ctx, wf);
 }
 
 /** Blocked for the default workflow, while non-archived job types are bound, or while active jobs use it. */
-export function archiveWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Workflow {
+export async function archiveWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Promise<Workflow> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(ArchiveWorkflowInput, input);
-  const wf = loadEditableWorkflow(tx, ctx, data.workflowId);
+  const wf = await loadEditableWorkflow(tx, ctx, data.workflowId);
   checkVersion(wf, data.expectedVersion, wf);
   if (wf.isDefault) throw ruleViolation("The default workflow cannot be archived. Make another workflow the default first.");
-  const bound = boundJobTypeIds(tx, ctx, wf.id);
+  const bound = await boundJobTypeIds(tx, ctx, wf.id);
   if (bound.length > 0) {
     throw ruleViolation(`${bound.length} job type(s) use this workflow. Move them to another workflow first.`, { jobTypeIds: bound });
   }
-  const active = activeJobCount(tx, ctx, wf.id);
+  const active = await activeJobCount(tx, ctx, wf.id);
   if (active > 0) throw ruleViolation(`${active} active job(s) use this workflow. Complete, cancel or migrate them first.`, { activeJobCount: active });
   const now = ctx.now();
-  const row = tx
-    .update(workflows)
-    .set({ archivedAt: now, updatedAt: now, version: wf.version + 1 })
-    .where(eq(workflows.id, wf.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(workflows)
+      .set({ archivedAt: now, updatedAt: now, version: wf.version + 1 })
+      .where(eq(workflows.id, wf.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "workflow",
     entityId: wf.id,
     eventType: "workflow.archived",
@@ -519,46 +527,50 @@ function statusSnapshot(s: WorkflowStatus) {
 }
 
 /** Clears `is_initial` on the current initial status (before another one takes over). */
-function clearInitial(tx: Tx, ctx: AuthContext, statuses: readonly WorkflowStatus[], exceptId?: string): void {
+async function clearInitial(tx: Tx, ctx: AuthContext, statuses: readonly WorkflowStatus[], exceptId?: string): Promise<void> {
   for (const s of statuses) {
     if (s.isInitial && s.archivedAt === null && s.id !== exceptId) {
-      tx.update(workflowStatuses).set({ isInitial: false, updatedAt: ctx.now(), version: s.version + 1 }).where(eq(workflowStatuses.id, s.id)).run();
+      await tx
+        .update(workflowStatuses)
+        .set({ isInitial: false, updatedAt: ctx.now(), version: s.version + 1 })
+        .where(eq(workflowStatuses.id, s.id));
     }
   }
 }
 
-export function addStatus(tx: Tx, ctx: AuthContext, input: unknown): { status: WorkflowStatus; graph: WorkflowGraph } {
+export async function addStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ status: WorkflowStatus; graph: WorkflowGraph }> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(AddStatusInput, input);
-  const wf = loadEditableWorkflow(tx, ctx, data.workflowId);
-  const before = criticalIssues(tx, ctx, wf.id);
-  const statuses = statusesOf(tx, wf.id);
+  const wf = await loadEditableWorkflow(tx, ctx, data.workflowId);
+  const before = await criticalIssues(tx, ctx, wf.id);
+  const statuses = await statusesOf(tx, wf.id);
   assertStatusNameFree(statuses, data.name);
   if (data.key && statuses.some((s) => s.key === data.key)) throw ruleViolation(`Key "${data.key}" is already used in this workflow`, {}, "key");
   const key = data.key ?? uniqueKey(statuses, slugify(data.name));
   if (data.isInitial && data.category !== "new") throw ruleViolation('The initial status must be in category "new"', {}, "isInitial");
-  if (data.isInitial) clearInitial(tx, ctx, statuses);
+  if (data.isInitial) await clearInitial(tx, ctx, statuses);
   const live = statuses.filter((s) => s.archivedAt === null);
   const sortOrder = data.sortOrder ?? (live.length ? Math.max(...live.map((s) => s.sortOrder)) + 1 : 0);
   const now = ctx.now();
-  const status = tx
-    .insert(workflowStatuses)
-    .values({
-      organisationId: ctx.organisationId,
-      workflowId: wf.id,
-      key,
-      name: data.name,
-      category: data.category,
-      colour: data.colour ?? STATUS_CATEGORY_META[data.category].hex,
-      sortOrder,
-      isInitial: data.isInitial ?? false,
-      description: data.description ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const status = await one(
+    tx
+      .insert(workflowStatuses)
+      .values({
+        organisationId: ctx.organisationId,
+        workflowId: wf.id,
+        key,
+        name: data.name,
+        category: data.category,
+        colour: data.colour ?? STATUS_CATEGORY_META[data.category].hex,
+        sortOrder,
+        isInitial: data.isInitial ?? false,
+        description: data.description ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "status",
     entityId: status.id,
     eventType: "status.created",
@@ -567,8 +579,8 @@ export function addStatus(tx: Tx, ctx: AuthContext, input: unknown): { status: W
     newValue: statusSnapshot(status),
     metadata: { workflowId: wf.id, statusId: status.id },
   });
-  assertNoNewCriticalIssues(tx, ctx, wf.id, before);
-  return { status, graph: buildGraph(tx, ctx, wf) };
+  await assertNoNewCriticalIssues(tx, ctx, wf.id, before);
+  return { status, graph: await buildGraph(tx, ctx, wf) };
 }
 
 export interface UpdateStatusResult {
@@ -578,15 +590,15 @@ export interface UpdateStatusResult {
   graph: WorkflowGraph;
 }
 
-export function updateStatus(tx: Tx, ctx: AuthContext, input: unknown): UpdateStatusResult {
+export async function updateStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateStatusResult> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(UpdateStatusInput, input);
-  const status = loadStatusInOrg(tx, ctx, data.statusId);
-  const wf = loadEditableWorkflow(tx, ctx, status.workflowId);
+  const status = await loadStatusInOrg(tx, ctx, data.statusId);
+  const wf = await loadEditableWorkflow(tx, ctx, status.workflowId);
   if (status.archivedAt) throw ruleViolation("This status is archived");
   checkVersion(status, data.expectedVersion, status);
-  const before = criticalIssues(tx, ctx, wf.id);
-  const statuses = statusesOf(tx, wf.id);
+  const before = await criticalIssues(tx, ctx, wf.id);
+  const statuses = await statusesOf(tx, wf.id);
   if (data.name !== undefined) assertStatusNameFree(statuses, data.name, status.id);
 
   const nextCategory = data.category ?? status.category;
@@ -595,14 +607,14 @@ export function updateStatus(tx: Tx, ctx: AuthContext, input: unknown): UpdateSt
   }
 
   const diff = diffFields(status, data, ["name", "category", "colour", "description", "isInitial"] as const);
-  if (diff.changed.length === 0) return { status, affectedJobIds: [], graph: buildGraph(tx, ctx, wf) };
+  if (diff.changed.length === 0) return { status, affectedJobIds: [], graph: await buildGraph(tx, ctx, wf) };
 
   // Jobs sitting in this status (recategorisation rules).
-  const jobsHere = tx
+  const jobsHere = await tx
     .select({ id: jobs.id, editorId: jobs.editorId, isPaused: jobs.isPaused })
     .from(jobs)
     .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.statusId, status.id)))
-    .all();
+    .orderBy(asc(jobs.jobNumber), asc(jobs.id));
   const recategorised = diff.changed.includes("category");
   if (recategorised && jobsHere.length > 0) {
     if (isTerminal(status.category) !== isTerminal(nextCategory)) {
@@ -617,32 +629,33 @@ export function updateStatus(tx: Tx, ctx: AuthContext, input: unknown): UpdateSt
     }
   }
 
-  if (data.isInitial) clearInitial(tx, ctx, statuses, status.id);
+  if (data.isInitial) await clearInitial(tx, ctx, statuses, status.id);
   const now = ctx.now();
-  const row = tx
-    .update(workflowStatuses)
-    .set({ ...diff.set, updatedAt: now, version: status.version + 1 })
-    .where(eq(workflowStatuses.id, status.id))
-    .returning()
-    .get();
+  const row = await one(
+    tx
+      .update(workflowStatuses)
+      .set({ ...diff.set, updatedAt: now, version: status.version + 1 })
+      .where(eq(workflowStatuses.id, status.id))
+      .returning(),
+  );
 
   let affectedJobIds: string[] = [];
   if (recategorised && jobsHere.length > 0) {
     // Status row first (above), then jobs: the jobs trigger checks category == status.category.
     affectedJobIds = jobsHere.map((j) => j.id);
     const clearPause = !isEditorWorking(nextCategory);
-    tx.update(jobs)
+    await tx
+      .update(jobs)
       .set({
         statusCategory: nextCategory,
         ...(clearPause ? { isPaused: false, pausedAt: null } : {}),
         updatedAt: now,
         version: sql`${jobs.version} + 1`,
       })
-      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.statusId, status.id)))
-      .run();
+      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.statusId, status.id)));
   }
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "status",
     entityId: status.id,
     eventType: "status.updated",
@@ -656,40 +669,44 @@ export function updateStatus(tx: Tx, ctx: AuthContext, input: unknown): UpdateSt
       ...(recategorised ? { affectedJobCount: affectedJobIds.length, affectedJobIds: affectedJobIds.slice(0, 500) } : {}),
     },
   });
-  assertNoNewCriticalIssues(tx, ctx, wf.id, before);
-  return { status: row, affectedJobIds, graph: buildGraph(tx, ctx, wf) };
+  await assertNoNewCriticalIssues(tx, ctx, wf.id, before);
+  return { status: row, affectedJobIds, graph: await buildGraph(tx, ctx, wf) };
 }
 
 /** Blocked while any job sits in the status, and for the initial status. Its transitions are archived with it. */
-export function archiveStatus(tx: Tx, ctx: AuthContext, input: unknown): { status: WorkflowStatus; graph: WorkflowGraph } {
+export async function archiveStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ status: WorkflowStatus; graph: WorkflowGraph }> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(ArchiveStatusInput, input);
-  const status = loadStatusInOrg(tx, ctx, data.statusId);
-  const wf = loadEditableWorkflow(tx, ctx, status.workflowId);
+  const status = await loadStatusInOrg(tx, ctx, data.statusId);
+  const wf = await loadEditableWorkflow(tx, ctx, status.workflowId);
   if (status.archivedAt) throw ruleViolation("This status is already archived");
   checkVersion(status, data.expectedVersion, status);
   if (status.isInitial) throw ruleViolation("The initial status cannot be archived. Make another status initial first.");
   const n =
-    tx
-      .select({ n: count() })
-      .from(jobs)
-      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.statusId, status.id)))
-      .get()?.n ?? 0;
+    (
+      await first(
+        tx
+          .select({ n: count() })
+          .from(jobs)
+          .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.statusId, status.id))),
+      )
+    )?.n ?? 0;
   if (n > 0) throw ruleViolation(`${n} job(s) are in "${status.name}". Move them to another status first.`, { jobCount: n });
 
-  const before = criticalIssues(tx, ctx, wf.id);
+  const before = await criticalIssues(tx, ctx, wf.id);
   const now = ctx.now();
-  const edges = transitionsOf(tx, wf.id).filter((e) => e.archivedAt === null && (e.fromStatusId === status.id || e.toStatusId === status.id));
+  const edges = (await transitionsOf(tx, wf.id)).filter((e) => e.archivedAt === null && (e.fromStatusId === status.id || e.toStatusId === status.id));
   for (const e of edges) {
-    tx.update(workflowTransitions).set({ archivedAt: now, updatedAt: now }).where(eq(workflowTransitions.id, e.id)).run();
+    await tx.update(workflowTransitions).set({ archivedAt: now, updatedAt: now }).where(eq(workflowTransitions.id, e.id));
   }
-  const row = tx
-    .update(workflowStatuses)
-    .set({ archivedAt: now, updatedAt: now, version: status.version + 1 })
-    .where(eq(workflowStatuses.id, status.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(workflowStatuses)
+      .set({ archivedAt: now, updatedAt: now, version: status.version + 1 })
+      .where(eq(workflowStatuses.id, status.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "status",
     entityId: status.id,
     eventType: "status.archived",
@@ -698,16 +715,16 @@ export function archiveStatus(tx: Tx, ctx: AuthContext, input: unknown): { statu
     newValue: { archivedAt: now, name: status.name },
     metadata: { workflowId: wf.id, statusId: status.id, archivedTransitionIds: edges.map((e) => e.id) },
   });
-  assertNoNewCriticalIssues(tx, ctx, wf.id, before);
-  return { status: row, graph: buildGraph(tx, ctx, wf) };
+  await assertNoNewCriticalIssues(tx, ctx, wf.id, before);
+  return { status: row, graph: await buildGraph(tx, ctx, wf) };
 }
 
 /** `statusIds` must list every non-archived status of the workflow exactly once. */
-export function reorderStatuses(tx: Tx, ctx: AuthContext, input: unknown): WorkflowGraph {
+export async function reorderStatuses(tx: Tx, ctx: AuthContext, input: unknown): Promise<WorkflowGraph> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(ReorderStatusesInput, input);
-  const wf = loadEditableWorkflow(tx, ctx, data.workflowId);
-  const live = statusesOf(tx, wf.id).filter((s) => s.archivedAt === null);
+  const wf = await loadEditableWorkflow(tx, ctx, data.workflowId);
+  const live = (await statusesOf(tx, wf.id)).filter((s) => s.archivedAt === null);
   const liveIds = new Set(live.map((s) => s.id));
   const unique = new Set(data.statusIds);
   if (unique.size !== data.statusIds.length || unique.size !== liveIds.size || data.statusIds.some((id) => !liveIds.has(id))) {
@@ -716,13 +733,16 @@ export function reorderStatuses(tx: Tx, ctx: AuthContext, input: unknown): Workf
   const previousOrder = live.map((s) => s.id);
   const now = ctx.now();
   const byId = new Map(live.map((s) => [s.id, s]));
-  data.statusIds.forEach((id, index) => {
+  for (const [index, id] of data.statusIds.entries()) {
     const s = byId.get(id) as WorkflowStatus;
     if (s.sortOrder !== index) {
-      tx.update(workflowStatuses).set({ sortOrder: index, updatedAt: now, version: s.version + 1 }).where(eq(workflowStatuses.id, id)).run();
+      await tx
+        .update(workflowStatuses)
+        .set({ sortOrder: index, updatedAt: now, version: s.version + 1 })
+        .where(eq(workflowStatuses.id, id));
     }
-  });
-  recordEvent(tx, ctx, {
+  }
+  await recordEvent(tx, ctx, {
     entityType: "workflow",
     entityId: wf.id,
     eventType: "status.reordered",
@@ -731,7 +751,7 @@ export function reorderStatuses(tx: Tx, ctx: AuthContext, input: unknown): Workf
     newValue: { order: data.statusIds },
     metadata: { workflowId: wf.id, name: wf.name },
   });
-  return buildGraph(tx, ctx, wf);
+  return await buildGraph(tx, ctx, wf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -752,24 +772,25 @@ function edgeSnapshot(e: WorkflowTransition, names: Map<string, string>) {
   };
 }
 
-function statusNames(db: DbLike, workflowId: string): Map<string, string> {
-  return new Map(statusesOf(db, workflowId).map((s) => [s.id, s.name]));
+async function statusNames(db: DbLike, workflowId: string): Promise<Map<string, string>> {
+  return new Map((await statusesOf(db, workflowId)).map((s) => [s.id, s.name]));
 }
 
 /** Adds an edge (re-activates an archived edge for the same pair: the pair is unique). */
-export function addTransition(tx: Tx, ctx: AuthContext, input: unknown): { transition: WorkflowTransition; graph: WorkflowGraph } {
+export async function addTransition(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ transition: WorkflowTransition; graph: WorkflowGraph }> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(AddTransitionInput, input);
-  const wf = loadEditableWorkflow(tx, ctx, data.workflowId);
-  const from = loadStatusInWorkflow(tx, ctx, wf.id, data.fromStatusId);
-  const to = loadStatusInWorkflow(tx, ctx, wf.id, data.toStatusId);
+  const wf = await loadEditableWorkflow(tx, ctx, data.workflowId);
+  const from = await loadStatusInWorkflow(tx, ctx, wf.id, data.fromStatusId);
+  const to = await loadStatusInWorkflow(tx, ctx, wf.id, data.toStatusId);
   if (from.archivedAt || to.archivedAt) throw ruleViolation("Both statuses must be active");
-  const before = criticalIssues(tx, ctx, wf.id);
-  const existing = tx
-    .select()
-    .from(workflowTransitions)
-    .where(and(eq(workflowTransitions.fromStatusId, from.id), eq(workflowTransitions.toStatusId, to.id)))
-    .get();
+  const before = await criticalIssues(tx, ctx, wf.id);
+  const existing = await first(
+    tx
+      .select()
+      .from(workflowTransitions)
+      .where(and(eq(workflowTransitions.fromStatusId, from.id), eq(workflowTransitions.toStatusId, to.id))),
+  );
   if (existing && existing.archivedAt === null) throw ruleViolation(`"${from.name}" → "${to.name}" already exists`);
   const now = ctx.now();
   const values = {
@@ -781,52 +802,54 @@ export function addTransition(tx: Tx, ctx: AuthContext, input: unknown): { trans
     updatedAt: now,
   };
   const transition = existing
-    ? tx
-        .update(workflowTransitions)
-        .set({ ...values, archivedAt: null })
-        .where(eq(workflowTransitions.id, existing.id))
-        .returning()
-        .get()
-    : tx
-        .insert(workflowTransitions)
-        .values({ ...values, organisationId: ctx.organisationId, workflowId: wf.id, fromStatusId: from.id, toStatusId: to.id, createdAt: now })
-        .returning()
-        .get();
-  recordEvent(tx, ctx, {
+    ? await one(
+        tx
+          .update(workflowTransitions)
+          .set({ ...values, archivedAt: null })
+          .where(eq(workflowTransitions.id, existing.id))
+          .returning(),
+      )
+    : await one(
+        tx
+          .insert(workflowTransitions)
+          .values({ ...values, organisationId: ctx.organisationId, workflowId: wf.id, fromStatusId: from.id, toStatusId: to.id, createdAt: now })
+          .returning(),
+      );
+  await recordEvent(tx, ctx, {
     entityType: "workflow_transition",
     entityId: transition.id,
     eventType: "workflow_transition.created",
     action: "created",
     previousValue: null,
-    newValue: edgeSnapshot(transition, statusNames(tx, wf.id)),
+    newValue: edgeSnapshot(transition, await statusNames(tx, wf.id)),
     metadata: { workflowId: wf.id, transitionId: transition.id, revived: !!existing },
   });
-  assertNoNewCriticalIssues(tx, ctx, wf.id, before);
-  return { transition, graph: buildGraph(tx, ctx, wf) };
+  await assertNoNewCriticalIssues(tx, ctx, wf.id, before);
+  return { transition, graph: await buildGraph(tx, ctx, wf) };
 }
 
-export function updateTransition(tx: Tx, ctx: AuthContext, input: unknown): { transition: WorkflowTransition; graph: WorkflowGraph } {
+export async function updateTransition(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ transition: WorkflowTransition; graph: WorkflowGraph }> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(UpdateTransitionInput, input);
-  const edge = loadTransitionInOrg(tx, ctx, data.transitionId);
-  const wf = loadEditableWorkflow(tx, ctx, edge.workflowId);
+  const edge = await loadTransitionInOrg(tx, ctx, data.transitionId);
+  const wf = await loadEditableWorkflow(tx, ctx, edge.workflowId);
   if (edge.archivedAt) throw ruleViolation("This transition is archived");
   const diff = diffFields(edge, data, ["label", "requiresAssignedEditor", "assigneeOnly", "isReopen"] as const);
-  const rolesChanged =
-    data.allowedRoles !== undefined && JSON.stringify([...data.allowedRoles].sort()) !== JSON.stringify([...edge.allowedRoles].sort());
+  const rolesChanged = data.allowedRoles !== undefined && JSON.stringify([...data.allowedRoles].sort()) !== JSON.stringify([...edge.allowedRoles].sort());
   if (rolesChanged) {
     diff.previous.allowedRoles = edge.allowedRoles;
     diff.next.allowedRoles = data.allowedRoles;
   }
-  if (diff.changed.length === 0 && !rolesChanged) return { transition: edge, graph: buildGraph(tx, ctx, wf) };
-  const transition = tx
-    .update(workflowTransitions)
-    .set({ ...diff.set, ...(rolesChanged ? { allowedRoles: data.allowedRoles } : {}), updatedAt: ctx.now() })
-    .where(eq(workflowTransitions.id, edge.id))
-    .returning()
-    .get();
-  const names = statusNames(tx, wf.id);
-  recordEvent(tx, ctx, {
+  if (diff.changed.length === 0 && !rolesChanged) return { transition: edge, graph: await buildGraph(tx, ctx, wf) };
+  const transition = await one(
+    tx
+      .update(workflowTransitions)
+      .set({ ...diff.set, ...(rolesChanged ? { allowedRoles: data.allowedRoles } : {}), updatedAt: ctx.now() })
+      .where(eq(workflowTransitions.id, edge.id))
+      .returning(),
+  );
+  const names = await statusNames(tx, wf.id);
+  await recordEvent(tx, ctx, {
     entityType: "workflow_transition",
     entityId: edge.id,
     eventType: "workflow_transition.updated",
@@ -835,32 +858,27 @@ export function updateTransition(tx: Tx, ctx: AuthContext, input: unknown): { tr
     newValue: { ...diff.next, fromStatusName: names.get(edge.fromStatusId), toStatusName: names.get(edge.toStatusId) },
     metadata: { workflowId: wf.id, transitionId: edge.id },
   });
-  return { transition, graph: buildGraph(tx, ctx, wf) };
+  return { transition, graph: await buildGraph(tx, ctx, wf) };
 }
 
-export function archiveTransition(tx: Tx, ctx: AuthContext, input: unknown): { transition: WorkflowTransition; graph: WorkflowGraph } {
+export async function archiveTransition(tx: Tx, ctx: AuthContext, input: unknown): Promise<{ transition: WorkflowTransition; graph: WorkflowGraph }> {
   assertCan(ctx, "workflow.manage");
   const data = parseInput(ArchiveTransitionInput, input);
-  const edge = loadTransitionInOrg(tx, ctx, data.transitionId);
-  const wf = loadEditableWorkflow(tx, ctx, edge.workflowId);
+  const edge = await loadTransitionInOrg(tx, ctx, data.transitionId);
+  const wf = await loadEditableWorkflow(tx, ctx, edge.workflowId);
   if (edge.archivedAt) throw ruleViolation("This transition is already archived");
-  const before = criticalIssues(tx, ctx, wf.id);
+  const before = await criticalIssues(tx, ctx, wf.id);
   const now = ctx.now();
-  const transition = tx
-    .update(workflowTransitions)
-    .set({ archivedAt: now, updatedAt: now })
-    .where(eq(workflowTransitions.id, edge.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const transition = await one(tx.update(workflowTransitions).set({ archivedAt: now, updatedAt: now }).where(eq(workflowTransitions.id, edge.id)).returning());
+  await recordEvent(tx, ctx, {
     entityType: "workflow_transition",
     entityId: edge.id,
     eventType: "workflow_transition.archived",
     action: "archived",
-    previousValue: edgeSnapshot(edge, statusNames(tx, wf.id)),
+    previousValue: edgeSnapshot(edge, await statusNames(tx, wf.id)),
     newValue: { archivedAt: now },
     metadata: { workflowId: wf.id, transitionId: edge.id },
   });
-  assertNoNewCriticalIssues(tx, ctx, wf.id, before);
-  return { transition, graph: buildGraph(tx, ctx, wf) };
+  await assertNoNewCriticalIssues(tx, ctx, wf.id, before);
+  return { transition, graph: await buildGraph(tx, ctx, wf) };
 }

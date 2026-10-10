@@ -2,7 +2,7 @@
 import { readBy, methodNotAllowed } from "@/app/api/_lib/route";
 import { getAllowedTransitions, getAvailableActions } from "@/server/services/workflow";
 
-export const GET = readBy((db, ctx, id) => ({ ...getAllowedTransitions(db, ctx, id), actions: getAvailableActions(db, ctx, id) }));
+export const GET = readBy(async (db, ctx, id) => ({ ...(await getAllowedTransitions(db, ctx, id)), actions: await getAvailableActions(db, ctx, id) }));
 
 /** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
 export const POST = methodNotAllowed(["GET"]);

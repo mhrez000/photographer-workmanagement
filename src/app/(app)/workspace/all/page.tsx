@@ -30,9 +30,9 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
   const requested = toJobListInput(sp);
   // A saved view brings its own sort; otherwise default to workflow order.
   if (!requested.sort && !requested.viewId) requested.sort = DEFAULT_WORK_SORT;
-  const { result, input, notice } = safeListJobs(db, ctx, requested);
-  const jobTypes = listJobTypes(db, ctx).map((t) => ({ id: t.id, name: t.name, colour: t.colour }));
-  const savedViews = safeSavedViews(() => listSavedViews(db, ctx, { scope: "all_work" }));
+  const { result, input, notice } = await safeListJobs(db, ctx, requested);
+  const jobTypes = (await listJobTypes(db, ctx)).map((t) => ({ id: t.id, name: t.name, colour: t.colour }));
+  const savedViews = await safeSavedViews(() => listSavedViews(db, ctx, { scope: "all_work" }));
 
   const canBulk = allowed(ctx, "job.bulk_reassign");
   const canOverride = allowed(ctx, "job.transition_override");
@@ -154,9 +154,9 @@ export default async function AllWorkPage({ searchParams }: PageProps<"/workspac
 }
 
 /** Saved views are an enhancement: if they fail to load the bar fetches them itself. */
-function safeSavedViews<T>(fn: () => T): T | null {
+async function safeSavedViews<T>(fn: () => Promise<T> | T): Promise<T | null> {
   try {
-    return fn();
+    return await fn();
   } catch {
     return null;
   }

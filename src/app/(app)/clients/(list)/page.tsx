@@ -24,7 +24,7 @@ export default async function ClientsPage({ searchParams }: PageProps<"/clients"
   const q = param(sp, "q")?.trim() || undefined;
   const includeArchived = param(sp, "archived") === "1";
   const tz = ctx.settings.timezone;
-  const clients = load(() => listClients(db, ctx, { q, includeArchived }));
+  const clients = await load(() => listClients(db, ctx, { q, includeArchived }));
   const canCreate = allowed(ctx, "client.create");
   const filtered = Boolean(q || includeArchived);
 

@@ -14,7 +14,8 @@
  *   thread renders a placeholder.
  */
 import { and, asc, eq, inArray } from "drizzle-orm";
-import type { DbLike, Tx } from "@/db/index";
+import { first, one, type DbLike, type Tx } from "@/db/index";
+
 import { commentMentions, jobComments, users } from "@/db/schema";
 import type { AuthContext, CommentNode, JobComment, JobPermissionRef } from "@/lib/types";
 import { newId } from "@/lib/ids";
@@ -74,14 +75,18 @@ function commentRef(ref: JobPermissionRef, c: JobComment): CommentPermissionRef 
  * Validates mention targets: active, in-org, and able to view the job.
  * Returns the deduplicated ids with their names; throws InvalidMentionError.
  */
-function validateMentions(tx: Tx, ctx: AuthContext, ref: JobPermissionRef, ids: readonly string[]): { id: string; name: string }[] {
+async function validateMentions(
+  tx: Tx,
+  ctx: AuthContext,
+  ref: JobPermissionRef,
+  ids: readonly string[],
+): Promise<{ id: string; name: string }[]> {
   const unique = Array.from(new Set(ids));
   if (unique.length === 0) return [];
-  const rows = tx
+  const rows = await tx
     .select({ id: users.id, name: users.name, isActive: users.isActive })
     .from(users)
-    .where(and(inArray(users.id, unique), eq(users.organisationId, ctx.organisationId)))
-    .all();
+    .where(and(inArray(users.id, unique), eq(users.organisationId, ctx.organisationId)));
   const byId = new Map(rows.map((r) => [r.id, r]));
   const invalidUserIds: string[] = [];
   const names: string[] = [];
@@ -93,7 +98,7 @@ function validateMentions(tx: Tx, ctx: AuthContext, ref: JobPermissionRef, ids: 
       unknownCount += 1;
       continue;
     }
-    if (!row.isActive || !userCanViewJob(tx, ctx, id, ref)) {
+    if (!row.isActive || !(await userCanViewJob(tx, ctx, id, ref))) {
       invalidUserIds.push(id);
       names.push(row.name);
       continue;
@@ -123,9 +128,9 @@ export interface AddCommentResult {
  * rows, `comment.added` + one `comment.mentioned` per mention, and the
  * notifications, all in `tx`.
  */
-export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddCommentResult {
+export async function addComment(tx: Tx, ctx: AuthContext, input: unknown): Promise<AddCommentResult> {
   const data = parseInput(AddCommentInput, input);
-  const { job, ref } = loadJobWithRef(tx, ctx, data.jobId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, data.jobId);
   assertCan(ctx, "comment.add", ref);
   if (data.mentionUserIds.length > 0) assertCan(ctx, "comment.mention", ref);
   if (!ctx.userId) throw new ValidationError("Comments need an author");
@@ -135,7 +140,7 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
   let parentCommentId: string | null = null;
   let rootCommentId: string | null = null;
   if (data.parentCommentId) {
-    const parent = loadCommentInOrg(tx, ctx, data.parentCommentId);
+    const parent = await loadCommentInOrg(tx, ctx, data.parentCommentId);
     if (parent.jobId !== job.id) throw new NotFoundError("Comment");
     if (parent.deletedAt) throw new ValidationError("You can't reply to a deleted comment");
     parentCommentId = parent.id;
@@ -145,7 +150,7 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
   // Revision reference.
   let revisionId: string | null = null;
   if (data.revisionId) {
-    const revision = loadRevisionInOrg(tx, ctx, data.revisionId);
+    const revision = await loadRevisionInOrg(tx, ctx, data.revisionId);
     if (revision.jobId !== job.id) throw new NotFoundError("Revision");
     revisionId = revision.id;
   } else if (data.kind === "revision_response") {
@@ -158,35 +163,37 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
     revisionId = job.openRevisionId;
   }
 
-  const mentions = validateMentions(tx, ctx, ref, data.mentionUserIds);
+  const mentions = await validateMentions(tx, ctx, ref, data.mentionUserIds);
 
   const id = newId();
   const createdAt = ctx.now();
-  const comment = tx
-    .insert(jobComments)
-    .values({
-      id,
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      parentCommentId,
-      rootCommentId: rootCommentId ?? id,
-      revisionId,
-      authorUserId,
-      kind: data.kind,
-      body: data.body,
-      createdAt,
-    })
-    .returning()
-    .get();
+  const comment = await one(
+    tx
+      .insert(jobComments)
+      .values({
+        id,
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        parentCommentId,
+        rootCommentId: rootCommentId ?? id,
+        revisionId,
+        authorUserId,
+        kind: data.kind,
+        body: data.body,
+        createdAt,
+      })
+      .returning(),
+    "comment",
+  );
 
   if (mentions.length > 0) {
-    tx.insert(commentMentions)
-      .values(mentions.map((m) => ({ organisationId: ctx.organisationId, commentId: id, mentionedUserId: m.id, createdAt })))
-      .run();
+    await tx
+      .insert(commentMentions)
+      .values(mentions.map((m) => ({ organisationId: ctx.organisationId, commentId: id, mentionedUserId: m.id, createdAt })));
   }
 
   const mentionUserIds = mentions.map((m) => m.id);
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "comment",
     entityId: id,
     jobId: job.id,
@@ -209,7 +216,7 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
 
   // Mentions: one event each, feeding a (mandatory) `mentioned` notification.
   for (const m of mentions) {
-    const mentionEventId = recordEvent(tx, ctx, {
+    const mentionEventId = await recordEvent(tx, ctx, {
       entityType: "comment",
       entityId: id,
       jobId: job.id,
@@ -219,7 +226,7 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
       newValue: { mentionedUserId: m.id, mentionedUserName: m.name },
       metadata: { commentId: id, ...jobMeta(job) },
     });
-    const res = notify(tx, ctx, {
+    const res = await notify(tx, ctx, {
       userIds: [m.id],
       type: "mentioned",
       title: `You were mentioned on ${job.jobNumber}`,
@@ -233,17 +240,21 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
 
   // comment_added: photographer, editor, creator + previous commenters in this thread
   // (mentioned users already got their own notification).
-  const participants = jobParticipants(tx, job.id, { rootCommentId: comment.rootCommentId ?? id });
+  const participants = await jobParticipants(tx, job.id, { rootCommentId: comment.rootCommentId ?? id });
   const mentioned = new Set(mentionUserIds);
-  const candidates = Array.from(
+  const possible = Array.from(
     new Set(
       [participants.photographerId, participants.editorId, participants.createdByUserId, ...participants.commenterIds].filter(
         (u): u is string => typeof u === "string" && u !== authorUserId && !mentioned.has(u),
       ),
     ),
-  ).filter((u) => userCanViewJob(tx, ctx, u, ref));
+  );
+  const candidates: string[] = [];
+  for (const u of possible) {
+    if (await userCanViewJob(tx, ctx, u, ref)) candidates.push(u);
+  }
   if (candidates.length > 0) {
-    const res = notify(tx, ctx, {
+    const res = await notify(tx, ctx, {
       userIds: candidates,
       type: "comment_added",
       title: parentCommentId ? `New reply on ${job.jobNumber}` : `New comment on ${job.jobNumber}`,
@@ -267,25 +278,26 @@ export function addComment(tx: Tx, ctx: AuthContext, input: unknown): AddComment
  * COMMENT_EDIT_WINDOW_MINUTES of posting, not deleted. An unchanged body is
  * a no-op (no event, no edit_count bump).
  */
-export function editComment(tx: Tx, ctx: AuthContext, input: unknown): JobComment {
+export async function editComment(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobComment> {
   const data = parseInput(EditCommentInput, input);
-  const existing = loadCommentInOrg(tx, ctx, data.commentId);
-  const { job, ref } = loadJobWithRef(tx, ctx, existing.jobId);
+  const existing = await loadCommentInOrg(tx, ctx, data.commentId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, existing.jobId);
   assertCan(ctx, "comment.edit", commentRef(ref, existing));
   if (data.body === existing.body) return existing;
 
   const editedAt = ctx.now();
-  const updated = tx
-    .update(jobComments)
-    .set({ body: data.body, editedAt, editCount: existing.editCount + 1 })
-    .where(and(eq(jobComments.id, existing.id), eq(jobComments.editCount, existing.editCount)))
-    .returning()
-    .get();
+  const updated = await first(
+    tx
+      .update(jobComments)
+      .set({ body: data.body, editedAt, editCount: existing.editCount + 1 })
+      .where(and(eq(jobComments.id, existing.id), eq(jobComments.editCount, existing.editCount)))
+      .returning(),
+  );
   if (!updated) {
-    throw new ConflictError(undefined, loadCommentInOrg(tx, ctx, existing.id));
+    throw new ConflictError(undefined, await loadCommentInOrg(tx, ctx, existing.id));
   }
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "comment",
     entityId: existing.id,
     jobId: job.id,
@@ -303,24 +315,25 @@ export function editComment(tx: Tx, ctx: AuthContext, input: unknown): JobCommen
  * Permission `comment.delete`: owners/managers any, others their own.
  * Deleting an already-deleted comment is a no-op.
  */
-export function deleteComment(tx: Tx, ctx: AuthContext, input: unknown): JobComment {
+export async function deleteComment(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobComment> {
   const data = parseInput(DeleteCommentInput, input);
-  const existing = loadCommentInOrg(tx, ctx, data.commentId);
-  const { job, ref } = loadJobWithRef(tx, ctx, existing.jobId);
+  const existing = await loadCommentInOrg(tx, ctx, data.commentId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, existing.jobId);
   assertCan(ctx, "job.view", ref);
   if (existing.deletedAt) return existing;
   assertCan(ctx, "comment.delete", commentRef(ref, existing));
 
   const deletedAt = ctx.now();
-  const updated = tx
-    .update(jobComments)
-    .set({ deletedAt, deletedByUserId: ctx.userId })
-    .where(and(eq(jobComments.id, existing.id), eq(jobComments.organisationId, ctx.organisationId)))
-    .returning()
-    .get();
+  const updated = await first(
+    tx
+      .update(jobComments)
+      .set({ deletedAt, deletedByUserId: ctx.userId })
+      .where(and(eq(jobComments.id, existing.id), eq(jobComments.organisationId, ctx.organisationId)))
+      .returning(),
+  );
   if (!updated) throw new NotFoundError("Comment");
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "comment",
     entityId: existing.id,
     jobId: job.id,
@@ -342,19 +355,18 @@ export function deleteComment(tx: Tx, ctx: AuthContext, input: unknown): JobComm
  * under their parent, oldest first). Deleted comments stay in place with
  * `body: null` and no mentions (placeholder). Permission: `job.view`.
  */
-export function listComments(db: DbLike, ctx: AuthContext, jobId: string): CommentNode[] {
-  const { job, ref } = loadJobWithRef(db, ctx, jobId);
+export async function listComments(db: DbLike, ctx: AuthContext, jobId: string): Promise<CommentNode[]> {
+  const { job, ref } = await loadJobWithRef(db, ctx, jobId);
   assertCan(ctx, "job.view", ref);
 
-  const rows = db
+  const rows = await db
     .select()
     .from(jobComments)
     .where(and(eq(jobComments.jobId, job.id), eq(jobComments.organisationId, ctx.organisationId)))
-    .orderBy(asc(jobComments.createdAt), asc(jobComments.id))
-    .all();
+    .orderBy(asc(jobComments.createdAt), asc(jobComments.id));
   if (rows.length === 0) return [];
 
-  const mentionRows = db
+  const mentionRows = await db
     .select({ commentId: commentMentions.commentId, userId: commentMentions.mentionedUserId })
     .from(commentMentions)
     .where(
@@ -366,7 +378,7 @@ export function listComments(db: DbLike, ctx: AuthContext, jobId: string): Comme
         ),
       ),
     )
-    .all();
+    .orderBy(asc(commentMentions.createdAt), asc(commentMentions.id));
   const mentionsByComment = new Map<string, string[]>();
   for (const m of mentionRows) {
     const list = mentionsByComment.get(m.commentId) ?? [];
@@ -374,7 +386,7 @@ export function listComments(db: DbLike, ctx: AuthContext, jobId: string): Comme
     mentionsByComment.set(m.commentId, list);
   }
 
-  const people = loadUserRefMap(db, ctx, [...rows.map((r) => r.authorUserId), ...mentionRows.map((m) => m.userId)]);
+  const people = await loadUserRefMap(db, ctx, [...rows.map((r) => r.authorUserId), ...mentionRows.map((m) => m.userId)]);
   const person = (id: string) => people.get(id) ?? unknownUserRef(id);
 
   const nodes = new Map<string, CommentNode>();

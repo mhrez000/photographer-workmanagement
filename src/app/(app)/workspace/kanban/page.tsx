@@ -47,7 +47,7 @@ export default async function KanbanPage({ searchParams }: PageProps<"/workspace
     jobTypeId: params(sp, "jobTypeId"),
     priority: params(sp, "priority"),
   };
-  const board = load(() => getKanbanBoard(db, ctx, { ...filters, includeCancelled, perColumnLimit: maxLimit }));
+  const board = await load(() => getKanbanBoard(db, ctx, { ...filters, includeCancelled, perColumnLimit: maxLimit }));
 
   // One query at the largest requested limit; each column is trimmed back to its own limit.
   const columns = board.columns.map((c) => ({ ...c, cards: c.cards.slice(0, limits[c.column]) }));

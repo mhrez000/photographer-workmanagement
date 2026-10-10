@@ -15,7 +15,7 @@ import { ArchiveClientInput, CreateClientInput, UpdateClientInput } from "@/lib/
 import { recordEvent } from "@/server/audit";
 import { assertCan, roleCanEver, type OrgResourceRef } from "@/server/auth/permissions";
 import { ForbiddenError } from "@/server/errors";
-import { loadClientInOrg, parseInput, type DbLike, type Tx } from "./_shared";
+import { first, loadClientInOrg, one, parseInput, type DbLike, type Tx } from "./_shared";
 import { checkVersion, diffFields, ruleViolation } from "./_admin";
 
 const EDITABLE = ["name", "contactName", "email", "phone", "notes", "colour"] as const;
@@ -30,36 +30,38 @@ export function clientResourceRef(row: Client): OrgResourceRef {
 }
 
 /** Number of jobs on this client in an ACTIVE (non-terminal) category. */
-export function activeJobCountForClient(db: DbLike, ctx: AuthContext, clientId: string): number {
-  const row = db
-    .select({ n: count() })
-    .from(jobs)
-    .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.clientId, clientId), inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE])))
-    .get();
+export async function activeJobCountForClient(db: DbLike, ctx: AuthContext, clientId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: count() })
+      .from(jobs)
+      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.clientId, clientId), inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE]))),
+  );
   return row?.n ?? 0;
 }
 
-export function createClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
+export async function createClient(tx: Tx, ctx: AuthContext, input: unknown): Promise<Client> {
   assertCan(ctx, "client.create");
   const data = parseInput(CreateClientInput, input);
   const now = ctx.now();
-  const row = tx
-    .insert(clients)
-    .values({
-      organisationId: ctx.organisationId,
-      name: data.name,
-      contactName: data.contactName ?? null,
-      email: data.email ?? null,
-      phone: data.phone ?? null,
-      notes: data.notes ?? null,
-      ...(data.colour ? { colour: data.colour } : {}),
-      createdByUserId: ctx.userId,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .insert(clients)
+      .values({
+        organisationId: ctx.organisationId,
+        name: data.name,
+        contactName: data.contactName ?? null,
+        email: data.email ?? null,
+        phone: data.phone ?? null,
+        notes: data.notes ?? null,
+        ...(data.colour ? { colour: data.colour } : {}),
+        createdByUserId: ctx.userId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "client",
     entityId: row.id,
     eventType: "client.created",
@@ -71,22 +73,23 @@ export function createClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
   return row;
 }
 
-export function updateClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
+export async function updateClient(tx: Tx, ctx: AuthContext, input: unknown): Promise<Client> {
   assertRoleMayEver(ctx, "client.edit");
   const data = parseInput(UpdateClientInput, input);
-  const client = loadClientInOrg(tx, ctx, data.clientId);
+  const client = await loadClientInOrg(tx, ctx, data.clientId);
   assertCan(ctx, "client.edit", clientResourceRef(client));
   checkVersion(client, data.expectedVersion, client);
 
   const diff = diffFields(client, data, EDITABLE);
   if (diff.changed.length === 0) return client;
-  const row = tx
-    .update(clients)
-    .set({ ...diff.set, updatedAt: ctx.now(), version: client.version + 1 })
-    .where(eq(clients.id, client.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(clients)
+      .set({ ...diff.set, updatedAt: ctx.now(), version: client.version + 1 })
+      .where(eq(clients.id, client.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "client",
     entityId: client.id,
     eventType: "client.updated",
@@ -98,27 +101,28 @@ export function updateClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
   return row;
 }
 
-export function archiveClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
+export async function archiveClient(tx: Tx, ctx: AuthContext, input: unknown): Promise<Client> {
   assertCan(ctx, "client.archive");
   const data = parseInput(ArchiveClientInput, input);
-  const client = loadClientInOrg(tx, ctx, data.clientId);
+  const client = await loadClientInOrg(tx, ctx, data.clientId);
   assertCan(ctx, "client.archive", clientResourceRef(client));
   checkVersion(client, data.expectedVersion, client);
   if (client.archivedAt) throw ruleViolation("This client is already archived");
-  const active = activeJobCountForClient(tx, ctx, client.id);
+  const active = await activeJobCountForClient(tx, ctx, client.id);
   if (active > 0) {
     throw ruleViolation(`This client has ${active} active job${active === 1 ? "" : "s"}. Complete or cancel them before archiving.`, {
       activeJobCount: active,
     });
   }
   const now = ctx.now();
-  const row = tx
-    .update(clients)
-    .set({ archivedAt: now, updatedAt: now, version: client.version + 1 })
-    .where(eq(clients.id, client.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(clients)
+      .set({ archivedAt: now, updatedAt: now, version: client.version + 1 })
+      .where(eq(clients.id, client.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "client",
     entityId: client.id,
     eventType: "client.archived",
@@ -130,20 +134,21 @@ export function archiveClient(tx: Tx, ctx: AuthContext, input: unknown): Client 
   return row;
 }
 
-export function restoreClient(tx: Tx, ctx: AuthContext, input: unknown): Client {
+export async function restoreClient(tx: Tx, ctx: AuthContext, input: unknown): Promise<Client> {
   assertCan(ctx, "client.archive");
   const data = parseInput(ArchiveClientInput, input);
-  const client = loadClientInOrg(tx, ctx, data.clientId);
+  const client = await loadClientInOrg(tx, ctx, data.clientId);
   assertCan(ctx, "client.archive", clientResourceRef(client));
   checkVersion(client, data.expectedVersion, client);
   if (!client.archivedAt) throw ruleViolation("This client is not archived");
-  const row = tx
-    .update(clients)
-    .set({ archivedAt: null, updatedAt: ctx.now(), version: client.version + 1 })
-    .where(eq(clients.id, client.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(clients)
+      .set({ archivedAt: null, updatedAt: ctx.now(), version: client.version + 1 })
+      .where(eq(clients.id, client.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "client",
     entityId: client.id,
     eventType: "client.restored",

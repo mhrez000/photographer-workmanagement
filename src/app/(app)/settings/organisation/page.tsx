@@ -23,7 +23,7 @@ function timeZones(current: string): string[] {
 export default async function OrganisationSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "settings.view");
-  const view = load(() => getSettingsView(db, ctx));
+  const view = await load(() => getSettingsView(db, ctx));
   return (
     <PageContainer width="narrow">
       <PageHeader

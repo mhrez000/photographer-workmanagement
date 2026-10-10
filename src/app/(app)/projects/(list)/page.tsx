@@ -37,8 +37,8 @@ export default async function ProjectsPage({ searchParams }: PageProps<"/project
   const clientId = param(sp, "clientId") || undefined;
   const includeArchived = param(sp, "archived") === "1";
   const tz = ctx.settings.timezone;
-  const projects = load(() => listProjects(db, ctx, { q, clientId, includeArchived })).sort(byUrgency);
-  const clients = load(() => getClientOptions(db, ctx));
+  const projects = (await load(() => listProjects(db, ctx, { q, clientId, includeArchived }))).sort(byUrgency);
+  const clients = await load(() => getClientOptions(db, ctx));
   const canCreate = allowed(ctx, "project.create");
   const filtered = Boolean(q || clientId || includeArchived);
   const clientName = clientId ? (clients.find((c) => c.id === clientId)?.name ?? null) : null;

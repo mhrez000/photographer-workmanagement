@@ -1,7 +1,7 @@
 /**
  * Audit-log immutability, three layers (ARCHITECTURE.md §0.2):
  *   (a)/(b) no source code path updates activity_events or deletes ledger rows
- *   (c) SQLite triggers reject it at the DB level
+ *   (c) Postgres triggers (drizzle/0001_guards.sql) reject it at the DB level
  * plus: a mutation that throws mid-transaction leaves no event behind, and
  * recordEvent's own contract (summary, metadata, visibility, redaction, activity bump).
  */
@@ -10,7 +10,7 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { activityEvents, jobs, jobStatusTransitions } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, dbRejection, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { withTx } from "@/server/services/_shared";
 import { recordEvent, recordEvents, redact } from "./audit";
 
@@ -101,25 +101,27 @@ describe("source code never mutates the audit ledger", () => {
 let db: TestDb;
 let ids: SeedIds;
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  db = makeTestDb();
-  ids = seedMinimalOrg(db);
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db);
 });
 afterEach(() => fakeClock.reset());
 
 describe("DB triggers", () => {
-  it("reject UPDATE and DELETE on activity_events (raw SQL and Drizzle)", () => {
-    const { eventId } = insertJobFixture(db, ids);
-    expect(() => db.$client.prepare(`UPDATE activity_events SET summary = 'x' WHERE id = ?`).run(eventId)).toThrow(/append-only/);
-    expect(() => db.$client.prepare(`DELETE FROM activity_events WHERE id = ?`).run(eventId)).toThrow(/append-only/);
-    expect(() => db.$client.prepare(`DELETE FROM activity_events`).run()).toThrow(/append-only/);
-    expect(() => db.update(activityEvents).set({ visibility: "all" }).where(eq(activityEvents.id, eventId)).run()).toThrow(/append-only/);
-    expect(db.select().from(activityEvents).where(eq(activityEvents.id, eventId)).get()?.summary).toMatch(/^created job/);
+  it("reject UPDATE and DELETE on activity_events (raw SQL and Drizzle)", async () => {
+    const { eventId } = await insertJobFixture(db, ids);
+    expect(await dbRejection(db.$client.query(`UPDATE activity_events SET summary = 'x' WHERE id = $1`, [eventId]))).toMatch(/append-only/);
+    expect(await dbRejection(db.$client.query(`DELETE FROM activity_events WHERE id = $1`, [eventId]))).toMatch(/append-only/);
+    expect(await dbRejection(db.$client.query(`DELETE FROM activity_events`))).toMatch(/append-only/);
+    // Postgres-only hole closed too: TRUNCATE bypasses row triggers, so it has its own guard.
+    expect(await dbRejection(db.$client.query(`TRUNCATE activity_events CASCADE`))).toMatch(/append-only/);
+    expect(await dbRejection(db.update(activityEvents).set({ visibility: "all" }).where(eq(activityEvents.id, eventId)))).toMatch(/append-only/);
+    expect((await db.select().from(activityEvents).where(eq(activityEvents.id, eventId)))[0]?.summary).toMatch(/^created job/);
   });
 
-  it("reject DELETE on every ledger and on jobs/users", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "in_progress" });
+  it("reject DELETE on every ledger and on jobs/users", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     const statements: [string, string][] = [
       ["job_status_transitions", `DELETE FROM job_status_transitions WHERE job_id = '${job.id}'`],
       ["job_assignments", `DELETE FROM job_assignments WHERE job_id = '${job.id}'`],
@@ -127,37 +129,37 @@ describe("DB triggers", () => {
       ["users", `DELETE FROM users WHERE id = '${ids.users.editor2}'`],
     ];
     for (const [table, statement] of statements) {
-      expect(() => db.$client.prepare(statement).run(), table).toThrow();
+      expect(await dbRejection(db.$client.query(statement)), table).toMatch(/append-only|cannot be deleted/);
     }
   });
 
-  it("accept a fill-once close exactly once", () => {
-    const { transitionId } = insertJobFixture(db, ids, { statusKey: "in_progress" });
+  it("accept a fill-once close exactly once", async () => {
+    const { transitionId } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     const close = (at: string) =>
-      db.update(jobStatusTransitions).set({ exitedAt: at, durationSeconds: 60 }).where(eq(jobStatusTransitions.id, transitionId)).run();
-    expect(() => close("2026-10-08T00:01:00.000Z")).not.toThrow();
-    expect(() => close("2026-10-08T00:02:00.000Z")).toThrow(/fill-once/);
+      db.update(jobStatusTransitions).set({ exitedAt: at, durationSeconds: 60 }).where(eq(jobStatusTransitions.id, transitionId));
+    await expect(close("2026-10-08T00:01:00.000Z")).resolves.not.toThrow();
+    expect(await dbRejection(close("2026-10-08T00:02:00.000Z"))).toMatch(/fill-once/);
   });
 
-  it("reject a status change without its open transition row", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "assigned" });
-    expect(() =>
-      db.update(jobs).set({ statusId: ids.statuses.in_progress, statusCategory: "in_progress" }).where(eq(jobs.id, job.id)).run(),
-    ).toThrow(/transitionJobStatus/);
+  it("reject a status change without its open transition row", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "assigned" });
+    expect(
+      await dbRejection(db.update(jobs).set({ statusId: ids.statuses.in_progress, statusCategory: "in_progress" }).where(eq(jobs.id, job.id))),
+    ).toMatch(/transitionJobStatus/);
   });
 });
 
 describe("transactional integrity", () => {
-  it("a service that throws mid-transaction leaves no event and no activity bump", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const before = db.select().from(activityEvents).all().length;
-    const ctx = contextFor(db, ids.users.manager);
+  it("a service that throws mid-transaction leaves no event and no activity bump", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
+    const before = (await db.select().from(activityEvents)).length;
+    const ctx = await contextFor(db, ids.users.manager);
     fakeClock.advanceHours(1);
-    expect(() =>
+    await expect(
       withTx(
-        (tx) => {
-          tx.update(jobs).set({ priority: "urgent" }).where(eq(jobs.id, job.id)).run();
-          recordEvent(tx, ctx, {
+        async (tx) => {
+          await tx.update(jobs).set({ priority: "urgent" }).where(eq(jobs.id, job.id));
+          await recordEvent(tx, ctx, {
             entityType: "job",
             entityId: job.id,
             jobId: job.id,
@@ -170,16 +172,16 @@ describe("transactional integrity", () => {
         },
         { db },
       ),
-    ).toThrow("boom after the event");
-    expect(db.select().from(activityEvents).all()).toHaveLength(before);
-    const after = db.select().from(jobs).where(eq(jobs.id, job.id)).get();
+    ).rejects.toThrow("boom after the event");
+    expect(await db.select().from(activityEvents)).toHaveLength(before);
+    const [after] = await db.select().from(jobs).where(eq(jobs.id, job.id));
     expect(after?.priority).toBe("normal");
     expect(after?.lastActivityAt).toBe(job.lastActivityAt);
   });
 
-  it("an unknown event type aborts the whole mutation", () => {
-    const ctx = contextFor(db, ids.users.manager);
-    expect(() =>
+  it("an unknown event type aborts the whole mutation", async () => {
+    const ctx = await contextFor(db, ids.users.manager);
+    await expect(
       withTx(
         (tx) =>
           recordEvent(tx, ctx, {
@@ -191,7 +193,7 @@ describe("transactional integrity", () => {
           }),
         { db },
       ),
-    ).toThrow(/unknown event type/);
+    ).rejects.toThrow(/unknown event type/);
   });
 });
 
@@ -200,11 +202,11 @@ describe("transactional integrity", () => {
 /* ------------------------------------------------------------------ */
 
 describe("recordEvent", () => {
-  it("writes actor, frozen actor-less summary and metadata { requestId, cause, ...extras }", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "assigned" });
-    const ctx = contextFor(db, ids.users.editor1, { requestId: "req-42" });
+  it("writes actor, frozen actor-less summary and metadata { requestId, cause, ...extras }", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "assigned" });
+    const ctx = await contextFor(db, ids.users.editor1, { requestId: "req-42" });
     fakeClock.advanceMinutes(30);
-    const id = withTx(
+    const id = await withTx(
       (tx) =>
         recordEvent(tx, ctx, {
           entityType: "job",
@@ -218,7 +220,7 @@ describe("recordEvent", () => {
         }),
       { db },
     );
-    const event = db.select().from(activityEvents).where(eq(activityEvents.id, id)).get();
+    const [event] = await db.select().from(activityEvents).where(eq(activityEvents.id, id));
     expect(event).toMatchObject({
       organisationId: ids.organisationId,
       actorUserId: ids.users.editor1,
@@ -228,30 +230,30 @@ describe("recordEvent", () => {
       createdAt: "2026-10-08T00:30:00.000Z",
       metadata: { requestId: "req-42", cause: "user", transitionId: "t-1", sequence: 2 },
     });
-    expect(db.select().from(jobs).where(eq(jobs.id, job.id)).get()?.lastActivityAt).toBe("2026-10-08T00:30:00.000Z");
+    expect((await db.select().from(jobs).where(eq(jobs.id, job.id)))[0]?.lastActivityAt).toBe("2026-10-08T00:30:00.000Z");
   });
 
-  it("bumps last_activity_at monotonically (a backdated event never rewinds it) and never bumps version", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const ctx = contextFor(db, ids.users.manager);
+  it("bumps last_activity_at monotonically (a backdated event never rewinds it) and never bumps version", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
+    const ctx = await contextFor(db, ids.users.manager);
     const write = () =>
       withTx(
         (tx) => recordEvent(tx, ctx, { entityType: "job", entityId: job.id, jobId: job.id, eventType: "job.paused", action: "paused" }),
         { db },
       );
     fakeClock.advanceHours(2);
-    write();
+    await write();
     fakeClock.set("2026-10-07T00:00:00.000Z");
-    write();
-    const row = db.select().from(jobs).where(eq(jobs.id, job.id)).get();
+    await write();
+    const [row] = await db.select().from(jobs).where(eq(jobs.id, job.id));
     expect(row?.lastActivityAt).toBe("2026-10-08T02:00:00.000Z");
     expect(row?.version).toBe(job.version);
   });
 
-  it("forces management visibility for management prefixes and internal notes, never downgrades", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "in_progress" });
-    const ctx = contextFor(db, ids.users.manager);
-    const [userEvt, internalNote, editorNote, explicit] = withTx(
+  it("forces management visibility for management prefixes and internal notes, never downgrades", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
+    const ctx = await contextFor(db, ids.users.manager);
+    const [userEvt, internalNote, editorNote, explicit] = await withTx(
       (tx) =>
         recordEvents(tx, ctx, [
           { entityType: "user", entityId: ids.users.editor2, eventType: "user.capacity_changed", action: "updated", visibility: "all" },
@@ -261,16 +263,16 @@ describe("recordEvent", () => {
         ]),
       { db },
     );
-    const vis = (id: string) => db.select().from(activityEvents).where(eq(activityEvents.id, id)).get()?.visibility;
-    expect(vis(userEvt)).toBe("management");
-    expect(vis(internalNote)).toBe("management");
-    expect(vis(editorNote)).toBe("all");
-    expect(vis(explicit)).toBe("management");
+    const vis = async (id: string) => (await db.select().from(activityEvents).where(eq(activityEvents.id, id)))[0]?.visibility;
+    expect(await vis(userEvt)).toBe("management");
+    expect(await vis(internalNote)).toBe("management");
+    expect(await vis(editorNote)).toBe("all");
+    expect(await vis(explicit)).toBe("management");
   });
 
-  it("redacts password hashes, secrets and tokens from snapshots and metadata", () => {
-    const ctx = contextFor(db, ids.users.owner);
-    const id = withTx(
+  it("redacts password hashes, secrets and tokens from snapshots and metadata", async () => {
+    const ctx = await contextFor(db, ids.users.owner);
+    const id = await withTx(
       (tx) =>
         recordEvent(tx, ctx, {
           entityType: "user",
@@ -283,25 +285,26 @@ describe("recordEvent", () => {
         }),
       { db },
     );
-    const event = db.select().from(activityEvents).where(eq(activityEvents.id, id)).get();
+    const [event] = await db.select().from(activityEvents).where(eq(activityEvents.id, id));
     expect(event?.previousValue).toEqual({ name: "Eve", nested: { ok: 1 } });
     expect(event?.newValue).toEqual({ name: "Eve E" });
     expect(event?.metadata).not.toHaveProperty("sessionToken");
     expect(JSON.stringify(event)).not.toMatch(/\$2a\$|plain/);
   });
 
-  it("redact() normalises values to JSON", () => {
+  it("redact() normalises values to JSON", async () => {
     expect(redact({ a: undefined, b: new Date("2026-01-01T00:00:00.000Z"), c: [1, undefined, NaN], d: () => 1 })).toEqual({
       b: "2026-01-01T00:00:00.000Z",
       c: [1, null, null],
     });
   });
 
-  it("system contexts write actor null with cause sweep/seed", () => {
-    const { job } = insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: "2026-10-07T12:59:59.999Z" });
-    const id = withTx(
+  it("system contexts write actor null with cause sweep/seed", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: "2026-10-07T12:59:59.999Z" });
+    const ownerCtx = await contextFor(db, ids.users.owner);
+    const id = await withTx(
       (tx) =>
-        recordEvent(tx, { ...contextFor(db, ids.users.owner), userId: null, isSystem: true }, {
+        recordEvent(tx, { ...ownerCtx, userId: null, isSystem: true }, {
           entityType: "job",
           entityId: job.id,
           jobId: job.id,
@@ -311,7 +314,7 @@ describe("recordEvent", () => {
         }),
       { db },
     );
-    const event = db.select().from(activityEvents).where(eq(activityEvents.id, id)).get();
+    const [event] = await db.select().from(activityEvents).where(eq(activityEvents.id, id));
     expect(event?.actorUserId).toBeNull();
     expect(event?.metadata).toMatchObject({ cause: "sweep" });
     expect(event?.summary).toBe("flagged the job as overdue");

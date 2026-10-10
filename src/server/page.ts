@@ -13,7 +13,7 @@ import { ForbiddenError, NotFoundError } from "@/server/errors";
  *
  *   const { ctx, db } = await pageContext();
  *   guard(ctx, "analytics.view");                       // 403 page if denied
- *   const detail = load(() => getJobDetail(db, ctx, id)); // 404 / 403 mapped
+ *   const detail = await load(() => getJobDetail(db, ctx, id)); // 404 / 403 mapped
  *
  * UI hiding is never the security boundary: every page re-checks here, and
  * every query/service re-checks again.
@@ -41,10 +41,10 @@ export function allowed(ctx: AuthContext, action: Action, resource?: Parameters<
   return can(ctx, action, resource as never);
 }
 
-/** Runs a query, mapping NotFoundError → 404 page and ForbiddenError → 403 page. */
-export function load<T>(fn: () => T): T {
+/** Awaits a query, mapping NotFoundError → 404 page and ForbiddenError → 403 page. */
+export async function load<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
-    return fn();
+    return await fn();
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     if (err instanceof ForbiddenError) forbidden();

@@ -13,7 +13,7 @@ export default async function JobLayout({ children, params }: LayoutProps<"/jobs
   const { id: rawId } = await params;
   const id = decodeURIComponent(rawId);
   const { ctx, db } = await pageContext();
-  if (JOB_NUMBER.test(id)) load(() => getJobRowByNumber(db, ctx, id));
-  else if (getJobRowsByIds(db, ctx, [id]).length === 0) notFound();
+  if (JOB_NUMBER.test(id)) await load(() => getJobRowByNumber(db, ctx, id));
+  else if ((await getJobRowsByIds(db, ctx, [id])).length === 0) notFound();
   return children;
 }

@@ -9,11 +9,12 @@
  *    `visibleJobsWhere(ctx)`, plus non-job events they performed themselves.
  *
  * Order = (created_at, rowid): events written in the same millisecond keep
- * their insertion order (ids are random nanoids, so `id` is no tie-breaker).
+ * their insertion order (ids are random nanoids, so `id` is no tie-breaker;
+ * `rowid` is the bigint identity column that replaces SQLite's implicit rowid).
  * Cursor = keyset over (created_at DESC, rowid DESC); the encoded cursor
  * still carries `(createdAt, id)` and the id is resolved to its rowid.
  */
-import { and, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { activityEvents, jobs, projects, users } from "@/db/schema";
@@ -98,8 +99,8 @@ export function activityScopeWhere(db: DbLike, ctx: AuthContext): SQL {
 /*  Mapping                                                            */
 /* ------------------------------------------------------------------ */
 
-/** `activity_events.rowid` — the insertion order (qualified: the feed joins users / jobs). */
-const EVENT_ROWID = sql<number>`"activity_events"."rowid"`;
+/** `activity_events.rowid` — the insertion order (identity column; qualified because the feed joins users / jobs). */
+const EVENT_ROWID = activityEvents.rowid;
 
 const FEED_FIELDS = {
   event: activityEvents,
@@ -164,7 +165,7 @@ function boundSql(value: string, side: "from" | "to", tz: string): SQL {
  * Global / filtered feed, newest first. Input = `ActivityFiltersInput` (or
  * raw search params). Events the actor may not see are never returned.
  */
-export function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}): Paginated<ActivityFeedItem> {
+export async function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<Paginated<ActivityFeedItem>> {
   assertCan(ctx, "activity.view_global");
   const f = parseInput(ActivityFiltersSchema, input ?? {});
   const tz = ctx.settings.timezone;
@@ -207,11 +208,10 @@ export function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}):
     );
   }
 
-  const rows = feedQuery(db)
+  const rows = (await feedQuery(db)
     .where(and(...parts))
     .orderBy(desc(activityEvents.createdAt), desc(EVENT_ROWID))
-    .limit(limit + 1)
-    .all() as RawFeedRow[];
+    .limit(limit + 1)) as RawFeedRow[];
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
@@ -222,8 +222,8 @@ export function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}):
 }
 
 /** Events of one job of the given types, oldest first, scoped like the feed (no pagination). */
-export function jobEvents(db: DbLike, ctx: AuthContext, jobId: string, eventTypes?: readonly EventType[]): ActivityFeedItem[] {
-  const rows = feedQuery(db)
+export async function jobEvents(db: DbLike, ctx: AuthContext, jobId: string, eventTypes?: readonly EventType[]): Promise<ActivityFeedItem[]> {
+  const rows = (await feedQuery(db)
     .where(
       and(
         activityScopeWhere(db, ctx),
@@ -231,7 +231,7 @@ export function jobEvents(db: DbLike, ctx: AuthContext, jobId: string, eventType
         eventTypes && eventTypes.length ? inArray(activityEvents.eventType, [...eventTypes]) : undefined,
       ),
     )
-    .orderBy(activityEvents.createdAt, EVENT_ROWID)
-    .all() as RawFeedRow[];
+    .orderBy(asc(activityEvents.createdAt), asc(EVENT_ROWID))) as RawFeedRow[];
+
   return rows.map(toFeedItem);
 }

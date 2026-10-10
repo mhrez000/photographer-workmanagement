@@ -55,9 +55,9 @@ export default async function UsersSettingsPage({ searchParams }: PageProps<"/se
   const active = status === "all" ? undefined : status === "inactive" ? "0" : "1";
 
   const tz = ctx.settings.timezone;
-  const settings = load(() => getSettingsView(db, ctx)).settings;
-  const users = load(() => listUsers(db, ctx, { q, role, active })).filter(isProfile);
-  const teams = teamsByUser(
+  const settings = (await load(() => getSettingsView(db, ctx))).settings;
+  const users = (await load(() => listUsers(db, ctx, { q, role, active }))).filter(isProfile);
+  const teams = await teamsByUser(
     db,
     ctx,
     users.map((u) => u.id),

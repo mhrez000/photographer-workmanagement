@@ -1,5 +1,5 @@
 /**
- * Demo seed orchestration (ARCHITECTURE.md §12). `runSeed(db, sqlite)`:
+ * Demo seed orchestration (ARCHITECTURE.md §12). `runSeed(db, options)`:
  *
  *   A. bootstraps Northlight Studios and builds its structure through the
  *      admin services (settings, users, workflows, job types, teams,
@@ -11,12 +11,12 @@
  *      read, runs the final sweep at real now;
  *   D. returns counts; the CLI (src/db/seed.ts) verifies and prints them.
  *
- * Deterministic for a given "now": mulberry32(42) drives every choice.
+ * Deterministic for a given "now": mulberry32(42) drives every choice
+ * (every step is awaited in order, so the PRNG sequence never interleaves).
  */
-import type Database from "better-sqlite3";
 import { hash } from "bcryptjs";
-import type { Db } from "@/db/index";
-import { jobs, notifications, users } from "@/db/schema";
+import { first, type Db } from "@/db/index";
+import { jobs, notifications, organisations, users } from "@/db/schema";
 import { and, asc, count, eq, isNull } from "drizzle-orm";
 import { addCivilDays, civilDate, startOfCivilDayIso } from "@/lib/dates";
 import { resetClock } from "@/server/clock";
@@ -49,6 +49,8 @@ import {
 import { NorthlightSeeder, buildSpecs } from "./northlight";
 import { DAY, HOUR, MINUTE, SeedRuntime } from "./runtime";
 import type { PreparedSecret } from "@/server/services/users";
+import type { Tx } from "@/server/services/_shared";
+import type { AuthContext } from "@/lib/types";
 import type { JobTypeName } from "./catalog";
 
 export interface SeedOptions {
@@ -69,7 +71,7 @@ export interface SeedResult {
   notificationsRead: { read: number; total: number };
 }
 
-export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOptions = {}): Promise<SeedResult> {
+export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedResult> {
   const log = options.log ?? (() => {});
   const nowMs = (options.now ?? new Date()).getTime();
   const durations: Record<string, number> = {};
@@ -80,7 +82,8 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     mark = t;
   };
 
-  if ((sqlite.prepare("SELECT COUNT(*) AS n FROM organisations").get() as { n: number }).n > 0) {
+  const [existing] = await db.select({ n: count() }).from(organisations);
+  if ((existing?.n ?? 0) > 0) {
     throw new Error("The database already has organisations. Run `npm run db:reset` for a fresh demo database.");
   }
 
@@ -100,36 +103,36 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     const tick = (minutes = 1) => at(t + minutes * MINUTE);
 
     at(t0);
-    const { organisationId: nl, ownerId } = bootstrapOrganisation(rt, NORTHLIGHT, OWNER, passwordHash);
+    const { organisationId: nl, ownerId } = await bootstrapOrganisation(rt, NORTHLIGHT, OWNER, passwordHash);
     tick(5);
-    enableTimeTracking(rt, ownerId);
+    await enableTimeTracking(rt, ownerId);
     tick(5);
-    const defaultWf = createDefaultWorkflow(rt, ownerId);
+    const defaultWf = await createDefaultWorkflow(rt, ownerId);
     tick(10);
-    const quickWf = createQuickWorkflow(rt, ownerId);
+    const quickWf = await createQuickWorkflow(rt, ownerId);
     tick(15);
-    const videoWf = createVideoWorkflow(rt, ownerId);
+    const videoWf = await createVideoWorkflow(rt, ownerId);
     tick(20);
     const workflows = { default: defaultWf, quick: quickWf, video: videoWf };
-    const jobTypes: Record<JobTypeName, string> = createJobTypes(rt, ownerId, workflows);
+    const jobTypes: Record<JobTypeName, string> = await createJobTypes(rt, ownerId, workflows);
 
     at(t0 + 2 * HOUR);
     const managers = STAFF.filter((u) => u.role === "manager");
     for (const m of managers) {
-      inviteSeedUser(rt, NORTHLIGHT.slug, ownerId, m, secret);
+      await inviteSeedUser(rt, NORTHLIGHT.slug, ownerId, m, secret);
       tick(3);
     }
     at(t0 + DAY + 9 * HOUR);
     const manager1 = rt.user(NORTHLIGHT.slug, "manager1");
     const manager2 = rt.user(NORTHLIGHT.slug, "manager2");
     for (const u of STAFF.filter((x) => x.role !== "manager")) {
-      inviteSeedUser(rt, NORTHLIGHT.slug, rt.rng.chance(0.5) ? manager1 : ownerId, u, secret);
+      await inviteSeedUser(rt, NORTHLIGHT.slug, rt.rng.chance(0.5) ? manager1 : ownerId, u, secret);
       tick(rt.rng.int(2, 9));
     }
 
     at(t0 + 2 * DAY + 10 * HOUR);
     for (const team of TEAMS) {
-      createSeedTeam(rt, manager1, {
+      await createSeedTeam(rt, manager1, {
         name: team.name,
         description: team.description,
         leadUserId: rt.user(NORTHLIGHT.slug, team.lead),
@@ -139,24 +142,25 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     }
 
     at(t0 + 2 * DAY + 13 * HOUR);
-    const clients = CLIENTS.map((def) => {
-      const id = createSeedClient(rt, rt.rng.chance(0.5) ? manager1 : manager2, {
+    const clients: { def: (typeof CLIENTS)[number]; id: string }[] = [];
+    for (const def of CLIENTS) {
+      const id = await createSeedClient(rt, rt.rng.chance(0.5) ? manager1 : manager2, {
         name: def.name,
         contactName: def.contactName,
         email: def.email,
         phone: def.phone,
       });
       tick(rt.rng.int(3, 15));
-      return { def, id };
-    });
+      clients.push({ def, id });
+    }
 
     at(t0 + 3 * DAY + 9 * HOUR);
-    seedAutomations(rt, manager1, ownerId);
+    await seedAutomations(rt, manager1, ownerId);
 
     at(t0 + 4 * DAY + 10 * HOUR);
-    seedSavedViews(rt, manager1);
+    await seedSavedViews(rt, manager1);
     at(t0 + 5 * DAY + 9 * HOUR);
-    seedDashboards(rt, ownerId);
+    await seedDashboards(rt, ownerId);
     lap("structure");
 
     /* ---------------- B. jobs + timeline ---------------- */
@@ -166,23 +170,23 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
 
 
     // editor13 leaves 10 days ago: their open jobs go to editor05 (reassignment history).
-    rt.schedule(seeder.deactivate13At, "deactivate editor13", () => {
+    rt.schedule(seeder.deactivate13At, "deactivate editor13", async () => {
       const target = rt.user(NORTHLIGHT.slug, "editor13");
-      const version = userVersion(rt, target);
-      rt.act(ownerId, (tx, ctx) =>
+      const version = await userVersion(rt, target);
+      await rt.act(ownerId, (tx, ctx) =>
         deactivateUser(tx, ctx, { userId: target, reassignTo: rt.user(NORTHLIGHT.slug, "editor05"), reason: "Left the studio", expectedVersion: version }),
       );
     });
     // editor11 is deactivated 3 days ago without a hand-over (editor-unavailable bottleneck).
-    rt.schedule(seeder.deactivate11At, "deactivate editor11", () => {
+    rt.schedule(seeder.deactivate11At, "deactivate editor11", async () => {
       const target = rt.user(NORTHLIGHT.slug, "editor11");
-      const version = userVersion(rt, target);
-      rt.act(manager1, (tx, ctx) => deactivateUser(tx, ctx, { userId: target, reason: "Extended leave", expectedVersion: version }));
+      const version = await userVersion(rt, target);
+      await rt.act(manager1, (tx, ctx) => deactivateUser(tx, ctx, { userId: target, reason: "Extended leave", expectedVersion: version }));
     });
     // Two agencies stopped booking: archived once all their jobs are done.
-    rt.schedule(nowMs - 2 * DAY, "archive clients", () => {
+    rt.schedule(nowMs - 2 * DAY, "archive clients", async () => {
       for (const c of clients.filter((x) => x.def.archived)) {
-        rt.act(manager1, (tx, ctx) => archiveClient(tx, ctx, { clientId: c.id }));
+        await rt.act(manager1, (tx, ctx) => archiveClient(tx, ctx, { clientId: c.id }));
       }
     });
     // The lazy sweep runs every morning (overdue flags, workload bands, editor-unavailable notices).
@@ -192,8 +196,8 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     while (day <= today) {
       const sweepAt = Date.parse(startOfCivilDayIso(day, tz)) + 7 * HOUR + 30 * MINUTE;
       if (sweepAt < nowMs - 5 * MINUTE) {
-        rt.schedule(sweepAt, `sweep ${day}`, () => {
-          const result = runSweep(db, nl);
+        rt.schedule(sweepAt, `sweep ${day}`, async () => {
+          const result = await runSweep(db, nl);
           if (result.errors.length > 0) throw new Error(`sweep errors: ${JSON.stringify(result.errors)}`);
         });
       }
@@ -201,7 +205,7 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     }
     log(`seed: ${seeder.plans.length} jobs planned, ${rt.queued} steps queued`);
     try {
-      rt.runQueue();
+      await rt.runQueue();
     } finally {
       const top = [...rt.timings.entries()].sort((a, b) => b[1].ms - a[1].ms).slice(0, 8);
       log(`seed: slowest step kinds: ${top.map(([k, v]) => `${k} ${v.n}×${(v.ms / v.n).toFixed(1)}ms=${(v.ms / 1000).toFixed(1)}s`).join(", ")}`);
@@ -209,14 +213,14 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
     lap("history");
 
     /* ---------------- C. Other Studio, notifications, final sweep ---------------- */
-    const otherStudioId = seedOtherStudio(rt, passwordHash, secret);
+    const otherStudioId = await seedOtherStudio(rt, passwordHash, secret);
     lap("other studio");
 
-    const notificationsRead = markNotificationsRead(rt);
+    const notificationsRead = await markNotificationsRead(rt);
     lap("notifications");
 
     rt.setTime(nowMs);
-    const finalSweeps = [runSweep(db, nl), runSweep(db, otherStudioId)];
+    const finalSweeps = [await runSweep(db, nl), await runSweep(db, otherStudioId)];
     for (const r of finalSweeps) if (r.errors.length > 0) throw new Error(`final sweep errors: ${JSON.stringify(r.errors)}`);
     lap("final sweep");
 
@@ -234,8 +238,8 @@ export async function runSeed(db: Db, sqlite: Database.Database, options: SeedOp
   }
 }
 
-function userVersion(rt: SeedRuntime, userId: string): number {
-  const row = rt.db.select({ version: users.version }).from(users).where(eq(users.id, userId)).get();
+async function userVersion(rt: SeedRuntime, userId: string): Promise<number> {
+  const row = await first(rt.db.select({ version: users.version }).from(users).where(eq(users.id, userId)));
   if (!row) throw new Error(`seed: user ${userId} missing`);
   return row.version;
 }
@@ -244,42 +248,42 @@ function userVersion(rt: SeedRuntime, userId: string): number {
 /*  Automations, saved views, dashboards                               */
 /* ------------------------------------------------------------------ */
 
-function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: string): void {
-  const create = (actor: string, input: Record<string, unknown>) => {
-    const row = rt.act(actor, (tx, ctx) => createAutomation(tx, ctx, input));
+async function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: string): Promise<void> {
+  const create = async (actor: string, input: Record<string, unknown>) => {
+    const row = await rt.act(actor, (tx, ctx) => createAutomation(tx, ctx, input));
     rt.setTime(Date.parse(row.createdAt) + 4 * MINUTE);
     return row.id;
   };
   // The photographer (work_submitted) and the editor (job_overdue) already get a
   // built-in notice for these events, so the example rules target the managers,
   // who would otherwise hear nothing (and the engine never double-notifies, §7).
-  create(managerId, {
+  await create(managerId, {
     name: "Submitted → notify managers",
     description: "Let the managers know edits have landed in review (the photographer is told automatically).",
     trigger: { type: "status_changed", toCategory: "submitted" },
     actions: [{ type: "notify", target: "managers", message: "Edits are ready for review." }],
   });
-  create(managerId, {
+  await create(managerId, {
     name: "Overdue → notify managers",
     description: "Escalate jobs that pass their editing deadline (the editor and photographer are told automatically).",
     trigger: { type: "job_overdue" },
     actions: [{ type: "notify", target: "managers", message: "A job just went overdue." }],
   });
-  create(managerId, {
+  await create(managerId, {
     name: "Repeat revision → back to the original editor",
     description: "When a job needs a second (or later) revision, hand it back to the editor who first worked on it.",
     trigger: { type: "revision_requested" },
     conditions: [{ field: "revisionCount", op: "gte", value: 2 }],
     actions: [{ type: "assign_editor", target: "original_editor" }],
   });
-  create(ownerId, {
+  await create(ownerId, {
     name: "Approved → complete",
     description: "Close jobs automatically once approved. Kept switched off: photographers still deliver first.",
     isEnabled: false,
     trigger: { type: "status_changed", toCategory: "approved" },
     actions: [{ type: "transition", toCategory: "completed", reason: "Auto-completed on approval" }],
   });
-  create(managerId, {
+  await create(managerId, {
     name: "Editor overloaded → notify managers",
     description: "Flag editors who tip into the overloaded band.",
     trigger: { type: "workload_threshold", band: "overloaded" },
@@ -289,7 +293,7 @@ function seedAutomations(rt: SeedRuntime, managerId: string, ownerId: string): v
 
 const VIEW_COLUMNS = ["job", "client", "editor", "status", "priority", "dueDate", "daysRemaining", "lastActivity"] as const;
 
-function seedSavedViews(rt: SeedRuntime, managerId: string): void {
+async function seedSavedViews(rt: SeedRuntime, managerId: string): Promise<void> {
   const shared: [string, string][] = [
     ["Overdue", "overdue"],
     ["Awaiting Review", "awaiting_review"],
@@ -297,7 +301,7 @@ function seedSavedViews(rt: SeedRuntime, managerId: string): void {
     ["Unassigned", "unassigned"],
   ];
   for (const [name, quick] of shared) {
-    rt.act(managerId, (tx, ctx) =>
+    await rt.act(managerId, (tx, ctx) =>
       createSavedView(tx, ctx, {
         name,
         scope: "all_work",
@@ -307,7 +311,7 @@ function seedSavedViews(rt: SeedRuntime, managerId: string): void {
     );
   }
   for (const key of ["editor01", "editor03", "photographer01", "manager2"]) {
-    rt.act(rt.user(NORTHLIGHT.slug, key), (tx, ctx) =>
+    await rt.act(rt.user(NORTHLIGHT.slug, key), (tx, ctx) =>
       createSavedView(tx, ctx, {
         name: "My Jobs",
         scope: "all_work",
@@ -318,9 +322,9 @@ function seedSavedViews(rt: SeedRuntime, managerId: string): void {
   }
 }
 
-function seedDashboards(rt: SeedRuntime, ownerId: string): void {
+async function seedDashboards(rt: SeedRuntime, ownerId: string): Promise<void> {
   const w = (id: string, type: string, x: number, y: number, width: number, h: number) => ({ id, type, x, y, w: width, h });
-  rt.act(ownerId, (tx, ctx) =>
+  await rt.act(ownerId, (tx, ctx) =>
     putDashboardLayout(tx, ctx, {
       expectedVersion: 0,
       layout: {
@@ -337,7 +341,7 @@ function seedDashboards(rt: SeedRuntime, ownerId: string): void {
       },
     }),
   );
-  rt.act(rt.user(NORTHLIGHT.slug, "editor01"), (tx, ctx) =>
+  await rt.act(rt.user(NORTHLIGHT.slug, "editor01"), (tx, ctx) =>
     putDashboardLayout(tx, ctx, {
       expectedVersion: 0,
       layout: {
@@ -375,7 +379,7 @@ const OTHER_EDITOR: SeedUserDef = {
   capacityHoursPerWeek: 30,
 };
 
-function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: PreparedSecret): string {
+async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: PreparedSecret): Promise<string> {
   const now = rt.nowMs;
   let t = now - 60 * DAY;
   const at = (ms: number) => {
@@ -383,55 +387,62 @@ function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: Prepared
     rt.setTime(t);
   };
   at(t);
-  const { organisationId, ownerId } = bootstrapOrganisation(rt, OTHER_STUDIO, OTHER_OWNER, passwordHash);
+  const { organisationId, ownerId } = await bootstrapOrganisation(rt, OTHER_STUDIO, OTHER_OWNER, passwordHash);
   at(t + 10 * MINUTE);
-  const wf = createDefaultWorkflow(rt, ownerId);
+  const wf = await createDefaultWorkflow(rt, ownerId);
   at(t + 20 * MINUTE);
-  const jobTypes = createJobTypes(rt, ownerId, { default: wf, quick: wf, video: wf });
+  const jobTypes = await createJobTypes(rt, ownerId, { default: wf, quick: wf, video: wf });
   at(t + HOUR);
-  const editorId = inviteSeedUser(rt, OTHER_STUDIO.slug, ownerId, OTHER_EDITOR, secret);
+  const editorId = await inviteSeedUser(rt, OTHER_STUDIO.slug, ownerId, OTHER_EDITOR, secret);
   at(t + 2 * HOUR);
-  const clientId = createSeedClient(rt, ownerId, { name: "Lakeside Property Co", contactName: "Dana Wells", email: "dana@lakesideproperty.example", phone: "02 9970 1188" });
+  const clientId = await createSeedClient(rt, ownerId, { name: "Lakeside Property Co", contactName: "Dana Wells", email: "dana@lakesideproperty.example", phone: "02 9970 1188" });
   at(t + 2 * HOUR + 10 * MINUTE);
-  const projectId = rt.act(ownerId, (tx, ctx) =>
-    createProject(tx, ctx, { clientId, name: "8 Lakeview Parade", address: "8 Lakeview Parade, Narrabeen NSW 2101" }),
+  const projectId = (
+    await rt.act(ownerId, (tx, ctx) => createProject(tx, ctx, { clientId, name: "8 Lakeview Parade", address: "8 Lakeview Parade, Narrabeen NSW 2101" }))
   ).id;
 
   const tz = OTHER_STUDIO.timezone;
   const civil = (ms: number) => civilDate(new Date(ms), tz) as string;
-  const create = (ms: number, name: string, type: JobTypeName, dueDays: number) => {
+  const create = async (ms: number, name: string, type: JobTypeName, dueDays: number) => {
     at(ms);
-    return rt.act(ownerId, (tx, ctx) =>
+    const created = await rt.act(ownerId, (tx, ctx) =>
       createJob(tx, ctx, { name, projectId, jobTypeId: jobTypes[type], photographerId: ownerId, shootDate: civil(ms), dueDate: addCivilDays(civil(ms), dueDays) }),
-    ).job.id;
+    );
+    return created.job.id;
   };
-  const versionOf = (jobId: string) => rt.db.select({ version: jobs.version }).from(jobs).where(eq(jobs.id, jobId)).get()?.version ?? 0;
+  // The version is read on the root db BEFORE act() opens its transaction (never inside it).
+  const versionOf = async (jobId: string) => (await first(rt.db.select({ version: jobs.version }).from(jobs).where(eq(jobs.id, jobId))))?.version ?? 0;
+  type JobStep = (tx: Tx, ctx: AuthContext, input: { jobId: string; expectedVersion: number }) => Promise<unknown>;
+  const step = async (actor: string, jobId: string, fn: JobStep) => {
+    const expectedVersion = await versionOf(jobId);
+    await rt.act(actor, (tx, ctx) => fn(tx, ctx, { jobId, expectedVersion }));
+  };
 
   // Job 1: completed a month ago.
-  const j1 = create(now - 30 * DAY, "8 Lakeview Parade · Listing photos", "Real Estate", 1);
+  const j1 = await create(now - 30 * DAY, "8 Lakeview Parade · Listing photos", "Real Estate", 1);
   at(now - 30 * DAY + 20 * MINUTE);
-  rt.act(ownerId, (tx, ctx) => addLink(tx, ctx, { jobId: j1, kind: "raw_files", url: "https://www.dropbox.com/scl/fo/otherstudio01/raw" }));
+  await rt.act(ownerId, (tx, ctx) => addLink(tx, ctx, { jobId: j1, kind: "raw_files", url: "https://www.dropbox.com/scl/fo/otherstudio01/raw" }));
   at(now - 30 * DAY + 2 * HOUR);
-  rt.act(ownerId, (tx, ctx) => assignEditor(tx, ctx, { jobId: j1, userId: editorId, expectedVersion: versionOf(j1) }));
+  await step(ownerId, j1, (tx, ctx, v) => assignEditor(tx, ctx, { ...v, userId: editorId }));
   at(now - 30 * DAY + 5 * HOUR);
-  rt.act(editorId, (tx, ctx) => startJob(tx, ctx, { jobId: j1, expectedVersion: versionOf(j1) }));
+  await step(editorId, j1, (tx, ctx, v) => startJob(tx, ctx, v));
   at(now - 30 * DAY + 9 * HOUR);
-  rt.act(editorId, (tx, ctx) => addLink(tx, ctx, { jobId: j1, kind: "finished_files", url: "https://drive.google.com/drive/folders/otherstudio01" }));
-  rt.act(editorId, (tx, ctx) => submitJob(tx, ctx, { jobId: j1, expectedVersion: versionOf(j1) }));
+  await rt.act(editorId, (tx, ctx) => addLink(tx, ctx, { jobId: j1, kind: "finished_files", url: "https://drive.google.com/drive/folders/otherstudio01" }));
+  await step(editorId, j1, (tx, ctx, v) => submitJob(tx, ctx, v));
   at(now - 29 * DAY);
-  rt.act(ownerId, (tx, ctx) => approveJob(tx, ctx, { jobId: j1, expectedVersion: versionOf(j1) }));
+  await step(ownerId, j1, (tx, ctx, v) => approveJob(tx, ctx, v));
   at(now - 28 * DAY);
-  rt.act(ownerId, (tx, ctx) => completeJob(tx, ctx, { jobId: j1, expectedVersion: versionOf(j1) }));
+  await step(ownerId, j1, (tx, ctx, v) => completeJob(tx, ctx, v));
 
   // Job 2: in progress.
-  const j2 = create(now - 4 * DAY, "8 Lakeview Parade · Drone stills", "Drone", 6);
+  const j2 = await create(now - 4 * DAY, "8 Lakeview Parade · Drone stills", "Drone", 6);
   at(now - 4 * DAY + 3 * HOUR);
-  rt.act(ownerId, (tx, ctx) => assignEditor(tx, ctx, { jobId: j2, userId: editorId, expectedVersion: versionOf(j2) }));
+  await step(ownerId, j2, (tx, ctx, v) => assignEditor(tx, ctx, { ...v, userId: editorId }));
   at(now - 3 * DAY);
-  rt.act(editorId, (tx, ctx) => startJob(tx, ctx, { jobId: j2, expectedVersion: versionOf(j2) }));
+  await step(editorId, j2, (tx, ctx, v) => startJob(tx, ctx, v));
 
   // Job 3: new.
-  create(now - 1 * DAY, "8 Lakeview Parade · Floor plan", "Floor Plans", 3);
+  await create(now - 1 * DAY, "8 Lakeview Parade · Floor plan", "Floor Plans", 3);
   return organisationId;
 }
 
@@ -439,21 +450,20 @@ function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: Prepared
 /*  Notifications (~70 % read)                                         */
 /* ------------------------------------------------------------------ */
 
-function markNotificationsRead(rt: SeedRuntime): { read: number; total: number } {
-  const all = rt.db.select({ id: users.id }).from(users).where(eq(users.isActive, true)).all();
+async function markNotificationsRead(rt: SeedRuntime): Promise<{ read: number; total: number }> {
+  const all = await rt.db.select({ id: users.id }).from(users).where(eq(users.isActive, true)).orderBy(asc(users.createdAt), asc(users.id));
   let read = 0;
   let current = rt.iso(rt.nowMs);
   for (const { id: userId } of all) {
-    const ctx = buildContextFromDb(rt.db, userId, { now: () => current, cause: "seed", requestId: "seed-notifications" });
+    const ctx = await buildContextFromDb(rt.db, userId, { now: () => current, cause: "seed", requestId: "seed-notifications" });
     if (!ctx) continue;
-    const rows = rt.db
+    const rows = await rt.db
       .select({ id: notifications.id, createdAt: notifications.createdAt })
       .from(notifications)
       .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
-      .orderBy(asc(notifications.createdAt))
-      .all();
-    withTx(
-      (tx) => {
+      .orderBy(asc(notifications.createdAt), asc(notifications.id));
+    await withTx(
+      async (tx) => {
         for (const n of rows) {
           const created = Date.parse(n.createdAt);
           const ageDays = (rt.nowMs - created) / DAY;
@@ -461,13 +471,13 @@ function markNotificationsRead(rt: SeedRuntime): { read: number; total: number }
           if (!rt.rng.chance(p)) continue;
           const readAt = Math.min(created + rt.rng.range(3, 20 * 60) * MINUTE, rt.nowMs - MINUTE);
           current = rt.iso(Math.max(readAt, created));
-          markRead(tx, ctx, { notificationId: n.id });
+          await markRead(tx, ctx, { notificationId: n.id });
           read += 1;
         }
       },
       { db: rt.db },
     );
   }
-  const total = rt.db.select({ n: count() }).from(notifications).get()?.n ?? 0;
+  const total = (await first(rt.db.select({ n: count() }).from(notifications)))?.n ?? 0;
   return { read, total };
 }

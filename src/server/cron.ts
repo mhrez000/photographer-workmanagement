@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { asc } from "drizzle-orm";
 import type { Db } from "@/db/index";
 import { organisations } from "@/db/schema";
 import { runSweep, type SweepResult } from "@/server/services/sweep";
@@ -34,30 +35,31 @@ export interface CronSweepSummary {
   results: Pick<SweepResult, "organisationId" | "ranAt" | "overdueJobIds" | "reviewOverdueJobIds" | "timedOutSessionIds" | "errors">[];
 }
 
-/** Runs the sweep for every organisation. One org's failure never stops the others. */
-export function sweepAllOrganisations(db: Db): CronSweepSummary {
-  const orgIds = db.select({ id: organisations.id }).from(organisations).all();
-  const results = orgIds.map(({ id }) => {
+/** Runs the sweep for every organisation (sequentially). One org's failure never stops the others. */
+export async function sweepAllOrganisations(db: Db): Promise<CronSweepSummary> {
+  const orgIds = await db.select({ id: organisations.id }).from(organisations).orderBy(asc(organisations.id));
+  const results: CronSweepSummary["results"] = [];
+  for (const { id } of orgIds) {
     try {
-      const r = runSweep(db, id, { requestId: `cron-${Date.now().toString(36)}` });
-      return {
+      const r = await runSweep(db, id, { requestId: `cron-${Date.now().toString(36)}` });
+      results.push({
         organisationId: r.organisationId,
         ranAt: r.ranAt,
         overdueJobIds: r.overdueJobIds,
         reviewOverdueJobIds: r.reviewOverdueJobIds,
         timedOutSessionIds: r.timedOutSessionIds,
         errors: r.errors,
-      };
+      });
     } catch (err) {
-      return {
+      results.push({
         organisationId: id,
         ranAt: new Date().toISOString(),
         overdueJobIds: [],
         reviewOverdueJobIds: [],
         timedOutSessionIds: [],
         errors: [{ step: "replay" as const, message: err instanceof Error ? err.message : String(err) }],
-      };
+      });
     }
-  });
+  }
   return { organisations: orgIds.length, results };
 }

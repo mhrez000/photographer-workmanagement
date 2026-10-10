@@ -31,7 +31,7 @@
  *
  * `last_overdue_sweep_at` is an audit exemption (no event, no version bump).
  */
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import { getDb, type Db, type DbLike, type Tx } from "@/db/index";
 import { activityEvents, jobs, organisationSettings, users, type Json } from "@/db/schema";
 import { CATEGORY_GROUPS, SWEEP_MIN_INTERVAL_MINUTES, WORKLOAD_BANDS, WORKLOAD_BAND_META, type WorkloadBand } from "@/lib/constants";
@@ -100,23 +100,22 @@ function round2(n: number): number {
  * `newValue[key]` of the LATEST event of `eventType` per job (or per entity
  * when `by = "entity"`), in insertion order. Missing → absent from the map.
  */
-export function latestFlagValues(
+export async function latestFlagValues(
   db: DbLike,
   organisationId: string,
   eventType: "job.became_overdue" | "job.review_overdue" | "user.workload_band_changed",
   ids: readonly string[],
   key: string,
   by: "job" | "entity" = "job",
-): Map<string, string | null> {
+): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   const column = by === "job" ? activityEvents.jobId : activityEvents.entityId;
   for (const part of chunks(Array.from(new Set(ids)))) {
-    const rows = db
+    const rows = await db
       .select({ ref: column, newValue: activityEvents.newValue })
       .from(activityEvents)
       .where(and(eq(activityEvents.organisationId, organisationId), eq(activityEvents.eventType, eventType), inArray(column, part)))
-      .orderBy(asc(activityEvents.createdAt), asc(sql`rowid`))
-      .all();
+      .orderBy(asc(activityEvents.createdAt), asc(activityEvents.rowid));
     for (const row of rows) {
       if (!row.ref) continue;
       const value = bag(row.newValue)[key];
@@ -131,9 +130,9 @@ export function latestFlagValues(
 /* ------------------------------------------------------------------ */
 
 /** Step 2 — `job.became_overdue`, deduped per (job, dueDate). Returns the flagged job ids. */
-export function flagOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
+export async function flagOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[]> {
   const now = ctx.now();
-  const candidates = tx
+  const candidates = await tx
     .select()
     .from(jobs)
     .where(
@@ -144,15 +143,14 @@ export function flagOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
         lt(jobs.dueDate, now),
       ),
     )
-    .orderBy(asc(jobs.dueDate), asc(jobs.jobNumber))
-    .all();
+    .orderBy(asc(jobs.dueDate), asc(jobs.jobNumber));
   if (candidates.length === 0) return [];
-  const flagged = latestFlagValues(tx, ctx.organisationId, "job.became_overdue", candidates.map((j) => j.id), "dueDate");
+  const flagged = await latestFlagValues(tx, ctx.organisationId, "job.became_overdue", candidates.map((j) => j.id), "dueDate");
   const out: string[] = [];
   for (const job of candidates) {
     const dueDate = job.dueDate as string;
     if (flagged.get(job.id) === dueDate) continue;
-    const eventId = recordEvent(tx, ctx, {
+    const eventId = await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: job.id,
       jobId: job.id,
@@ -162,7 +160,7 @@ export function flagOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
       newValue: { dueDate, overdueSince: dueDate },
       metadata: jobEventMeta(job, { statusCategory: job.statusCategory }),
     });
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [job.editorId, job.photographerId],
       type: "job_overdue",
       title: `${job.jobNumber} is overdue`,
@@ -178,9 +176,9 @@ export function flagOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
 }
 
 /** Step 3 — `job.review_overdue`, deduped per (job, reviewDueDate). */
-export function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
+export async function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[]> {
   const now = ctx.now();
-  const candidates: Job[] = tx
+  const candidates: Job[] = await tx
     .select()
     .from(jobs)
     .where(
@@ -191,16 +189,15 @@ export function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
         lt(jobs.reviewDueDate, now),
       ),
     )
-    .orderBy(asc(jobs.reviewDueDate), asc(jobs.jobNumber))
-    .all();
+    .orderBy(asc(jobs.reviewDueDate), asc(jobs.jobNumber));
   if (candidates.length === 0) return [];
-  const flagged = latestFlagValues(tx, ctx.organisationId, "job.review_overdue", candidates.map((j) => j.id), "reviewDueDate");
-  const managers = managersOf(tx, ctx.organisationId);
+  const flagged = await latestFlagValues(tx, ctx.organisationId, "job.review_overdue", candidates.map((j) => j.id), "reviewDueDate");
+  const managers = await managersOf(tx, ctx.organisationId);
   const out: string[] = [];
   for (const job of candidates) {
     const reviewDueDate = job.reviewDueDate as string;
     if (flagged.get(job.id) === reviewDueDate) continue;
-    const eventId = recordEvent(tx, ctx, {
+    const eventId = await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: job.id,
       jobId: job.id,
@@ -210,7 +207,7 @@ export function flagReviewOverdueJobs(tx: Tx, ctx: AuthContext): string[] {
       newValue: { reviewDueDate },
       metadata: jobEventMeta(job, { statusCategory: job.statusCategory }),
     });
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [job.photographerId, ...managers],
       type: "review_overdue",
       title: `Review of ${job.jobNumber} is overdue`,
@@ -230,11 +227,11 @@ function isBand(value: string | null | undefined): value is WorkloadBand {
 }
 
 /** Step 4 — workload band changes of active editors (emitted only on change). */
-export function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): SweepResult["bandChanges"] {
+export async function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): Promise<SweepResult["bandChanges"]> {
   const now = ctx.now();
-  const rows = computeWorkloads(tx, ctx, { now }).rows.filter((r) => r.editor.isActive);
+  const rows = (await computeWorkloads(tx, ctx, { now })).rows.filter((r) => r.editor.isActive);
   if (rows.length === 0) return [];
-  const latest = latestFlagValues(tx, ctx.organisationId, "user.workload_band_changed", rows.map((r) => r.editor.id), "band", "entity");
+  const latest = await latestFlagValues(tx, ctx.organisationId, "user.workload_band_changed", rows.map((r) => r.editor.id), "band", "entity");
   const today = todayCivil(ctx.settings.timezone, new Date(now));
   let managers: string[] | null = null;
   const changes: SweepResult["bandChanges"] = [];
@@ -242,7 +239,7 @@ export function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): SweepResult["ba
     const stored = latest.get(row.editor.id);
     const previous: WorkloadBand = isBand(stored) ? stored : "healthy";
     if (previous === row.band) continue;
-    const eventId = recordEvent(tx, ctx, {
+    const eventId = await recordEvent(tx, ctx, {
       entityType: "user",
       entityId: row.editor.id,
       jobId: null,
@@ -253,8 +250,8 @@ export function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): SweepResult["ba
       metadata: { targetUserId: row.editor.id, targetName: row.editor.name, bandReason: row.bandReason },
     });
     if (row.band !== "healthy") {
-      managers ??= managersOf(tx, ctx.organisationId);
-      notify(tx, ctx, {
+      managers ??= await managersOf(tx, ctx.organisationId);
+      await notify(tx, ctx, {
         userIds: managers,
         type: "workload_threshold",
         title: `${row.editor.name} is ${WORKLOAD_BAND_META[row.band].label.toLowerCase()}`,
@@ -271,14 +268,13 @@ export function evaluateWorkloadBands(tx: Tx, ctx: AuthContext): SweepResult["ba
 }
 
 /** Step 5 — active jobs held by deactivated editors → managers (`editor_unavailable`). */
-export function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): SweepResult["editorUnavailable"] {
-  const rows = tx
+export async function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): Promise<SweepResult["editorUnavailable"]> {
+  const rows = await tx
     .select({ jobId: jobs.id, editorId: users.id, name: users.name })
     .from(jobs)
     .innerJoin(users, eq(users.id, jobs.editorId))
     .where(and(eq(jobs.organisationId, ctx.organisationId), inArray(jobs.statusCategory, [...CATEGORY_GROUPS.ACTIVE]), eq(users.isActive, false)))
-    .orderBy(asc(users.name), asc(jobs.jobNumber))
-    .all();
+    .orderBy(asc(users.name), asc(users.id), asc(jobs.jobNumber));
   if (rows.length === 0) return [];
   const byEditor = new Map<string, { name: string; jobIds: string[] }>();
   for (const r of rows) {
@@ -286,12 +282,12 @@ export function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): SweepResult["
     entry.jobIds.push(r.jobId);
     byEditor.set(r.editorId, entry);
   }
-  const managers = managersOf(tx, ctx.organisationId);
+  const managers = await managersOf(tx, ctx.organisationId);
   const today = todayCivil(ctx.settings.timezone, new Date(ctx.now()));
   const out: SweepResult["editorUnavailable"] = [];
   for (const [editorId, entry] of byEditor) {
     const n = entry.jobIds.length;
-    const sent = notify(tx, ctx, {
+    const sent = await notify(tx, ctx, {
       userIds: managers,
       type: "editor_unavailable",
       title: `${n} job${n === 1 ? "" : "s"} assigned to a deactivated editor`,
@@ -307,16 +303,16 @@ export function notifyEditorUnavailable(tx: Tx, ctx: AuthContext): SweepResult["
 }
 
 /** Step 6 — auto-close timers past the org timeout. */
-export function closeStaleSessions(tx: Tx, ctx: AuthContext): string[] {
-  return closeTimedOutSessions(tx, ctx).map((s) => s.id);
+export async function closeStaleSessions(tx: Tx, ctx: AuthContext): Promise<string[]> {
+  return (await closeTimedOutSessions(tx, ctx)).map((s) => s.id);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Entry points                                                       */
 /* ------------------------------------------------------------------ */
 
-function stampSweep(tx: Tx, organisationId: string, at: string): void {
-  tx.update(organisationSettings).set({ lastOverdueSweepAt: at }).where(eq(organisationSettings.organisationId, organisationId)).run();
+async function stampSweep(tx: Tx, organisationId: string, at: string): Promise<void> {
+  await tx.update(organisationSettings).set({ lastOverdueSweepAt: at }).where(eq(organisationSettings.organisationId, organisationId));
 }
 
 /**
@@ -326,7 +322,7 @@ function stampSweep(tx: Tx, organisationId: string, at: string): void {
  * failing step — see `errors` — but does throw ForbiddenError for a human
  * without `system.sweep`.
  */
-export function runSweep(db: Db, target: AuthContext | string, opts: RunSweepOptions = {}): SweepResult {
+export async function runSweep(db: Db, target: AuthContext | string, opts: RunSweepOptions = {}): Promise<SweepResult> {
   const organisationId = typeof target === "string" ? target : target.organisationId;
   if (typeof target !== "string" && !target.isSystem) assertCan(target, "system.sweep");
   const requestId = opts.requestId ?? (typeof target === "string" ? undefined : target.requestId);
@@ -344,30 +340,33 @@ export function runSweep(db: Db, target: AuthContext | string, opts: RunSweepOpt
     errors: [],
   };
 
-  const step = <T>(name: SweepStep, fn: () => T, apply: (value: T) => void): void => {
+  // Steps run one after another (each awaited): one failing step never blocks the others.
+  const step = async <T>(name: SweepStep, fn: () => Promise<T>, apply: (value: T) => void): Promise<void> => {
     try {
-      apply(fn());
+      apply(await fn());
     } catch (err) {
       result.errors.push({ step: name, message: errorMessage(err) });
     }
   };
-  const inTx = <T>(fn: (tx: Tx, ctx: AuthContext) => T) => () =>
-    withTx((tx) => fn(tx, systemContext(organisationId, { db: tx, cause: "sweep", requestId })), { db });
+  const inTx =
+    <T>(fn: (tx: Tx, ctx: AuthContext) => Promise<T>) =>
+    () =>
+      withTx(async (tx) => fn(tx, await systemContext(organisationId, { db: tx, cause: "sweep", requestId })), { db });
 
-  step("replay", () => replayStalePendingRuns(db, organisationId, PENDING_REPLAY_AGE_SECONDS), (v) => (result.replayed = v));
-  step(
+  await step("replay", () => replayStalePendingRuns(db, organisationId, PENDING_REPLAY_AGE_SECONDS), (v) => (result.replayed = v));
+  await step(
     "overdue",
-    inTx((tx, ctx) => {
-      stampSweep(tx, organisationId, ctx.now());
+    inTx(async (tx, ctx) => {
+      await stampSweep(tx, organisationId, ctx.now());
       return flagOverdueJobs(tx, ctx);
     }),
     (v) => (result.overdueJobIds = v),
   );
-  step("review_overdue", inTx(flagReviewOverdueJobs), (v) => (result.reviewOverdueJobIds = v));
-  step("workload_bands", inTx(evaluateWorkloadBands), (v) => (result.bandChanges = v));
-  step("editor_unavailable", inTx(notifyEditorUnavailable), (v) => (result.editorUnavailable = v));
-  step("session_timeouts", inTx(closeStaleSessions), (v) => (result.timedOutSessionIds = v));
-  step("automations", () => runPendingAutomations(db, organisationId, { requestId }), (v) => (result.automations = v));
+  await step("review_overdue", inTx(flagReviewOverdueJobs), (v) => (result.reviewOverdueJobIds = v));
+  await step("workload_bands", inTx(evaluateWorkloadBands), (v) => (result.bandChanges = v));
+  await step("editor_unavailable", inTx(notifyEditorUnavailable), (v) => (result.editorUnavailable = v));
+  await step("session_timeouts", inTx(closeStaleSessions), (v) => (result.timedOutSessionIds = v));
+  await step("automations", () => runPendingAutomations(db, organisationId, { requestId }), (v) => (result.automations = v));
   return result;
 }
 
@@ -382,21 +381,23 @@ export function sweepIsDue(lastSweepAt: string | null, now: string, minIntervalM
  * than SWEEP_MIN_INTERVAL_MINUTES. The claim is one conditional UPDATE, so
  * concurrent requests run at most one sweep. Returns null when not due.
  */
-export function maybeRunSweep(db: Db, organisationId: string, opts: RunSweepOptions = {}): SweepResult | null {
+export async function maybeRunSweep(db: Db, organisationId: string, opts: RunSweepOptions = {}): Promise<SweepResult | null> {
   const now = nowIso();
   const cutoff = new Date(Date.parse(now) - SWEEP_MIN_INTERVAL_MINUTES * 60_000).toISOString();
-  const claimed = withTx(
-    (tx) =>
-      tx
-        .update(organisationSettings)
-        .set({ lastOverdueSweepAt: now })
-        .where(
-          and(
-            eq(organisationSettings.organisationId, organisationId),
-            or(isNull(organisationSettings.lastOverdueSweepAt), lte(organisationSettings.lastOverdueSweepAt, cutoff)),
-          ),
-        )
-        .run().changes,
+  const claimed = await withTx(
+    async (tx) =>
+      (
+        await tx
+          .update(organisationSettings)
+          .set({ lastOverdueSweepAt: now })
+          .where(
+            and(
+              eq(organisationSettings.organisationId, organisationId),
+              or(isNull(organisationSettings.lastOverdueSweepAt), lte(organisationSettings.lastOverdueSweepAt, cutoff)),
+            ),
+          )
+          .returning({ id: organisationSettings.organisationId })
+      ).length,
     { db },
   );
   if (claimed === 0) return null;
@@ -407,9 +408,9 @@ export function maybeRunSweep(db: Db, organisationId: string, opts: RunSweepOpti
  * `maybeRunSweep` on the app database for the app layout (run via `after()`):
  * swallows every error so a sweep problem can never break a page.
  */
-export function lazySweep(organisationId: string): SweepResult | null {
+export async function lazySweep(organisationId: string): Promise<SweepResult | null> {
   try {
-    return maybeRunSweep(getDb(), organisationId);
+    return await maybeRunSweep(getDb(), organisationId);
   } catch (err) {
     console.warn("[sweep] lazy sweep failed", err instanceof Error ? err.message : err);
     return null;

@@ -27,9 +27,9 @@ export interface LoadedJob {
  * keep their own action checks (`comment.add`, `link.replace`, …), which
  * still answer 403 for a VISIBLE job where that specific action is denied.
  */
-export function loadJobWithRef(db: DbLike, ctx: AuthContext, jobId: string): LoadedJob {
-  const job = loadJobInOrg(db, ctx, jobId);
-  const ref = jobPermissionRef(job, loadPastEditorIds(db, job.id));
+export async function loadJobWithRef(db: DbLike, ctx: AuthContext, jobId: string): Promise<LoadedJob> {
+  const job = await loadJobInOrg(db, ctx, jobId);
+  const ref = jobPermissionRef(job, await loadPastEditorIds(db, job.id));
   if (!can(ctx, "job.view", ref)) throw new NotFoundError("Job");
   return { job, ref };
 }
@@ -40,15 +40,18 @@ export function jobMeta(job: Pick<Job, "jobNumber" | "name">): { jobNumber: stri
 }
 
 /** id → UserRef for the given ids within the actor's organisation (unknown ids are skipped). */
-export function loadUserRefMap(db: DbLike, ctx: AuthContext, ids: readonly (string | null | undefined)[]): Map<string, UserRef> {
+export async function loadUserRefMap(
+  db: DbLike,
+  ctx: AuthContext,
+  ids: readonly (string | null | undefined)[],
+): Promise<Map<string, UserRef>> {
   const unique = Array.from(new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0)));
   const map = new Map<string, UserRef>();
   if (unique.length === 0) return map;
-  const rows = db
+  const rows = await db
     .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
     .from(users)
-    .where(and(inArray(users.id, unique), eq(users.organisationId, ctx.organisationId)))
-    .all();
+    .where(and(inArray(users.id, unique), eq(users.organisationId, ctx.organisationId)));
   for (const row of rows) map.set(row.id, userRef(row));
   return map;
 }
@@ -63,8 +66,8 @@ export function unknownUserRef(id: string): UserRef {
  * evaluated with that user's own fresh context (role, team, org flags).
  * Inactive, anonymised or foreign users → false.
  */
-export function userCanViewJob(db: DbLike, ctx: AuthContext, userId: string, ref: JobPermissionRef): boolean {
-  const target = buildContextFromDb(db, userId, { now: ctx.now, requestId: ctx.requestId });
+export async function userCanViewJob(db: DbLike, ctx: AuthContext, userId: string, ref: JobPermissionRef): Promise<boolean> {
+  const target = await buildContextFromDb(db, userId, { now: ctx.now, requestId: ctx.requestId });
   if (!target || target.organisationId !== ctx.organisationId) return false;
   return can(target, "job.view", ref);
 }

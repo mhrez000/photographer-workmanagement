@@ -115,7 +115,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
   guard(ctx, "search.global");
   const sp = await searchParams;
   const q = (param(sp, "q") ?? "").trim();
-  const results = q ? load(() => globalSearch(db, ctx, q, { limit: SEARCH_PAGE_LIMIT })) : null;
+  const results = q ? await load(() => globalSearch(db, ctx, q, { limit: SEARCH_PAGE_LIMIT })) : null;
 
   const exact = results?.exactJob ? results.jobs.find((j) => j.id === results.exactJob?.id) ?? null : null;
   const jobs = results?.jobs.filter((j) => j.id !== exact?.id && (j.matchedIn === "number" || j.matchedIn === "name" || j.matchedIn === "description" || j.matchedIn === "status")) ?? [];

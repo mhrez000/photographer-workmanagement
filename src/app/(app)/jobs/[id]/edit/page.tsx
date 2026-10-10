@@ -20,7 +20,7 @@ export const metadata: Metadata = { title: "Edit job" };
 export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit">) {
   const { id } = await params;
   const { ctx, db } = await pageContext();
-  const detail = load(() => getJobDetail(db, ctx, id));
+  const detail = await load(() => getJobDetail(db, ctx, id));
   const { job, actions } = detail;
 
   const ref: JobPermissionRef = {
@@ -41,7 +41,7 @@ export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit
   if (!permissions.fields && !permissions.deadlines && !permissions.priority && !permissions.completion) forbidden();
 
   // Pickers; the job's own (possibly archived) client / project / type is always present.
-  const jobTypes: JobTypeView[] = load(() => listJobTypes(db, ctx, { includeArchived: true })).filter((t) => t.archivedAt === null || t.id === job.jobType.id);
+  const jobTypes: JobTypeView[] = (await load(() => listJobTypes(db, ctx, { includeArchived: true }))).filter((t) => t.archivedAt === null || t.id === job.jobType.id);
   if (!jobTypes.some((t) => t.id === job.jobType.id)) {
     jobTypes.unshift({
       id: job.jobType.id,
@@ -55,9 +55,9 @@ export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit
       openJobCount: 0,
     });
   }
-  const clients: ClientOption[] = permissions.fields ? load(() => getClientOptions(db, ctx)) : [];
+  const clients: ClientOption[] = permissions.fields ? await load(() => getClientOptions(db, ctx)) : [];
   if (!clients.some((c) => c.id === job.client.id)) clients.unshift({ id: job.client.id, name: job.client.name, colour: "" });
-  const projects: ProjectOption[] = permissions.fields ? load(() => getProjectOptions(db, ctx, { clientId: job.client.id })) : [];
+  const projects: ProjectOption[] = permissions.fields ? await load(() => getProjectOptions(db, ctx, { clientId: job.client.id })) : [];
   if (!projects.some((p) => p.id === job.project.id)) {
     projects.unshift({ id: job.project.id, name: job.project.name, clientId: job.client.id, clientName: job.client.name });
   }

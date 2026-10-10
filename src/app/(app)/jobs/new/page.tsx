@@ -20,13 +20,13 @@ export default async function NewJobPage({ searchParams }: PageProps<"/jobs/new"
   const sp = await searchParams;
   const viewer = await getViewer();
 
-  const jobTypes = load(() => listJobTypes(db, ctx));
-  const clients = load(() => getClientOptions(db, ctx));
+  const jobTypes = await load(() => listJobTypes(db, ctx));
+  const clients = await load(() => getClientOptions(db, ctx));
 
   let initialClientId = param(sp, "clientId") ?? null;
   let initialProjectId = param(sp, "projectId") ?? null;
   if (initialProjectId) {
-    const match = load(() => getProjectOptions(db, ctx, {})).find((p) => p.id === initialProjectId);
+    const match = (await load(() => getProjectOptions(db, ctx, {}))).find((p) => p.id === initialProjectId);
     if (match) initialClientId = match.clientId;
     else initialProjectId = null;
   }
@@ -34,7 +34,7 @@ export default async function NewJobPage({ searchParams }: PageProps<"/jobs/new"
     initialClientId = null;
     initialProjectId = null;
   }
-  const projects = initialClientId ? load(() => getProjectOptions(db, ctx, { clientId: initialClientId })) : [];
+  const projects = initialClientId ? await load(() => getProjectOptions(db, ctx, { clientId: initialClientId })) : [];
 
   const isManagement = MANAGEMENT_ROLES.includes(ctx.role);
 

@@ -18,55 +18,55 @@ let db: TestDb;
 let ids: SeedIds;
 let reassignedId = "";
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set(NOW);
-  db = makeTestDb();
-  ids = seedMinimalOrg(db, { at: "2026-08-01T00:00:00.000Z" });
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db, { at: "2026-08-01T00:00:00.000Z" });
 
   // Job A: editor1 edits 10h, reassigned mid-stage to editor2 who edits 6h, submits, gets approved.
-  const a = insertJobFixture(db, ids, { statusKey: "in_progress", at: T0, dueDate: t(48) }).job;
-  reattribute(db, ids, a.id, ids.users.editor2, t(10));
-  moveJob(db, ids, a.id, "submitted", t(16));
-  moveJob(db, ids, a.id, "approved", t(20));
+  const a = (await insertJobFixture(db, ids, { statusKey: "in_progress", at: T0, dueDate: t(48) })).job;
+  await reattribute(db, ids, a.id, ids.users.editor2, t(10));
+  await moveJob(db, ids, a.id, "submitted", t(16));
+  await moveJob(db, ids, a.id, "approved", t(20));
   reassignedId = a.id;
 
   // Job B: editor1 alone; 4h editing, 2h review, revision, approved late.
-  const b = insertJobFixture(db, ids, { statusKey: "in_progress", at: t(0), dueDate: t(5) }).job;
-  moveJob(db, ids, b.id, "submitted", t(4));
-  addRevision(db, ids, b.id, 1, t(6));
-  moveJob(db, ids, b.id, "approved", t(6));
+  const b = (await insertJobFixture(db, ids, { statusKey: "in_progress", at: t(0), dueDate: t(5) })).job;
+  await moveJob(db, ids, b.id, "submitted", t(4));
+  await addRevision(db, ids, b.id, 1, t(6));
+  await moveJob(db, ids, b.id, "approved", t(6));
 });
 
 afterEach(() => fakeClock.reset());
 
 describe("per-editor attribution follows reattribution", () => {
-  it("credits the approval to the editor holding the job at approval", () => {
-    const ctx = contextFor(db, ids.users.manager);
-    const approved = approvedJobsInRange(db, ctx, { from: T0, to: NOW }, { scope: "org" });
+  it("credits the approval to the editor holding the job at approval", async () => {
+    const ctx = await contextFor(db, ids.users.manager);
+    const approved = await approvedJobsInRange(db, ctx, { from: T0, to: NOW }, { scope: "org" });
     expect(approved.find((j) => j.id === reassignedId)?.approvingEditorId).toBe(ids.users.editor2);
   });
 
-  it("splits editing time between the two editors and computes turnaround from first entry", () => {
-    const ctx = contextFor(db, ids.users.manager);
-    const e2 = getEditorAnalytics(db, ctx, ids.users.editor2, RANGE);
+  it("splits editing time between the two editors and computes turnaround from first entry", async () => {
+    const ctx = await contextFor(db, ids.users.manager);
+    const e2 = await getEditorAnalytics(db, ctx, ids.users.editor2, RANGE);
     expect(e2.performance).toMatchObject({ approved: 1, avgEditingSeconds: 6 * 3600, avgTurnaroundSeconds: 20 * 3600, avgReviewSeconds: 4 * 3600 });
     expect(e2.stageAverages.find((s) => s.category === "in_progress")).toMatchObject({ avgSeconds: 6 * 3600, count: 1 });
 
-    const e1 = getEditorAnalytics(db, ctx, ids.users.editor1, RANGE);
+    const e1 = await getEditorAnalytics(db, ctx, ids.users.editor1, RANGE);
     // only job B is credited to editor1 (4h editing); job A's first 10h show in editor1's stage averages
     expect(e1.performance).toMatchObject({ approved: 1, avgEditingSeconds: 4 * 3600, revisionRate: 1, onTimePercent: 0 });
     expect(e1.stageAverages.find((s) => s.category === "in_progress")).toMatchObject({ avgSeconds: 7 * 3600, count: 2 });
   });
 
-  it("performance and overview agree with the per-editor numbers", () => {
-    const ctx = contextFor(db, ids.users.owner);
-    const perf = getPerformance(db, ctx, RANGE);
+  it("performance and overview agree with the per-editor numbers", async () => {
+    const ctx = await contextFor(db, ids.users.owner);
+    const perf = await getPerformance(db, ctx, RANGE);
     const byId = new Map(perf.editors.map((r) => [r.user.id, r]));
     expect(byId.get(ids.users.editor1)?.approved).toBe(1);
     expect(byId.get(ids.users.editor2)?.approved).toBe(1);
     expect(byId.get(ids.users.editor2)?.revisionRate).toBe(0);
 
-    const o = getAnalyticsOverview(db, ctx, RANGE);
+    const o = await getAnalyticsOverview(db, ctx, RANGE);
     expect(o.range.preset).toBe("last_30_days");
     expect(o.revisionRate).toBe(0.5);
     expect(o.onTimePercent).toBe(50);
@@ -84,25 +84,26 @@ describe("per-editor attribution follows reattribution", () => {
 });
 
 describe("analytics access", () => {
-  it("analytics.view gates the overview; editors use My Performance", () => {
-    expect(() => getAnalyticsOverview(db, contextFor(db, ids.users.editor1), RANGE)).toThrow(ForbiddenError);
-    expect(() => getAnalyticsOverview(db, contextFor(db, ids.users.photographer1), RANGE)).toThrow(ForbiddenError);
-    db.update(users).set({ canViewAnalytics: true }).where(eq(users.id, ids.users.photographer1)).run();
-    expect(getAnalyticsOverview(db, contextFor(db, ids.users.photographer1), RANGE).completed).toBe(0);
+  it("analytics.view gates the overview; editors use My Performance", async () => {
+    await expect(getAnalyticsOverview(db, await contextFor(db, ids.users.editor1), RANGE)).rejects.toThrow(ForbiddenError);
+    await expect(getAnalyticsOverview(db, await contextFor(db, ids.users.photographer1), RANGE)).rejects.toThrow(ForbiddenError);
+    await db.update(users).set({ canViewAnalytics: true }).where(eq(users.id, ids.users.photographer1));
+    expect((await getAnalyticsOverview(db, await contextFor(db, ids.users.photographer1), RANGE)).completed).toBe(0);
 
-    const me = getMyAnalytics(db, contextFor(db, ids.users.editor2), RANGE);
+    const me = await getMyAnalytics(db, await contextFor(db, ids.users.editor2), RANGE);
     expect(me.role).toBe("editor");
     expect(me.editor?.approved).toBe(1);
     expect(me.photographer).toBeNull();
-    const pia = getMyAnalytics(db, contextFor(db, ids.users.photographer1), RANGE);
+    const pia = await getMyAnalytics(db, await contextFor(db, ids.users.photographer1), RANGE);
     expect(pia.photographer).toMatchObject({ created: 2, submitted: 2 });
   });
 
-  it("editor analytics: self or management only; foreign ids 404", () => {
-    expect(getEditorAnalytics(db, contextFor(db, ids.users.editor1), ids.users.editor1, RANGE).editor.id).toBe(ids.users.editor1);
-    expect(() => getEditorAnalytics(db, contextFor(db, ids.users.editor1), ids.users.editor2, RANGE)).toThrow(ForbiddenError);
-    const other = seedMinimalOrg(db, { slug: "other" });
-    expect(() => getEditorAnalytics(db, contextFor(db, ids.users.manager), other.users.editor1, RANGE)).toThrow(NotFoundError);
+  it("editor analytics: self or management only; foreign ids 404", async () => {
+    const editor1 = await contextFor(db, ids.users.editor1);
+    expect((await getEditorAnalytics(db, editor1, ids.users.editor1, RANGE)).editor.id).toBe(ids.users.editor1);
+    await expect(getEditorAnalytics(db, editor1, ids.users.editor2, RANGE)).rejects.toThrow(ForbiddenError);
+    const other = await seedMinimalOrg(db, { slug: "other" });
+    await expect(getEditorAnalytics(db, await contextFor(db, ids.users.manager), other.users.editor1, RANGE)).rejects.toThrow(NotFoundError);
   });
 
   it("trend buckets: daily up to 31 days, weekly beyond", () => {

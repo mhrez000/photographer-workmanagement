@@ -40,6 +40,7 @@ import { assertCan } from "@/server/auth/permissions";
 import { loadUserInOrg } from "@/server/services/_shared";
 import {
   approvedJobsInRange,
+  binaryAsc,
   completedJobsInRange,
   createdJobsInRange,
   groupBy,
@@ -95,7 +96,7 @@ export function trendBuckets(range: Range, timeZone: string): { date: string; fr
 }
 
 /** Volume trend over the range (created / completed / revisions / became overdue / turnaround). */
-export function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: TrendOptions): TrendPoint[] {
+export async function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: TrendOptions): Promise<TrendPoint[]> {
   const tz = ctx.settings.timezone;
   const jobFilter: SQL | undefined = opts.editorId
     ? eq(jobs.editorId, opts.editorId)
@@ -103,18 +104,22 @@ export function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: Tre
       ? eq(jobs.photographerId, opts.photographerId)
       : undefined;
   const q = { scope: opts.scope, where: jobFilter };
-  const created = createdJobsInRange(db, ctx, range, q);
-  const completed = completedJobsInRange(db, ctx, range, q);
-  const revisions = revisionsRequestedInRange(db, ctx, range, {
-    scope: opts.scope,
-    where: opts.photographerId ? eq(jobs.photographerId, opts.photographerId) : undefined,
-  }).filter((r) => opts.editorId === undefined || r.assigneeUserId === opts.editorId);
-  const overdue = overdueEventsInRange(db, ctx, range, q);
-  const approved = approvedJobsInRange(db, ctx, range, {
-    scope: opts.scope,
-    where: opts.photographerId ? eq(jobs.photographerId, opts.photographerId) : undefined,
-  }).filter((j) => opts.editorId === undefined || j.approvingEditorId === opts.editorId);
-  const transitions = loadTransitionsByJob(
+  const created = await createdJobsInRange(db, ctx, range, q);
+  const completed = await completedJobsInRange(db, ctx, range, q);
+  const revisions = (
+    await revisionsRequestedInRange(db, ctx, range, {
+      scope: opts.scope,
+      where: opts.photographerId ? eq(jobs.photographerId, opts.photographerId) : undefined,
+    })
+  ).filter((r) => opts.editorId === undefined || r.assigneeUserId === opts.editorId);
+  const overdue = await overdueEventsInRange(db, ctx, range, q);
+  const approved = (
+    await approvedJobsInRange(db, ctx, range, {
+      scope: opts.scope,
+      where: opts.photographerId ? eq(jobs.photographerId, opts.photographerId) : undefined,
+    })
+  ).filter((j) => opts.editorId === undefined || j.approvingEditorId === opts.editorId);
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approved.map((j) => j.id),
@@ -142,24 +147,24 @@ export function buildTrend(db: DbLike, ctx: AuthContext, range: Range, opts: Tre
 /* ------------------------------------------------------------------ */
 
 /** `GET /api/analytics/overview?range=…` → AnalyticsOverview (analytics.view). */
-export function getAnalyticsOverview(db: DbLike, ctx: AuthContext, rawRange?: unknown): AnalyticsOverview {
+export async function getAnalyticsOverview(db: DbLike, ctx: AuthContext, rawRange?: unknown): Promise<AnalyticsOverview> {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   return computeAnalyticsOverview(db, ctx, range);
 }
 
 /** Overview without the permission check (reports reuse it). */
-export function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: ResolvedRange): AnalyticsOverview {
+export async function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: ResolvedRange): Promise<AnalyticsOverview> {
   const now = ctx.now();
-  const settings = loadOrgSettings(db, ctx);
+  const settings = await loadOrgSettings(db, ctx);
   const scope = { scope: "org" as const };
-  const kpis = kpisFor(db, ctx, { scope: "org", now, weekStartsOn: settings.weekStartsOn });
+  const kpis = await kpisFor(db, ctx, { scope: "org", now, weekStartsOn: settings.weekStartsOn });
 
-  const created = createdJobsInRange(db, ctx, range, scope);
-  const completed = completedJobsInRange(db, ctx, range, scope);
-  const approved = approvedJobsInRange(db, ctx, range, scope);
-  const active = loadActiveMetricJobs(db, ctx, scope);
-  const transitions = loadTransitionsByJob(
+  const created = await createdJobsInRange(db, ctx, range, scope);
+  const completed = await completedJobsInRange(db, ctx, range, scope);
+  const approved = await approvedJobsInRange(db, ctx, range, scope);
+  const active = await loadActiveMetricJobs(db, ctx, scope);
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approved.map((j) => j.id),
@@ -168,18 +173,18 @@ export function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: Re
   const createdLive = created.filter((j) => j.statusCategory !== "cancelled");
   const createdDone = createdLive.filter((j) => CATEGORY_GROUPS.DONE.includes(j.statusCategory)).length;
 
-  const workloads = computeWorkloads(db, ctx, { now });
+  const workloads = await computeWorkloads(db, ctx, { now });
   const activeEditors = workloads.rows.filter((r) => r.editor.isActive);
 
   // by job type
   const typeIds = new Set([...created, ...completed, ...approved].map((j) => j.jobTypeId));
-  const typeRows = db
-    .select({ id: jobTypes.id, name: jobTypes.name, colour: jobTypes.colour, archivedAt: jobTypes.archivedAt, sortOrder: jobTypes.sortOrder })
-    .from(jobTypes)
-    .where(eq(jobTypes.organisationId, ctx.organisationId))
-    .orderBy(asc(jobTypes.sortOrder), asc(jobTypes.name))
-    .all()
-    .filter((t) => t.archivedAt === null || typeIds.has(t.id));
+  const typeRows = (
+    await db
+      .select({ id: jobTypes.id, name: jobTypes.name, colour: jobTypes.colour, archivedAt: jobTypes.archivedAt, sortOrder: jobTypes.sortOrder })
+      .from(jobTypes)
+      .where(eq(jobTypes.organisationId, ctx.organisationId))
+      .orderBy(asc(jobTypes.sortOrder), binaryAsc(jobTypes.name), asc(jobTypes.id))
+  ).filter((t) => t.archivedAt === null || typeIds.has(t.id));
   const createdByType = groupBy(created, (j) => j.jobTypeId);
   const completedByType = groupBy(completed, (j) => j.jobTypeId);
   const approvedByType = groupBy(approved, (j) => j.jobTypeId);
@@ -195,11 +200,11 @@ export function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: Re
   const clientRows =
     clientIds.length === 0
       ? []
-      : db
+      : await db
           .select({ id: clients.id, name: clients.name })
           .from(clients)
           .where(and(eq(clients.organisationId, ctx.organisationId), inArray(clients.id, clientIds)))
-          .all();
+          .orderBy(asc(clients.id));
 
   return {
     range,
@@ -213,7 +218,7 @@ export function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: Re
     completionRate: createdLive.length === 0 ? null : createdDone / createdLive.length,
     capacityHours: activeEditors.reduce((s, r) => s + r.editor.capacityHoursPerWeek, 0),
     loadHours: activeEditors.reduce((s, r) => s + r.score, 0),
-    trend: buildTrend(db, ctx, range, { scope: "org" }),
+    trend: await buildTrend(db, ctx, range, { scope: "org" }),
     byJobType: typeRows.map((t) => ({
       jobType: { id: t.id, name: t.name, colour: t.colour },
       created: createdByType.get(t.id)?.length ?? 0,
@@ -228,9 +233,9 @@ export function computeAnalyticsOverview(db: DbLike, ctx: AuthContext, range: Re
         overdue: overdueByClient.get(c.id)?.length ?? 0,
       }))
       .sort((a, b) => b.created - a.created || b.completed - a.completed || a.client.name.localeCompare(b.client.name)),
-    editors: computeEditorPerformance(db, ctx, range, { now }),
-    photographers: computePhotographerPerformance(db, ctx, range, { now }),
-    stageAverages: stageAverages(loadClosedTransitionsInRange(db, ctx, range)),
+    editors: await computeEditorPerformance(db, ctx, range, { now }),
+    photographers: await computePhotographerPerformance(db, ctx, range, { now }),
+    stageAverages: stageAverages(await loadClosedTransitionsInRange(db, ctx, range)),
   };
 }
 
@@ -272,57 +277,61 @@ const refOf = (u: { id: string; name: string; role: UserRef["role"]; avatarColou
  * `GET /api/analytics/editors/:userId` — the editor themself
  * (analytics.view_self) or management (performance.view). 404 for foreign ids.
  */
-export function getEditorAnalytics(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): EditorAnalytics {
-  const target = loadUserInOrg(db, ctx, userId);
+export async function getEditorAnalytics(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): Promise<EditorAnalytics> {
+  const target = await loadUserInOrg(db, ctx, userId);
   if (target.id === ctx.userId) assertCan(ctx, "analytics.view_self");
   else assertCan(ctx, "performance.view");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   const user = refOf(target);
   return {
     range,
     editor: user,
-    performance: computeEditorPerformance(db, ctx, range, { userIds: [target.id] })[0] ?? zeroEditorRow(user),
-    trend: buildTrend(db, ctx, range, { scope: "org", editorId: target.id }),
-    stageAverages: stageAverages(loadEditorTransitions(db, ctx, target.id, { enteredFrom: range.from, enteredTo: range.to }), target.id),
+    performance: (await computeEditorPerformance(db, ctx, range, { userIds: [target.id] }))[0] ?? zeroEditorRow(user),
+    trend: await buildTrend(db, ctx, range, { scope: "org", editorId: target.id }),
+    stageAverages: stageAverages(await loadEditorTransitions(db, ctx, target.id, { enteredFrom: range.from, enteredTo: range.to }), target.id),
   };
 }
 
 /** `GET /api/analytics/me` — My Performance for any role (analytics.view_self). */
-export function getMyAnalytics(db: DbLike, ctx: AuthContext, rawRange?: unknown): MyAnalytics {
+export async function getMyAnalytics(db: DbLike, ctx: AuthContext, rawRange?: unknown): Promise<MyAnalytics> {
   assertCan(ctx, "analytics.view_self");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
-  const me = ctx.userId ? loadUserInOrg(db, ctx, ctx.userId) : null;
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
+  const me = ctx.userId ? await loadUserInOrg(db, ctx, ctx.userId) : null;
   if (!me) return { range, role: ctx.role, editor: null, photographer: null, trend: [], stageAverages: [] };
   const user = refOf(me);
-  const editor = computeEditorPerformance(db, ctx, range, { userIds: [me.id] })[0] ?? (me.role === "editor" ? zeroEditorRow(user) : null);
+  const editor = (await computeEditorPerformance(db, ctx, range, { userIds: [me.id] }))[0] ?? (me.role === "editor" ? zeroEditorRow(user) : null);
   const photographer =
-    computePhotographerPerformance(db, ctx, range, { userIds: [me.id] })[0] ?? (me.role === "photographer" ? zeroPhotographerRow(user) : null);
+    (await computePhotographerPerformance(db, ctx, range, { userIds: [me.id] }))[0] ?? (me.role === "photographer" ? zeroPhotographerRow(user) : null);
   const trend =
     me.role === "editor"
-      ? buildTrend(db, ctx, range, { scope: "org", editorId: me.id })
+      ? await buildTrend(db, ctx, range, { scope: "org", editorId: me.id })
       : me.role === "photographer"
-        ? buildTrend(db, ctx, range, { scope: "org", photographerId: me.id })
-        : buildTrend(db, ctx, range, { scope: "visible" });
+        ? await buildTrend(db, ctx, range, { scope: "org", photographerId: me.id })
+        : await buildTrend(db, ctx, range, { scope: "visible" });
   return {
     range,
     role: me.role,
     editor,
     photographer,
     trend,
-    stageAverages: editor ? stageAverages(loadEditorTransitions(db, ctx, me.id, { enteredFrom: range.from, enteredTo: range.to }), me.id) : [],
+    stageAverages: editor ? stageAverages(await loadEditorTransitions(db, ctx, me.id, { enteredFrom: range.from, enteredTo: range.to }), me.id) : [],
   };
 }
 
 /** `GET /api/analytics/editors?range` — editor table (analytics.view). */
-export function getAnalyticsEditors(db: DbLike, ctx: AuthContext, rawRange?: unknown): { range: ResolvedRange; editors: PerformanceRow[] } {
+export async function getAnalyticsEditors(db: DbLike, ctx: AuthContext, rawRange?: unknown): Promise<{ range: ResolvedRange; editors: PerformanceRow[] }> {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
-  return { range, editors: computeEditorPerformance(db, ctx, range) };
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
+  return { range, editors: await computeEditorPerformance(db, ctx, range) };
 }
 
 /** `GET /api/analytics/photographers?range` — photographer table (analytics.view). */
-export function getAnalyticsPhotographers(db: DbLike, ctx: AuthContext, rawRange?: unknown): { range: ResolvedRange; photographers: PhotographerPerformanceRow[] } {
+export async function getAnalyticsPhotographers(
+  db: DbLike,
+  ctx: AuthContext,
+  rawRange?: unknown,
+): Promise<{ range: ResolvedRange; photographers: PhotographerPerformanceRow[] }> {
   assertCan(ctx, "analytics.view");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
-  return { range, photographers: computePhotographerPerformance(db, ctx, range) };
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
+  return { range, photographers: await computePhotographerPerformance(db, ctx, range) };
 }

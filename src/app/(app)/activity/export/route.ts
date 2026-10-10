@@ -37,7 +37,7 @@ export const GET = handle(async (req: Request) => {
   let jobMissing = false;
   if (filters.jobNumber && !filters.jobId) {
     try {
-      filters.query.jobId = getJobRowByNumber(db, ctx, filters.jobNumber).id;
+      filters.query.jobId = (await getJobRowByNumber(db, ctx, filters.jobNumber)).id;
     } catch (err) {
       if (!(err instanceof NotFoundError)) throw err;
       jobMissing = true;
@@ -48,7 +48,7 @@ export const GET = handle(async (req: Request) => {
   if (!jobMissing) {
     let cursor: string | null = null;
     do {
-      const page = listActivity(db, ctx, { ...compactQuery(filters.query), limit: PAGE, ...(cursor ? { cursor } : {}) });
+      const page: Awaited<ReturnType<typeof listActivity>> = await listActivity(db, ctx, { ...compactQuery(filters.query), limit: PAGE, ...(cursor ? { cursor } : {}) });
       items.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor && items.length < EXPORT_MAX_ROWS);

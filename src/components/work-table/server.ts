@@ -17,7 +17,7 @@ export interface SafeJobList {
  * filter value degrades to the closest valid list (with a notice) instead of
  * a 404 / error page. Permission errors still propagate.
  */
-export function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string, string>): SafeJobList {
+export async function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string, string>): Promise<SafeJobList> {
   // Keys listJobs would strip anyway (e.g. utm params) are dropped here so the
   // returned `input` — reused as the "Load more" query — passes the strict GET /api/jobs.
   const known = new Set(JOB_LIST_API_KEYS);
@@ -48,7 +48,7 @@ export function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string,
   };
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      return { result: listJobs(db, ctx, current), input: current, notice: noticeOf() };
+      return { result: await listJobs(db, ctx, current), input: current, notice: noticeOf() };
     } catch (err) {
       if (err instanceof NotFoundError && current.viewId) {
         const rest = { ...current };
@@ -75,7 +75,7 @@ export function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string,
     }
   }
   unknownBad = true;
-  return { result: listJobs(db, ctx, {}), input: {}, notice: noticeOf() };
+  return { result: await listJobs(db, ctx, {}), input: {}, notice: noticeOf() };
 }
 
 function fieldsOf(details: unknown): Set<string> {

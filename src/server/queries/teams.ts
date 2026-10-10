@@ -13,7 +13,7 @@ import type { AuthContext, TeamDetail, TeamMembershipView, TeamRef, TeamView, Us
 import { assertCan, can } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
 import { loadTeamInOrg, parseInput } from "@/server/services/_shared";
-import { loadUserRefs } from "./metrics";
+import { binaryAsc, loadUserRefs } from "./metrics";
 
 const flag = z.preprocess((v) => (Array.isArray(v) ? v[0] : v), z.union([z.boolean(), z.enum(["1", "0", "true", "false"])]).optional()).transform(
   (v) => v === true || v === "1" || v === "true",
@@ -22,10 +22,10 @@ const flag = z.preprocess((v) => (Array.isArray(v) ? v[0] : v), z.union([z.boole
 export const TeamListFiltersSchema = z.object({ includeArchived: flag });
 
 /** Current members (left_at IS NULL) per team id. */
-function currentMembers(db: DbLike, ctx: AuthContext, teamIds: readonly string[]): Map<string, UserRef[]> {
+async function currentMembers(db: DbLike, ctx: AuthContext, teamIds: readonly string[]): Promise<Map<string, UserRef[]>> {
   const out = new Map<string, UserRef[]>();
   if (teamIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({
       teamId: teamMemberships.teamId,
       id: users.id,
@@ -37,8 +37,7 @@ function currentMembers(db: DbLike, ctx: AuthContext, teamIds: readonly string[]
     .from(teamMemberships)
     .innerJoin(users, eq(users.id, teamMemberships.userId))
     .where(and(eq(teamMemberships.organisationId, ctx.organisationId), inArray(teamMemberships.teamId, [...teamIds]), isNull(teamMemberships.leftAt)))
-    .orderBy(asc(users.name))
-    .all();
+    .orderBy(binaryAsc(users.name), asc(users.id));
   for (const { teamId, ...u } of rows) {
     const list = out.get(teamId) ?? [];
     list.push(u);
@@ -48,22 +47,21 @@ function currentMembers(db: DbLike, ctx: AuthContext, teamIds: readonly string[]
 }
 
 /** `GET /api/teams?includeArchived` (archived only with team.manage). */
-export function listTeams(db: DbLike, ctx: AuthContext, input: unknown = {}): TeamView[] {
+export async function listTeams(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<TeamView[]> {
   assertCan(ctx, "team.view_members");
   const f = parseInput(TeamListFiltersSchema, input ?? {});
   const withArchived = f.includeArchived && can(ctx, "team.manage");
-  const rows = db
+  const rows = await db
     .select()
     .from(teams)
     .where(and(eq(teams.organisationId, ctx.organisationId), withArchived ? undefined : isNull(teams.archivedAt)))
-    .orderBy(asc(teams.name))
-    .all();
-  const members = currentMembers(
+    .orderBy(binaryAsc(teams.name), asc(teams.id));
+  const members = await currentMembers(
     db,
     ctx,
     rows.map((t) => t.id),
   );
-  const leads = loadUserRefs(
+  const leads = await loadUserRefs(
     db,
     ctx,
     rows.map((t) => t.leadUserId),
@@ -84,21 +82,20 @@ export function listTeams(db: DbLike, ctx: AuthContext, input: unknown = {}): Te
 }
 
 /** `GET /api/teams/:id`. Archived teams look missing without team.manage. */
-export function getTeamDetail(db: DbLike, ctx: AuthContext, teamId: string): TeamDetail {
+export async function getTeamDetail(db: DbLike, ctx: AuthContext, teamId: string): Promise<TeamDetail> {
   assertCan(ctx, "team.view_members");
-  const team = loadTeamInOrg(db, ctx, teamId);
+  const team = await loadTeamInOrg(db, ctx, teamId);
   const manage = can(ctx, "team.manage");
   if (team.archivedAt !== null && !manage) throw new NotFoundError("Team");
-  const members = currentMembers(db, ctx, [team.id]).get(team.id) ?? [];
+  const members = (await currentMembers(db, ctx, [team.id])).get(team.id) ?? [];
   let memberships: TeamMembershipView[] = [];
   if (manage) {
-    const rows = db
+    const rows = await db
       .select()
       .from(teamMemberships)
       .where(and(eq(teamMemberships.organisationId, ctx.organisationId), eq(teamMemberships.teamId, team.id)))
-      .orderBy(asc(teamMemberships.joinedAt))
-      .all();
-    const refs = loadUserRefs(
+      .orderBy(asc(teamMemberships.joinedAt), asc(teamMemberships.id));
+    const refs = await loadUserRefs(
       db,
       ctx,
       rows.flatMap((r) => [r.userId, r.addedByUserId, r.removedByUserId]),
@@ -118,7 +115,7 @@ export function getTeamDetail(db: DbLike, ctx: AuthContext, teamId: string): Tea
       ];
     });
   }
-  const lead = team.leadUserId ? (loadUserRefs(db, ctx, [team.leadUserId]).get(team.leadUserId) ?? null) : null;
+  const lead = team.leadUserId ? ((await loadUserRefs(db, ctx, [team.leadUserId])).get(team.leadUserId) ?? null) : null;
   return {
     id: team.id,
     name: team.name,
@@ -133,8 +130,8 @@ export function getTeamDetail(db: DbLike, ctx: AuthContext, teamId: string): Tea
 }
 
 /** Active (non-archived) team refs per user id — for directories and user detail. */
-export function teamsByUser(db: DbLike, ctx: AuthContext, userIds?: readonly string[]): Map<string, TeamRef[]> {
-  const rows = db
+export async function teamsByUser(db: DbLike, ctx: AuthContext, userIds?: readonly string[]): Promise<Map<string, TeamRef[]>> {
+  const rows = await db
     .select({ userId: teamMemberships.userId, id: teams.id, name: teams.name })
     .from(teamMemberships)
     .innerJoin(teams, eq(teams.id, teamMemberships.teamId))
@@ -146,8 +143,7 @@ export function teamsByUser(db: DbLike, ctx: AuthContext, userIds?: readonly str
         userIds ? inArray(teamMemberships.userId, [...userIds]) : undefined,
       ),
     )
-    .orderBy(asc(teams.name))
-    .all();
+    .orderBy(binaryAsc(teams.name), asc(teams.id));
   const out = new Map<string, TeamRef[]>();
   for (const r of rows) {
     const list = out.get(r.userId) ?? [];

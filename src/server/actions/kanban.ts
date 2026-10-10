@@ -46,9 +46,9 @@ function toOption(m: AllowedMove): KanbanMoveOption {
   };
 }
 
-export function kanbanDrop(tx: Tx, ctx: AuthContext, input: unknown): KanbanDropResponse {
+export async function kanbanDrop(tx: Tx, ctx: AuthContext, input: unknown): Promise<KanbanDropResponse> {
   const p = parseInput(KanbanDropInput, input);
-  const preview = previewKanbanDrop(tx, ctx, p.jobId, p.column);
+  const preview = await previewKanbanDrop(tx, ctx, p.jobId, p.column);
   const columnLabel = KANBAN_COLUMN_META[p.column].label;
 
   let move: AllowedMove;
@@ -83,7 +83,7 @@ export function kanbanDrop(tx: Tx, ctx: AuthContext, input: unknown): KanbanDrop
   if (move.requiresRevisionPayload && !p.revision) return { kind: "needs_revision_payload", move: toOption(move) };
   if (move.requiresReason && !p.reason) return { kind: "needs_reason", move: toOption(move) };
 
-  const result = transitionJobStatus(tx, ctx, {
+  const result = await transitionJobStatus(tx, ctx, {
     jobId: p.jobId,
     toStatusId: move.toStatus.id,
     expectedVersion: p.expectedVersion,

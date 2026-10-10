@@ -6,27 +6,33 @@
  *  - timestamps are ISO-8601 UTC `text` (`*At`); calendar deadlines
  *    (shootDate, dueDate, reviewDueDate, deliveryDueDate) are also ISO UTC
  *    instants (end-of-day in the organisation timezone)
- *  - booleans are integer({ mode: "boolean" }), JSON is text({ mode: "json" })
+ *  - Postgres (drizzle-orm/pg-core): booleans are boolean(), JSON is jsonb().$type<T>()
  *  - every tenant table carries organisation_id (org isolation by construction)
  *  - every FK is onDelete: "restrict" — nothing is hard-deleted
  *  - LEDGER tables (job_status_transitions, job_assignments, job_revisions,
  *    job_links, job_comments, work_sessions, automation_runs, notifications,
  *    team_memberships, activity_events) are append-only / fill-once; the
- *    SQLite triggers in src/db/guard.ts enforce that at the DB level
+ *    PL/pgSQL triggers in drizzle/0001_guards.sql enforce that at the DB level
  *  - activity_events has NO updated_at column: rows are never updated
+ *  - `rowid` (activity_events, job_assignments, automation_runs) is an
+ *    identity column = insertion order. It replaces SQLite's implicit rowid
+ *    for "same millisecond keeps insertion order" tie-breaks; never set it.
  *
  * Enum arrays come from src/lib/constants.ts so the DB, Zod and UI agree.
  */
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
+  boolean,
+  doublePrecision,
   index,
   integer,
-  real,
-  sqliteTable,
+  jsonb,
+  pgTable,
   text,
   uniqueIndex,
-  type AnySQLiteColumn,
-} from "drizzle-orm/sqlite-core";
+  type AnyPgColumn,
+} from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import {
   ASSIGNMENT_ROLES,
@@ -137,14 +143,14 @@ const orgId = () =>
   text("organisation_id")
     .notNull()
     .references(() => organisations.id, { onDelete: "restrict" });
-const userRef = (name: string) => text(name).references((): AnySQLiteColumn => users.id, { onDelete: "restrict" });
-const bool = (name: string, def = false) => integer(name, { mode: "boolean" }).notNull().default(def);
+const userRef = (name: string) => text(name).references((): AnyPgColumn => users.id, { onDelete: "restrict" });
+const bool = (name: string, def = false) => boolean(name).notNull().default(def);
 
 /* ------------------------------------------------------------------ */
 /*  Organisations                                                      */
 /* ------------------------------------------------------------------ */
 
-export const organisations = sqliteTable(
+export const organisations = pgTable(
   "organisations",
   {
     id: id(),
@@ -158,7 +164,7 @@ export const organisations = sqliteTable(
   (t) => [uniqueIndex("organisations_slug_uq").on(t.slug)],
 );
 
-export const organisationSettings = sqliteTable("organisation_settings", {
+export const organisationSettings = pgTable("organisation_settings", {
   organisationId: text("organisation_id")
     .primaryKey()
     .references(() => organisations.id, { onDelete: "restrict" }),
@@ -168,11 +174,11 @@ export const organisationSettings = sqliteTable("organisation_settings", {
   jobNumberPrefix: text("job_number_prefix").notNull().default("PJ"),
   timeTrackingEnabled: bool("time_tracking_enabled", false),
   workSessionAutoTimeoutMinutes: integer("work_session_auto_timeout_minutes").notNull().default(600),
-  defaultCapacityHoursPerWeek: real("default_capacity_hours_per_week").notNull().default(38),
-  defaultEstimatedHours: real("default_estimated_hours").notNull().default(2),
+  defaultCapacityHoursPerWeek: doublePrecision("default_capacity_hours_per_week").notNull().default(38),
+  defaultEstimatedHours: doublePrecision("default_estimated_hours").notNull().default(2),
   // workload bands (score / capacity)
-  workloadNearCapacityRatio: real("workload_near_capacity_ratio").notNull().default(0.7),
-  workloadOverloadedRatio: real("workload_overloaded_ratio").notNull().default(1.0),
+  workloadNearCapacityRatio: doublePrecision("workload_near_capacity_ratio").notNull().default(0.7),
+  workloadOverloadedRatio: doublePrecision("workload_overloaded_ratio").notNull().default(1.0),
   maxActiveJobsPerEditor: integer("max_active_jobs_per_editor").notNull().default(12),
   // bottleneck rules
   reviewBottleneckHours: integer("review_bottleneck_hours").notNull().default(24),
@@ -182,7 +188,7 @@ export const organisationSettings = sqliteTable("organisation_settings", {
   unassignedBacklogMin: integer("unassigned_backlog_min").notNull().default(10),
   stalledDays: integer("stalled_days").notNull().default(5),
   revisionSpikeMinCount: integer("revision_spike_min_count").notNull().default(5),
-  revisionSpikeMultiplier: real("revision_spike_multiplier").notNull().default(1.5),
+  revisionSpikeMultiplier: doublePrecision("revision_spike_multiplier").notNull().default(1.5),
   /** Default review deadline = submittedAt + reviewSlaHours when none is set. */
   reviewSlaHours: integer("review_sla_hours").notNull().default(24),
   // visibility
@@ -203,7 +209,7 @@ export const organisationSettings = sqliteTable("organisation_settings", {
 /*  Users & teams                                                      */
 /* ------------------------------------------------------------------ */
 
-export const users = sqliteTable(
+export const users = pgTable(
   "users",
   {
     id: id(),
@@ -218,7 +224,7 @@ export const users = sqliteTable(
     deactivatedByUserId: userRef("deactivated_by_user_id"),
     anonymisedAt: text("anonymised_at"),
     /** null → organisation_settings.defaultCapacityHoursPerWeek */
-    capacityHoursPerWeek: real("capacity_hours_per_week"),
+    capacityHoursPerWeek: doublePrecision("capacity_hours_per_week"),
     avatarColour: text("avatar_colour").notNull().default("#6366f1"),
     canViewTeamWorkloads: bool("can_view_team_workloads", false),
     canViewAnalytics: bool("can_view_analytics", false),
@@ -235,7 +241,7 @@ export const users = sqliteTable(
   ],
 );
 
-export const userNotificationPrefs = sqliteTable(
+export const userNotificationPrefs = pgTable(
   "user_notification_prefs",
   {
     id: id(),
@@ -251,7 +257,7 @@ export const userNotificationPrefs = sqliteTable(
   (t) => [uniqueIndex("user_notification_prefs_uq").on(t.userId, t.type)],
 );
 
-export const teams = sqliteTable(
+export const teams = pgTable(
   "teams",
   {
     id: id(),
@@ -268,7 +274,7 @@ export const teams = sqliteTable(
 );
 
 /** Ledger: left_at is fill-once. */
-export const teamMemberships = sqliteTable(
+export const teamMemberships = pgTable(
   "team_memberships",
   {
     id: id(),
@@ -295,7 +301,7 @@ export const teamMemberships = sqliteTable(
 /*  Clients & projects                                                 */
 /* ------------------------------------------------------------------ */
 
-export const clients = sqliteTable(
+export const clients = pgTable(
   "clients",
   {
     id: id(),
@@ -315,7 +321,7 @@ export const clients = sqliteTable(
   (t) => [index("clients_org_name_idx").on(t.organisationId, t.name), index("clients_org_archived_idx").on(t.organisationId, t.archivedAt)],
 );
 
-export const projects = sqliteTable(
+export const projects = pgTable(
   "projects",
   {
     id: id(),
@@ -345,7 +351,7 @@ export const projects = sqliteTable(
 /*  Workflows, statuses, transitions, job types                        */
 /* ------------------------------------------------------------------ */
 
-export const workflows = sqliteTable(
+export const workflows = pgTable(
   "workflows",
   {
     id: id(),
@@ -361,11 +367,11 @@ export const workflows = sqliteTable(
   },
   (t) => [
     uniqueIndex("workflows_org_name_uq").on(t.organisationId, t.name),
-    uniqueIndex("workflows_one_default_uq").on(t.organisationId).where(sql`is_default = 1 AND archived_at IS NULL`),
+    uniqueIndex("workflows_one_default_uq").on(t.organisationId).where(sql`is_default = true AND archived_at IS NULL`),
   ],
 );
 
-export const workflowStatuses = sqliteTable(
+export const workflowStatuses = pgTable(
   "workflow_statuses",
   {
     id: id(),
@@ -391,13 +397,13 @@ export const workflowStatuses = sqliteTable(
   (t) => [
     uniqueIndex("workflow_statuses_key_uq").on(t.workflowId, t.key),
     uniqueIndex("workflow_statuses_name_uq").on(t.workflowId, t.name).where(sql`archived_at IS NULL`),
-    uniqueIndex("workflow_statuses_initial_uq").on(t.workflowId).where(sql`is_initial = 1 AND archived_at IS NULL`),
+    uniqueIndex("workflow_statuses_initial_uq").on(t.workflowId).where(sql`is_initial = true AND archived_at IS NULL`),
     index("workflow_statuses_wf_order_idx").on(t.workflowId, t.sortOrder),
     index("workflow_statuses_org_cat_idx").on(t.organisationId, t.category),
   ],
 );
 
-export const workflowTransitions = sqliteTable(
+export const workflowTransitions = pgTable(
   "workflow_transitions",
   {
     id: id(),
@@ -413,7 +419,7 @@ export const workflowTransitions = sqliteTable(
       .references(() => workflowStatuses.id, { onDelete: "restrict" }),
     /** e.g. "Submit for review" */
     label: text("label"),
-    allowedRoles: text("allowed_roles", { mode: "json" }).$type<Role[]>().notNull(),
+    allowedRoles: jsonb("allowed_roles").$type<Role[]>().notNull(),
     requiresAssignedEditor: bool("requires_assigned_editor", false),
     /** An editor may only perform it when they are the job's current editor. */
     assigneeOnly: bool("assignee_only", false),
@@ -428,7 +434,7 @@ export const workflowTransitions = sqliteTable(
   ],
 );
 
-export const jobTypes = sqliteTable(
+export const jobTypes = pgTable(
   "job_types",
   {
     id: id(),
@@ -438,7 +444,7 @@ export const jobTypes = sqliteTable(
     workflowId: text("workflow_id")
       .notNull()
       .references(() => workflows.id, { onDelete: "restrict" }),
-    defaultEstimatedHours: real("default_estimated_hours"),
+    defaultEstimatedHours: doublePrecision("default_estimated_hours"),
     sortOrder: integer("sort_order").notNull().default(0),
     archivedAt: text("archived_at"),
     createdAt: createdAt(),
@@ -452,7 +458,7 @@ export const jobTypes = sqliteTable(
 /*  Jobs (state table; pointer columns are derivable — see db:verify)  */
 /* ------------------------------------------------------------------ */
 
-export const jobs = sqliteTable(
+export const jobs = pgTable(
   "jobs",
   {
     id: id(),
@@ -496,14 +502,14 @@ export const jobs = sqliteTable(
     /** Delivery deadline (calendar + filters only). */
     deliveryDueDate: text("delivery_due_date"),
     // ---- effort ----
-    estimatedHours: real("estimated_hours"),
+    estimatedHours: doublePrecision("estimated_hours"),
     completionPercent: integer("completion_percent").notNull().default(0),
     /** Editor "pause work" (spec §2); only meaningful in EDITOR_WORKING categories. */
     isPaused: bool("is_paused", false),
     pausedAt: text("paused_at"),
     // ---- revisions ----
     revisionCount: integer("revision_count").notNull().default(0),
-    openRevisionId: text("open_revision_id").references((): AnySQLiteColumn => jobRevisions.id, { onDelete: "restrict" }),
+    openRevisionId: text("open_revision_id").references((): AnyPgColumn => jobRevisions.id, { onDelete: "restrict" }),
     // ---- milestones (rebuildable from job_status_transitions; reflect the CURRENT open terminal stage) ----
     startedAt: text("started_at"),
     firstSubmittedAt: text("first_submitted_at"),
@@ -516,7 +522,7 @@ export const jobs = sqliteTable(
     completedAt: text("completed_at"),
     dueDateAtCompletion: text("due_date_at_completion"),
     /** approvedAt <= dueDateAtApproval; null when no due date or not yet approved. */
-    wasOnTime: integer("was_on_time", { mode: "boolean" }),
+    wasOnTime: boolean("was_on_time"),
     cancelledAt: text("cancelled_at"),
     reopenedCount: integer("reopened_count").notNull().default(0),
     /** = MAX(activity_events.created_at) for the job; bumped by recordEvent() without a version bump. */
@@ -551,10 +557,12 @@ export const jobs = sqliteTable(
 /*  Ledger: assignments                                                */
 /* ------------------------------------------------------------------ */
 
-export const jobAssignments = sqliteTable(
+export const jobAssignments = pgTable(
   "job_assignments",
   {
     id: id(),
+    /** Insertion order (identity; replaces SQLite rowid). Never written by app code. */
+    rowid: bigint("rowid", { mode: "number" }).notNull().generatedByDefaultAsIdentity(),
     organisationId: orgId(),
     jobId: text("job_id")
       .notNull()
@@ -573,7 +581,7 @@ export const jobAssignments = sqliteTable(
     unassignedByUserId: userRef("unassigned_by_user_id"),
     unassignReason: text("unassign_reason", { enum: UNASSIGN_REASONS }),
     /** The activity event that created this row (provenance). */
-    activityEventId: text("activity_event_id").references((): AnySQLiteColumn => activityEvents.id, { onDelete: "restrict" }),
+    activityEventId: text("activity_event_id").references((): AnyPgColumn => activityEvents.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("job_assignments_open_uq").on(t.jobId, t.role).where(sql`unassigned_at IS NULL`),
@@ -589,7 +597,7 @@ export const jobAssignments = sqliteTable(
 export const TRANSITION_KINDS = ["creation", "transition", "reattribution", "migration"] as const;
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
 
-export const jobStatusTransitions = sqliteTable(
+export const jobStatusTransitions = pgTable(
   "job_status_transitions",
   {
     id: id(),
@@ -614,7 +622,7 @@ export const jobStatusTransitions = sqliteTable(
     statusName: text("status_name").notNull(),
     /** null = system (automation / sweep). */
     actorUserId: userRef("actor_user_id"),
-    automationRunId: text("automation_run_id").references((): AnySQLiteColumn => automationRuns.id, { onDelete: "restrict" }),
+    automationRunId: text("automation_run_id").references((): AnyPgColumn => automationRuns.id, { onDelete: "restrict" }),
     reason: text("reason"),
     isReopen: bool("is_reopen", false),
     isOverride: bool("is_override", false),
@@ -626,7 +634,7 @@ export const jobStatusTransitions = sqliteTable(
     /** Who held the job during this stage (per-editor stage metrics). */
     editorIdAtEntry: userRef("editor_id_at_entry"),
     photographerIdAtEntry: userRef("photographer_id_at_entry"),
-    activityEventId: text("activity_event_id").references((): AnySQLiteColumn => activityEvents.id, { onDelete: "restrict" }),
+    activityEventId: text("activity_event_id").references((): AnyPgColumn => activityEvents.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("jst_open_uq").on(t.jobId).where(sql`exited_at IS NULL`),
@@ -641,7 +649,7 @@ export const jobStatusTransitions = sqliteTable(
 /*  Ledger: revisions                                                  */
 /* ------------------------------------------------------------------ */
 
-export const jobRevisions = sqliteTable(
+export const jobRevisions = pgTable(
   "job_revisions",
   {
     id: id(),
@@ -670,7 +678,7 @@ export const jobRevisions = sqliteTable(
     resolution: text("resolution", { enum: REVISION_RESOLUTIONS }),
     resolutionNote: text("resolution_note"),
     resolveTransitionId: text("resolve_transition_id").references(() => jobStatusTransitions.id, { onDelete: "restrict" }),
-    activityEventId: text("activity_event_id").references((): AnySQLiteColumn => activityEvents.id, { onDelete: "restrict" }),
+    activityEventId: text("activity_event_id").references((): AnyPgColumn => activityEvents.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("job_revisions_number_uq").on(t.jobId, t.revisionNumber),
@@ -684,7 +692,7 @@ export const jobRevisions = sqliteTable(
 /*  Ledger: comments (+ mentions)                                      */
 /* ------------------------------------------------------------------ */
 
-export const jobComments = sqliteTable(
+export const jobComments = pgTable(
   "job_comments",
   {
     id: id(),
@@ -692,9 +700,9 @@ export const jobComments = sqliteTable(
     jobId: text("job_id")
       .notNull()
       .references(() => jobs.id, { onDelete: "restrict" }),
-    parentCommentId: text("parent_comment_id").references((): AnySQLiteColumn => jobComments.id, { onDelete: "restrict" }),
+    parentCommentId: text("parent_comment_id").references((): AnyPgColumn => jobComments.id, { onDelete: "restrict" }),
     /** Top-level ancestor (= own id for roots) for one-query thread loading. */
-    rootCommentId: text("root_comment_id").references((): AnySQLiteColumn => jobComments.id, { onDelete: "restrict" }),
+    rootCommentId: text("root_comment_id").references((): AnyPgColumn => jobComments.id, { onDelete: "restrict" }),
     revisionId: text("revision_id").references(() => jobRevisions.id, { onDelete: "restrict" }),
     authorUserId: text("author_user_id")
       .notNull()
@@ -717,7 +725,7 @@ export const jobComments = sqliteTable(
   ],
 );
 
-export const commentMentions = sqliteTable(
+export const commentMentions = pgTable(
   "comment_mentions",
   {
     id: id(),
@@ -740,7 +748,7 @@ export const commentMentions = sqliteTable(
 /*  Notes (editable in place; every edit audited with before/after)    */
 /* ------------------------------------------------------------------ */
 
-export const jobNotes = sqliteTable(
+export const jobNotes = pgTable(
   "job_notes",
   {
     id: id(),
@@ -772,7 +780,7 @@ export const jobNotes = sqliteTable(
 /*  Ledger: external links (supersession chain)                        */
 /* ------------------------------------------------------------------ */
 
-export const jobLinks = sqliteTable(
+export const jobLinks = pgTable(
   "job_links",
   {
     id: id(),
@@ -790,15 +798,15 @@ export const jobLinks = sqliteTable(
       .references(() => users.id, { onDelete: "restrict" }),
     createdAt: createdAt(),
     /** The row this one replaced. */
-    supersedesLinkId: text("supersedes_link_id").references((): AnySQLiteColumn => jobLinks.id, { onDelete: "restrict" }),
+    supersedesLinkId: text("supersedes_link_id").references((): AnyPgColumn => jobLinks.id, { onDelete: "restrict" }),
     /** fill-once on the OLD row when replaced. */
     supersededAt: text("superseded_at"),
-    supersededByLinkId: text("superseded_by_link_id").references((): AnySQLiteColumn => jobLinks.id, { onDelete: "restrict" }),
+    supersededByLinkId: text("superseded_by_link_id").references((): AnyPgColumn => jobLinks.id, { onDelete: "restrict" }),
     /** fill-once: removed without replacement. */
     removedAt: text("removed_at"),
     removedByUserId: userRef("removed_by_user_id"),
     removeReason: text("remove_reason"),
-    activityEventId: text("activity_event_id").references((): AnySQLiteColumn => activityEvents.id, { onDelete: "restrict" }),
+    activityEventId: text("activity_event_id").references((): AnyPgColumn => activityEvents.id, { onDelete: "restrict" }),
   },
   (t) => [
     index("job_links_job_kind_idx").on(t.jobId, t.kind, t.supersededAt, t.removedAt),
@@ -812,14 +820,16 @@ export const jobLinks = sqliteTable(
 /*  Ledger: activity events (APPEND-ONLY; no updated_at by design)     */
 /* ------------------------------------------------------------------ */
 
-export const activityEvents = sqliteTable(
+export const activityEvents = pgTable(
   "activity_events",
   {
     id: id(),
+    /** Insertion order (identity; replaces SQLite rowid). Never written by app code. */
+    rowid: bigint("rowid", { mode: "number" }).notNull().generatedByDefaultAsIdentity(),
     organisationId: orgId(),
     /** null = system (automation / sweep / seed). */
     actorUserId: userRef("actor_user_id"),
-    automationRunId: text("automation_run_id").references((): AnySQLiteColumn => automationRuns.id, { onDelete: "restrict" }),
+    automationRunId: text("automation_run_id").references((): AnyPgColumn => automationRuns.id, { onDelete: "restrict" }),
     /** null for non-job entities. */
     jobId: text("job_id").references(() => jobs.id, { onDelete: "restrict" }),
     entityType: text("entity_type", { enum: ENTITY_TYPES }).notNull(),
@@ -827,9 +837,9 @@ export const activityEvents = sqliteTable(
     /** Fine-grained type from EVENT_TYPES (e.g. "job.status_changed"). */
     eventType: text("event_type").notNull(),
     action: text("action", { enum: EVENT_ACTIONS }).notNull(),
-    previousValue: text("previous_value", { mode: "json" }).$type<Json>(),
-    newValue: text("new_value", { mode: "json" }).$type<Json>(),
-    metadata: text("metadata", { mode: "json" }).$type<Record<string, Json>>().notNull().default(sql`'{}'`),
+    previousValue: jsonb("previous_value").$type<Json>(),
+    newValue: jsonb("new_value").$type<Json>(),
+    metadata: jsonb("metadata").$type<Record<string, Json>>().notNull().default(sql`'{}'::jsonb`),
     /** Frozen, actor-less sentence ("Status changed from Assigned to In Progress"); the UI prefixes the actor. */
     summary: text("summary").notNull(),
     /** management = redacted from every feed/history query for photographers and editors. */
@@ -849,7 +859,7 @@ export const activityEvents = sqliteTable(
 /*  Ledger: notifications (read_at fill-once)                          */
 /* ------------------------------------------------------------------ */
 
-export const notifications = sqliteTable(
+export const notifications = pgTable(
   "notifications",
   {
     id: id(),
@@ -882,7 +892,7 @@ export const notifications = sqliteTable(
 /*  Ledger: work sessions (time tracking)                              */
 /* ------------------------------------------------------------------ */
 
-export const workSessions = sqliteTable(
+export const workSessions = pgTable(
   "work_sessions",
   {
     id: id(),
@@ -920,7 +930,7 @@ export const workSessions = sqliteTable(
 /*  Automations                                                        */
 /* ------------------------------------------------------------------ */
 
-export const automations = sqliteTable(
+export const automations = pgTable(
   "automations",
   {
     id: id(),
@@ -930,9 +940,9 @@ export const automations = sqliteTable(
     isEnabled: bool("is_enabled", true),
     /** Indexed copy of trigger.type for cheap lookup. */
     triggerType: text("trigger_type").$type<AutomationTriggerType>().notNull(),
-    trigger: text("trigger", { mode: "json" }).$type<AutomationTrigger>().notNull(),
-    conditions: text("conditions", { mode: "json" }).$type<AutomationCondition[]>().notNull().default(sql`'[]'`),
-    actions: text("actions", { mode: "json" }).$type<AutomationAction[]>().notNull(),
+    trigger: jsonb("trigger").$type<AutomationTrigger>().notNull(),
+    conditions: jsonb("conditions").$type<AutomationCondition[]>().notNull().default(sql`'[]'::jsonb`),
+    actions: jsonb("actions").$type<AutomationAction[]>().notNull(),
     sortOrder: integer("sort_order").notNull().default(0),
     createdByUserId: text("created_by_user_id")
       .notNull()
@@ -946,10 +956,12 @@ export const automations = sqliteTable(
 );
 
 /** Ledger: no delete; status/result fill-in only. */
-export const automationRuns = sqliteTable(
+export const automationRuns = pgTable(
   "automation_runs",
   {
     id: id(),
+    /** Insertion order (identity; replaces SQLite rowid). Never written by app code. */
+    rowid: bigint("rowid", { mode: "number" }).notNull().generatedByDefaultAsIdentity(),
     organisationId: orgId(),
     automationId: text("automation_id")
       .notNull()
@@ -961,8 +973,8 @@ export const automationRuns = sqliteTable(
     /** 0 = caused by a human action; capped at AUTOMATION_MAX_DEPTH. */
     depth: integer("depth").notNull().default(0),
     status: text("status", { enum: AUTOMATION_RUN_STATUSES }).notNull().default("pending"),
-    conditionsSnapshot: text("conditions_snapshot", { mode: "json" }).$type<AutomationCondition[]>().notNull().default(sql`'[]'`),
-    actionsPerformed: text("actions_performed", { mode: "json" }).$type<AutomationActionResult[]>().notNull().default(sql`'[]'`),
+    conditionsSnapshot: jsonb("conditions_snapshot").$type<AutomationCondition[]>().notNull().default(sql`'[]'::jsonb`),
+    actionsPerformed: jsonb("actions_performed").$type<AutomationActionResult[]>().notNull().default(sql`'[]'::jsonb`),
     error: text("error"),
     createdAt: createdAt(),
     startedAt: text("started_at"),
@@ -980,7 +992,7 @@ export const automationRuns = sqliteTable(
 /*  Saved views & dashboards                                           */
 /* ------------------------------------------------------------------ */
 
-export const savedViews = sqliteTable(
+export const savedViews = pgTable(
   "saved_views",
   {
     id: id(),
@@ -990,7 +1002,7 @@ export const savedViews = sqliteTable(
       .references(() => users.id, { onDelete: "restrict" }),
     name: text("name").notNull(),
     scope: text("scope", { enum: SAVED_VIEW_SCOPES }).notNull(),
-    config: text("config", { mode: "json" }).$type<SavedViewConfig>().notNull(),
+    config: jsonb("config").$type<SavedViewConfig>().notNull(),
     isShared: bool("is_shared", false),
     isDefault: bool("is_default", false),
     archivedAt: text("archived_at"),
@@ -1004,7 +1016,7 @@ export const savedViews = sqliteTable(
   ],
 );
 
-export const dashboardLayouts = sqliteTable(
+export const dashboardLayouts = pgTable(
   "dashboard_layouts",
   {
     id: id(),
@@ -1012,7 +1024,7 @@ export const dashboardLayouts = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
-    layout: text("layout", { mode: "json" }).$type<DashboardLayout>().notNull(),
+    layout: jsonb("layout").$type<DashboardLayout>().notNull(),
     updatedAt: updatedAt(),
     version: version(),
   },

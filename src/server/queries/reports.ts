@@ -29,6 +29,7 @@ import { assertCan } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
 import {
   approvedJobsInRange,
+  binaryAsc,
   completedJobsInRange,
   createdJobsInRange,
   groupBy,
@@ -62,40 +63,40 @@ const TITLES: Record<ReportKind, string> = {
 /**
  * `GET /api/reports/:kind` (reports.view). Unknown kind → 404; bad range → 400.
  */
-export function getReport(db: DbLike, ctx: AuthContext, kind: unknown, rawRange?: unknown): Report {
+export async function getReport(db: DbLike, ctx: AuthContext, kind: unknown, rawRange?: unknown): Promise<Report> {
   assertCan(ctx, "reports.view");
   const parsed = KindSchema.safeParse(kind);
   if (!parsed.success) throw new NotFoundError("Report");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   return buildReport(db, ctx, parsed.data, range);
 }
 
 /** Report without the permission check (tests / scheduled exports). */
-export function buildReport(db: DbLike, ctx: AuthContext, kind: ReportKind, range: ResolvedRange): Report {
+export async function buildReport(db: DbLike, ctx: AuthContext, kind: ReportKind, range: ResolvedRange): Promise<Report> {
   const base = { kind, title: `${TITLES[kind]} — ${range.label}`, range, generatedAt: ctx.now() };
   switch (kind) {
     case "production":
-      return { ...base, ...productionTable(db, ctx, range) };
+      return { ...base, ...(await productionTable(db, ctx, range)) };
     case "editors":
-      return { ...base, ...editorsTable(db, ctx, range) };
+      return { ...base, ...(await editorsTable(db, ctx, range)) };
     case "photographers":
-      return { ...base, ...photographersTable(db, ctx, range) };
+      return { ...base, ...(await photographersTable(db, ctx, range)) };
     case "business":
-      return { ...base, ...businessTable(db, ctx, range) };
+      return { ...base, ...(await businessTable(db, ctx, range)) };
   }
 }
 
 type Table = Pick<Report, "columns" | "rows" | "totals">;
 
-function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table {
+async function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Promise<Table> {
   const inRange = (column: typeof jobs.createdAt | typeof jobs.approvedAt | typeof jobs.completedAt) => and(gte(column, range.from), lt(column, range.to));
   const where = or(inRange(jobs.createdAt), inRange(jobs.approvedAt), and(eq(jobs.statusCategory, "completed"), inRange(jobs.completedAt)));
-  const rows = selectJobRows(db, ctx, { where, orderBy: [asc(jobs.createdAt), asc(jobs.jobNumber)] });
+  const rows = await selectJobRows(db, ctx, { where, orderBy: [asc(jobs.createdAt), asc(jobs.jobNumber)] });
   const ids = rows.map((r) => r.id);
   const facts = new Map(
-    (ids.length === 0 ? [] : loadMetricJobs(db, ctx, { scope: "visible", where: inArray(jobs.id, ids) })).map((j) => [j.id, j]),
+    (ids.length === 0 ? [] : await loadMetricJobs(db, ctx, { scope: "visible", where: inArray(jobs.id, ids) })).map((j) => [j.id, j]),
   );
-  const transitions = loadTransitionsByJob(db, ctx, ids);
+  const transitions = await loadTransitionsByJob(db, ctx, ids);
   const out = rows.map((r) => {
     const f = facts.get(r.id);
     const turnaround = f ? turnaroundSeconds(f, transitions.get(r.id) ?? []) : null;
@@ -152,8 +153,8 @@ function productionTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Ta
   };
 }
 
-function editorsTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table {
-  const rows = computeEditorPerformance(db, ctx, range);
+async function editorsTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Promise<Table> {
+  const rows = await computeEditorPerformance(db, ctx, range);
   return {
     columns: [
       col("editor", "Editor"),
@@ -192,8 +193,8 @@ function editorsTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table
   };
 }
 
-function photographersTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table {
-  const rows = computePhotographerPerformance(db, ctx, range);
+async function photographersTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Promise<Table> {
+  const rows = await computePhotographerPerformance(db, ctx, range);
   return {
     columns: [
       col("photographer", "Photographer"),
@@ -228,18 +229,18 @@ function photographersTable(db: DbLike, ctx: AuthContext, range: ResolvedRange):
   };
 }
 
-function businessTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Table {
+async function businessTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Promise<Table> {
   const now = ctx.now();
   const scope = { scope: "org" as const };
-  const created = groupBy(createdJobsInRange(db, ctx, range, scope), (j) => j.clientId);
-  const completed = groupBy(completedJobsInRange(db, ctx, range, scope), (j) => j.clientId);
-  const approvedList = approvedJobsInRange(db, ctx, range, scope);
+  const created = groupBy(await createdJobsInRange(db, ctx, range, scope), (j) => j.clientId);
+  const completed = groupBy(await completedJobsInRange(db, ctx, range, scope), (j) => j.clientId);
+  const approvedList = await approvedJobsInRange(db, ctx, range, scope);
   const approved = groupBy(approvedList, (j) => j.clientId);
   const overdue = groupBy(
-    loadActiveMetricJobs(db, ctx, scope).filter((j) => isDeadlineBound(j.statusCategory) && isPastDue(j.dueDate, now)),
+    (await loadActiveMetricJobs(db, ctx, scope)).filter((j) => isDeadlineBound(j.statusCategory) && isPastDue(j.dueDate, now)),
     (j) => j.clientId,
   );
-  const transitions = loadTransitionsByJob(
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approvedList.map((j) => j.id),
@@ -248,12 +249,11 @@ function businessTable(db: DbLike, ctx: AuthContext, range: ResolvedRange): Tabl
   const clientRows =
     ids.length === 0
       ? []
-      : db
+      : await db
           .select({ id: clients.id, name: clients.name })
           .from(clients)
           .where(and(eq(clients.organisationId, ctx.organisationId), inArray(clients.id, ids)))
-          .orderBy(asc(clients.name))
-          .all();
+          .orderBy(binaryAsc(clients.name), asc(clients.id));
   const rows = clientRows.map((c) => {
     const a = approved.get(c.id) ?? [];
     return {

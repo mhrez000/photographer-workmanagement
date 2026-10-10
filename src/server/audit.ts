@@ -14,7 +14,7 @@
  *   transaction — the single automation hook; runs execute after commit
  *
  * There is deliberately no update/delete helper here or anywhere else; the
- * DB triggers (src/db/guard.ts) reject both.
+ * DB triggers (drizzle/0001_guards.sql) reject both.
  */
 import { and, eq, sql } from "drizzle-orm";
 import { activityEvents, jobs, type Json } from "@/db/schema";
@@ -105,7 +105,7 @@ function defaultCause(ctx: AuthContext): EventCause {
  * Appends one audit event inside `tx` and returns its id.
  * Throws on an unknown event type (programming error → the whole mutation rolls back).
  */
-export function recordEvent(tx: Tx, ctx: AuthContext, input: RecordEventInput): string {
+export async function recordEvent(tx: Tx, ctx: AuthContext, input: RecordEventInput): Promise<string> {
   if (!EVENT_TYPE_SET.has(input.eventType)) {
     throw new Error(`recordEvent: unknown event type "${input.eventType}"`);
   }
@@ -133,7 +133,8 @@ export function recordEvent(tx: Tx, ctx: AuthContext, input: RecordEventInput): 
   const summary = summarise(input.eventType, previousValue, newValue, metadata, { timeZone: ctx.settings.timezone });
 
   const id = newId();
-  tx.insert(activityEvents)
+  await tx
+    .insert(activityEvents)
     .values({
       id,
       organisationId: ctx.organisationId,
@@ -150,19 +151,18 @@ export function recordEvent(tx: Tx, ctx: AuthContext, input: RecordEventInput): 
       summary,
       visibility,
       createdAt,
-    })
-    .run();
+    });
 
   if (input.jobId) {
     // MAX semantics so a backdated event (seed under a moving clock) never rewinds it.
-    tx.update(jobs)
-      .set({ lastActivityAt: sql`CASE WHEN ${jobs.lastActivityAt} < ${createdAt} THEN ${createdAt} ELSE ${jobs.lastActivityAt} END` })
-      .where(and(eq(jobs.id, input.jobId), eq(jobs.organisationId, ctx.organisationId)))
-      .run();
+    await tx
+      .update(jobs)
+      .set({ lastActivityAt: sql`GREATEST(${jobs.lastActivityAt}, ${createdAt}::text)` })
+      .where(and(eq(jobs.id, input.jobId), eq(jobs.organisationId, ctx.organisationId)));
   }
 
   // Automation hook (§7): pending runs for matching rules, inside this tx.
-  enqueueAutomations(tx, ctx, {
+  await enqueueAutomations(tx, ctx, {
     eventId: id,
     eventType: input.eventType,
     jobId: input.jobId ?? null,
@@ -174,6 +174,9 @@ export function recordEvent(tx: Tx, ctx: AuthContext, input: RecordEventInput): 
 }
 
 /** Records several events in order (same tx); returns their ids. */
-export function recordEvents(tx: Tx, ctx: AuthContext, inputs: readonly RecordEventInput[]): string[] {
-  return inputs.map((input) => recordEvent(tx, ctx, input));
+export async function recordEvents(tx: Tx, ctx: AuthContext, inputs: readonly RecordEventInput[]): Promise<string[]> {
+  const ids: string[] = [];
+  // Sequential: one transaction = one connection, and order is part of the contract.
+  for (const input of inputs) ids.push(await recordEvent(tx, ctx, input));
+  return ids;
 }

@@ -10,7 +10,7 @@
  * happened). Terminal stages (completed / cancelled) are not drawn on the
  * board (they never end); the single-job timeline keeps them.
  */
-import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { clients, jobRevisions, jobStatusTransitions, jobs, projects } from "@/db/schema";
@@ -86,8 +86,8 @@ export function stageBaselines(durations: Partial<Record<StatusCategory, readonl
 }
 
 /** Usual (median, floored) closed-stage seconds per category across the organisation. */
-export function orgCategoryBaselines(db: DbLike, ctx: AuthContext): Partial<Record<StatusCategory, number>> {
-  const rows = db
+export async function orgCategoryBaselines(db: DbLike, ctx: AuthContext): Promise<Partial<Record<StatusCategory, number>>> {
+  const rows = await db
     .select({ category: jobStatusTransitions.toCategory, seconds: jobStatusTransitions.durationSeconds })
     .from(jobStatusTransitions)
     .where(
@@ -97,8 +97,7 @@ export function orgCategoryBaselines(db: DbLike, ctx: AuthContext): Partial<Reco
         isNotNull(jobStatusTransitions.durationSeconds),
         notInArray(jobStatusTransitions.toCategory, [...UNFLAGGED_STAGE_CATEGORIES]),
       ),
-    )
-    .all();
+    );
   const durations: Partial<Record<StatusCategory, number[]>> = {};
   for (const r of rows) if (r.seconds !== null) (durations[r.category] ??= []).push(Number(r.seconds));
   return stageBaselines(durations);
@@ -215,12 +214,11 @@ function rangeOf(ctx: AuthContext, from: string | undefined, to: string | undefi
   return { from: f, to: t };
 }
 
-/** Gantt rows for visible jobs with a (non-terminal) stage overlapping [from, to] (`to` is an end-of-day instant). */
 /** `jobs.id IN (…)` for the FilterBar filters (search, current editor, photographer, priority); undefined when none is set. */
-function jobFilterSubquery(db: DbLike, ctx: AuthContext, q: z.output<typeof TimelineQuerySchema>): SQL | undefined {
+async function jobFilterSubquery(db: DbLike, ctx: AuthContext, q: z.output<typeof TimelineQuerySchema>): Promise<SQL | undefined> {
   if (!q.q && !q.currentEditorId?.length && !q.photographerId?.length && !q.priority?.length) return undefined;
   const filters = JobListFiltersSchema.parse({});
-  const bounds = orgDayBounds(ctx, ctx.now(), loadOrgSettingsRow(db, ctx)?.weekStartsOn ?? 1);
+  const bounds = orgDayBounds(ctx, ctx.now(), (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
   const where = jobFiltersWhere(ctx, { ...filters, q: q.q, editorId: q.currentEditorId, photographerId: q.photographerId, priority: q.priority }, bounds, {
     defaultHideCancelled: false,
   });
@@ -233,7 +231,8 @@ function jobFilterSubquery(db: DbLike, ctx: AuthContext, q: z.output<typeof Time
   return inArray(jobStatusTransitions.jobId, ids);
 }
 
-export function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {}): TimelineRow[] {
+/** Gantt rows for visible jobs with a (non-terminal) stage overlapping [from, to] (`to` is an end-of-day instant). */
+export async function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<TimelineRow[]> {
   const q = parseInput(TimelineQuerySchema, input ?? {});
   const now = ctx.now();
   const range = rangeOf(ctx, q.from, q.to, now);
@@ -246,28 +245,28 @@ export function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {
     notInArray(jobStatusTransitions.toCategory, [...CATEGORY_GROUPS.TERMINAL]),
     q.editorId ? eq(jobStatusTransitions.editorIdAtEntry, q.editorId) : undefined,
     q.jobId ? eq(jobStatusTransitions.jobId, q.jobId) : undefined,
-    jobFilterSubquery(db, ctx, q),
+    await jobFilterSubquery(db, ctx, q),
   ];
-  const transitions = db
-    .select({ t: jobStatusTransitions })
-    .from(jobStatusTransitions)
-    .innerJoin(jobs, eq(jobs.id, jobStatusTransitions.jobId))
-    .where(and(...conditions))
-    .orderBy(asc(jobStatusTransitions.jobId), asc(jobStatusTransitions.sequence))
-    .all()
-    .map((r) => r.t);
+  const transitions = (
+    await db
+      .select({ t: jobStatusTransitions })
+      .from(jobStatusTransitions)
+      .innerJoin(jobs, eq(jobs.id, jobStatusTransitions.jobId))
+      .where(and(...conditions))
+      .orderBy(sql`${jobStatusTransitions.jobId} collate "C"`, asc(jobStatusTransitions.sequence))
+  ).map((r) => r.t);
 
   const jobIds = [...new Set(transitions.map((t) => t.jobId))].slice(0, MAX_ROWS);
   if (jobIds.length === 0) return [];
-  const raws = selectRawJobs(db, ctx, { where: inArray(jobs.id, jobIds) });
+  const raws = await selectRawJobs(db, ctx, { where: inArray(jobs.id, jobIds) });
   const byId = new Map(raws.map((r) => [r.job.id, r]));
-  const users = loadUserRefs(
+  const users = await loadUserRefs(
     db,
     ctx,
     transitions.map((t) => t.editorIdAtEntry),
   );
-  const baselines = orgCategoryBaselines(db, ctx);
-  const revisionDue = openRevisionDueDates(db, ctx, jobIds);
+  const baselines = await orgCategoryBaselines(db, ctx);
+  const revisionDue = await openRevisionDueDates(db, ctx, jobIds);
 
   const rows: TimelineRow[] = [];
   for (const id of jobIds) {
@@ -297,24 +296,23 @@ export function getTimelineRows(db: DbLike, ctx: AuthContext, input: unknown = {
 }
 
 /** Every stage of one job as a timeline row (job Timeline tab); 404 when not visible. */
-export function getJobTimelineRow(db: DbLike, ctx: AuthContext, jobId: string): TimelineRow {
-  const { job } = loadVisibleJob(db, ctx, jobId, "job.view_history");
-  const raw = selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 })[0];
+export async function getJobTimelineRow(db: DbLike, ctx: AuthContext, jobId: string): Promise<TimelineRow> {
+  const { job } = await loadVisibleJob(db, ctx, jobId, "job.view_history");
+  const raw = (await selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 }))[0];
   if (!raw) throw new NotFoundError("Job");
-  const transitions = db
+  const transitions = await db
     .select()
     .from(jobStatusTransitions)
     .where(and(eq(jobStatusTransitions.organisationId, ctx.organisationId), eq(jobStatusTransitions.jobId, job.id)))
-    .orderBy(asc(jobStatusTransitions.sequence))
-    .all();
+    .orderBy(asc(jobStatusTransitions.sequence));
   const now = ctx.now();
-  const users = loadUserRefs(
+  const users = await loadUserRefs(
     db,
     ctx,
     transitions.map((t) => t.editorIdAtEntry),
   );
-  const baselines = orgCategoryBaselines(db, ctx);
-  const dates = { ...job, openRevisionDueDate: openRevisionDueDates(db, ctx, [job.id]).get(job.id) ?? null };
+  const baselines = await orgCategoryBaselines(db, ctx);
+  const dates = { ...job, openRevisionDueDate: (await openRevisionDueDates(db, ctx, [job.id])).get(job.id) ?? null };
   return {
     job: rowJob(raw),
     segments: transitions.map((t) => toTimelineEvent(dates, t, users, baselines, now)),
@@ -322,15 +320,15 @@ export function getJobTimelineRow(db: DbLike, ctx: AuthContext, jobId: string): 
 }
 
 /** Due date of each job's open (unresolved) revision request — the latest one when several are open. */
-function openRevisionDueDates(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Map<string, string | null> {
+async function openRevisionDueDates(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   if (jobIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ jobId: jobRevisions.jobId, dueDate: jobRevisions.dueDate })
     .from(jobRevisions)
     .where(and(eq(jobRevisions.organisationId, ctx.organisationId), inArray(jobRevisions.jobId, [...jobIds]), isNull(jobRevisions.resolvedAt)))
-    .orderBy(asc(jobRevisions.revisionNumber))
-    .all();
+    .orderBy(asc(jobRevisions.revisionNumber));
+
   for (const r of rows) out.set(r.jobId, r.dueDate);
   return out;
 }

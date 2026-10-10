@@ -5,20 +5,23 @@
  * (user id + session version). Every request re-reads the user row:
  * inactive users and stale `sessionVersion`s (bumped on deactivate, role
  * change, password change) get no context → 401. `SESSION_SECRET` (≥ 32
- * chars) is required; the module throws at load time without it.
+ * chars) is required in production; the module throws at load time without
+ * it. Local dev falls back to a generated data/.session-secret (devSecret).
  *
  * Context builders:
- *   - `buildContextFromDb(db, userId, opts)` — pure DB → AuthContext (tests use it)
+ *   - `await buildContextFromDb(db, userId, opts)` — pure DB → AuthContext (tests use it)
  *   - `requireContext()` / `getOptionalContext()` — cookie → AuthContext, cached per request
- *   - `systemContext(orgId, opts)` — automations / sweep / seed (isSystem, userId null)
+ *   - `await systemContext(orgId, { db: tx, … })` — automations / sweep / seed (isSystem, userId null);
+ *     inside a transaction ALWAYS pass `db: tx` (it reads organisation_settings)
  */
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 import { and, eq, isNull, ne } from "drizzle-orm";
-import { alias } from "drizzle-orm/sqlite-core";
+import { alias } from "drizzle-orm/pg-core";
 import { getDb, type DbLike } from "@/db/index";
 import { organisationSettings, organisations, teamMemberships, teams, users } from "@/db/schema";
 import { DEFAULT_TIMEZONE, SESSION_COOKIE_NAME, SESSION_TTL_DAYS, type EventCause, type Role } from "@/lib/constants";
@@ -34,20 +37,44 @@ import { currentRequestId, newRequestId } from "@/server/request-scope";
 export const SESSION_SECRET_MIN_LENGTH = 32;
 
 /**
- * Fallback for hosted demo builds: scripts/build-demo-db.mjs writes a random
- * per-deployment secret to data/.session-secret when SESSION_SECRET is not
- * configured (never committed). An explicit SESSION_SECRET always wins.
+ * Fallback for builds without SESSION_SECRET: data/.session-secret (a random
+ * per-deployment secret, never committed; traced into the server output by
+ * next.config.ts). An explicit SESSION_SECRET always wins.
  */
+function secretFilePath(): string {
+  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), "data/.session-secret");
+}
+
 function readBuildSecret(): string | undefined {
   try {
-    return fs.readFileSync(path.resolve(/*turbopackIgnore: true*/ process.cwd(), "data/.session-secret"), "utf8").trim();
+    return fs.readFileSync(secretFilePath(), "utf8").trim();
   } catch {
     return undefined;
   }
 }
 
+/**
+ * Zero-config local development: outside production, with neither
+ * SESSION_SECRET nor data/.session-secret, generate a random secret once and
+ * keep it in data/.session-secret (gitignored) so sessions survive restarts.
+ * Production never generates one: it must be configured.
+ */
+function devSecret(): string | undefined {
+  if (process.env.NODE_ENV === "production") return undefined;
+  try {
+    const file = secretFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const secret = randomBytes(36).toString("base64url");
+    // "wx": never overwrite a secret another process wrote first.
+    fs.writeFileSync(file, `${secret}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    return secret;
+  } catch {
+    return readBuildSecret();
+  }
+}
+
 function loadSecret(): Uint8Array {
-  const raw = process.env.SESSION_SECRET?.trim() || readBuildSecret();
+  const raw = process.env.SESSION_SECRET?.trim() || readBuildSecret() || devSecret();
   if (!raw || raw.length < SESSION_SECRET_MIN_LENGTH) {
     throw new Error(
       `SESSION_SECRET is missing or shorter than ${SESSION_SECRET_MIN_LENGTH} characters. Set it in .env (see .env.example).`,
@@ -148,8 +175,8 @@ export function settingsToContext(row: OrganisationSettings | undefined): Contex
   };
 }
 
-function loadSettings(db: DbLike, organisationId: string): ContextSettings {
-  const row = db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, organisationId)).get();
+async function loadSettings(db: DbLike, organisationId: string): Promise<ContextSettings> {
+  const [row] = await db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, organisationId)).limit(1);
   return settingsToContext(row);
 }
 
@@ -157,9 +184,9 @@ function loadSettings(db: DbLike, organisationId: string): ContextSettings {
  * Users sharing an active membership (left_at IS NULL) in a non-archived team
  * with `userId`, excluding `userId` itself.
  */
-export function loadTeamUserIds(db: DbLike, organisationId: string, userId: string): Set<string> {
+export async function loadTeamUserIds(db: DbLike, organisationId: string, userId: string): Promise<Set<string>> {
   const mine = alias(teamMemberships, "mine");
-  const rows = db
+  const rows = await db
     .selectDistinct({ userId: teamMemberships.userId })
     .from(mine)
     .innerJoin(teams, and(eq(teams.id, mine.teamId), isNull(teams.archivedAt)))
@@ -171,8 +198,7 @@ export function loadTeamUserIds(db: DbLike, organisationId: string, userId: stri
         isNull(mine.leftAt),
         ne(teamMemberships.userId, userId),
       ),
-    )
-    .all();
+    );
   return new Set(rows.map((r) => r.userId));
 }
 
@@ -185,7 +211,10 @@ export interface BuildContextOptions {
   cause?: EventCause;
 }
 
-function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): AuthContext {
+async function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): Promise<AuthContext> {
+  // Sequential on purpose: `db` may be a transaction (one connection).
+  const teamUserIds = await loadTeamUserIds(db, user.organisationId, user.id);
+  const settings = await loadSettings(db, user.organisationId);
   return {
     userId: user.id,
     organisationId: user.organisationId,
@@ -193,8 +222,8 @@ function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): Aut
     isActive: user.isActive,
     canViewTeamWorkloads: user.canViewTeamWorkloads,
     canViewAnalytics: user.canViewAnalytics,
-    teamUserIds: loadTeamUserIds(db, user.organisationId, user.id),
-    settings: loadSettings(db, user.organisationId),
+    teamUserIds,
+    settings,
     isSystem: false,
     now: opts.now ?? nowIso,
     requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
@@ -207,15 +236,15 @@ function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): Aut
  * Returns null when the user is missing, inactive, anonymised, or the
  * session version does not match.
  */
-export function buildContextFromDb(db: DbLike, userId: string, opts: BuildContextOptions = {}): AuthContext | null {
-  const user = db.select().from(users).where(eq(users.id, userId)).get();
+export async function buildContextFromDb(db: DbLike, userId: string, opts: BuildContextOptions = {}): Promise<AuthContext | null> {
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user || !user.isActive || user.anonymisedAt) return null;
   if (opts.sessionVersion !== undefined && user.sessionVersion !== opts.sessionVersion) return null;
   return contextFromUser(db, user, opts);
 }
 
 /** `buildContextFromDb` against the app database (`getDb()`). */
-export function buildContext(userId: string, requestId?: string, sessionVersion?: number): AuthContext | null {
+export async function buildContext(userId: string, requestId?: string, sessionVersion?: number): Promise<AuthContext | null> {
   return buildContextFromDb(getDb(), userId, { requestId, sessionVersion });
 }
 
@@ -225,6 +254,7 @@ export interface SystemContextOptions {
   /** Defaults to "sweep" (or "automation" when automationRunId is set). */
   cause?: EventCause;
   automationRunId?: string | null;
+  /** Where to read the organisation settings. Inside a transaction pass the `tx` (default `getDb()`). */
   db?: DbLike;
 }
 
@@ -233,9 +263,10 @@ export interface SystemContextOptions {
  * owner-equivalent role. permissions.ts restricts it to the automation
  * action allowlist; events it writes have `actor_user_id = null`.
  */
-export function systemContext(organisationId: string, opts: SystemContextOptions = {}): AuthContext {
+export async function systemContext(organisationId: string, opts: SystemContextOptions = {}): Promise<AuthContext> {
   const db = opts.db ?? getDb();
   const role: Role = "owner";
+  const settings = await loadSettings(db, organisationId);
   return {
     userId: null,
     organisationId,
@@ -244,7 +275,7 @@ export function systemContext(organisationId: string, opts: SystemContextOptions
     canViewTeamWorkloads: true,
     canViewAnalytics: true,
     teamUserIds: new Set<string>(),
-    settings: loadSettings(db, organisationId),
+    settings,
     isSystem: true,
     now: opts.now ?? nowIso,
     requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
@@ -278,10 +309,10 @@ const resolveSession = cache(async (): Promise<ResolvedSession | null> => {
   const payload = await readSessionToken();
   if (!payload) return null;
   const db = getDb();
-  const user = db.select().from(users).where(eq(users.id, payload.sub)).get();
+  const [user] = await db.select().from(users).where(eq(users.id, payload.sub)).limit(1);
   if (!user || !user.isActive || user.anonymisedAt || user.sessionVersion !== payload.sv) return null;
-  const org = db.select({ name: organisations.name }).from(organisations).where(eq(organisations.id, user.organisationId)).get();
-  const ctx = contextFromUser(db, user, {});
+  const [org] = await db.select({ name: organisations.name }).from(organisations).where(eq(organisations.id, user.organisationId)).limit(1);
+  const ctx = await contextFromUser(db, user, {});
   return {
     ctx,
     viewer: {

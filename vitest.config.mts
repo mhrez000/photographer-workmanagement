@@ -6,7 +6,19 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     environment: "node",
     globals: false,
-    env: { DATABASE_PATH: ":memory:", SESSION_SECRET: "test-secret-test-secret-test-secret-test-secret" },
+    // Every test database is an in-memory PGlite (src/db/test-db.ts); the app
+    // singleton (getDb() without an override) is in-memory too. DATABASE_URL is
+    // forced empty so a test run can never reach a remote database.
+    env: {
+      PGLITE_DATA_DIR: ":memory:",
+      DATABASE_URL: "",
+      DIRECT_URL: "",
+      SESSION_SECRET: "test-secret-test-secret-test-secret-test-secret",
+    },
+    setupFiles: ["./src/db/test-setup.ts"],
+    // PGlite boots per test (~0.3 s) and the first one per worker applies the migrations.
+    testTimeout: 30_000,
+    hookTimeout: 60_000,
   },
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
 });

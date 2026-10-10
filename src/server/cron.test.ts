@@ -24,23 +24,23 @@ describe("cron secret", () => {
 });
 
 describe("sweepAllOrganisations", () => {
-  it("flags overdue jobs in every organisation exactly once", () => {
-    const db = makeTestDb();
+  it("flags overdue jobs in every organisation exactly once", async () => {
+    const db = await makeTestDb();
     fakeClock.set("2026-10-09T00:00:00.000Z");
     try {
-      const a = seedMinimalOrg(db, { slug: "alpha", emailDomain: "alpha.test" });
-      const b = seedMinimalOrg(db, { slug: "beta", emailDomain: "beta.test" });
-      const jobA = insertJobFixture(db, a, { statusKey: "in_progress", editorId: a.users.editor1, dueDate: "2026-10-05T12:59:59.999Z" });
-      const jobB = insertJobFixture(db, b, { statusKey: "in_progress", editorId: b.users.editor1, dueDate: "2026-10-05T12:59:59.999Z" });
+      const a = await seedMinimalOrg(db, { slug: "alpha", emailDomain: "alpha.test" });
+      const b = await seedMinimalOrg(db, { slug: "beta", emailDomain: "beta.test" });
+      const jobA = await insertJobFixture(db, a, { statusKey: "in_progress", editorId: a.users.editor1, dueDate: "2026-10-05T12:59:59.999Z" });
+      const jobB = await insertJobFixture(db, b, { statusKey: "in_progress", editorId: b.users.editor1, dueDate: "2026-10-05T12:59:59.999Z" });
 
-      const first = sweepAllOrganisations(db);
+      const first = await sweepAllOrganisations(db);
       expect(first.organisations).toBe(2);
       expect(first.results.flatMap((r) => r.overdueJobIds).sort()).toEqual([jobA.job.id, jobB.job.id].sort());
       expect(first.results.every((r) => r.errors.length === 0)).toBe(true);
 
-      const second = sweepAllOrganisations(db);
+      const second = await sweepAllOrganisations(db);
       expect(second.results.flatMap((r) => r.overdueJobIds)).toEqual([]);
-      const flagged = db.select().from(activityEvents).where(eq(activityEvents.eventType, "job.became_overdue")).all();
+      const flagged = await db.select().from(activityEvents).where(eq(activityEvents.eventType, "job.became_overdue"));
       expect(flagged).toHaveLength(2);
     } finally {
       fakeClock.reset();

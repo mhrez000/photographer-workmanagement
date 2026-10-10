@@ -16,6 +16,7 @@
  *    deactivation hand-overs and automations are followed naturally.
  */
 import { and, eq, isNull } from "drizzle-orm";
+import { first } from "@/db/index";
 import { jobLinks, jobNotes, jobs, users, workSessions } from "@/db/schema";
 import { CATEGORY_GROUPS, DEFAULT_JOB_TYPES, type LinkKind, type NoteKind, type Priority } from "@/lib/constants";
 import type { Job } from "@/lib/types";
@@ -964,9 +965,9 @@ export class NorthlightSeeder {
     for (const client of this.clients) {
       for (const project of client.projects) {
         const at = Number.isFinite(project.firstUseAt) ? project.firstUseAt - this.mins(15, 90) : this.rt.nowMs - 126 * DAY + this.mins(10, 600);
-        this.rt.schedule(at, `project ${project.def.name}`, () => {
+        this.rt.schedule(at, `project ${project.def.name}`, async () => {
           const actor = this.user(project.creatorKey);
-          const row = this.rt.act(actor, (tx, ctx) =>
+          const row = await this.rt.act(actor, (tx, ctx) =>
             createProject(tx, ctx, {
               clientId: client.id,
               name: project.def.name,
@@ -982,19 +983,20 @@ export class NorthlightSeeder {
 
   /* ------------------------------ execution ------------------------------ */
 
-  private job(plan: JobPlan): Job {
+  /** Current job row, read on the root db (call it OUTSIDE act(): never inside its transaction). */
+  private async job(plan: JobPlan): Promise<Job> {
     const id = plan.jobId;
     if (!id) throw new Error(`seed: job #${plan.n} not created yet`);
-    const row = this.rt.db.select().from(jobs).where(eq(jobs.id, id)).get();
+    const row = await first(this.rt.db.select().from(jobs).where(eq(jobs.id, id)));
     if (!row) throw new Error(`seed: job #${plan.n} missing`);
     return row;
   }
 
-  private currentEditor(plan: JobPlan): string | null {
-    return this.job(plan).editorId;
+  private async currentEditor(plan: JobPlan): Promise<string | null> {
+    return (await this.job(plan)).editorId;
   }
 
-  private actorFor(plan: JobPlan, role: ActorRole): string | null {
+  private async actorFor(plan: JobPlan, role: ActorRole): Promise<string | null> {
     switch (role) {
       case "photographer":
         return this.user(plan.photographerKey);
@@ -1011,8 +1013,8 @@ export class NorthlightSeeder {
     }
   }
 
-  private requireActor(plan: JobPlan, role: ActorRole): string {
-    const id = this.actorFor(plan, role);
+  private async requireActor(plan: JobPlan, role: ActorRole): Promise<string> {
+    const id = await this.actorFor(plan, role);
     if (!id) throw new Error(`seed: job #${plan.n} has no ${role}`);
     return id;
   }
@@ -1036,7 +1038,7 @@ export class NorthlightSeeder {
     }
   }
 
-  private exec(plan: JobPlan, def: StepDef): void {
+  private async exec(plan: JobPlan, def: StepDef): Promise<void> {
     const rt = this.rt;
     const rng = this.rng;
     const wf = this.refs.workflows;
@@ -1044,7 +1046,7 @@ export class NorthlightSeeder {
       const creator = this.user(plan.creatorKey);
       const project = plan.project;
       if (!project.id) throw new Error(`seed: project ${project.def.name} not created`);
-      const result = rt.act(creator, (tx, ctx) =>
+      const result = await rt.act(creator, (tx, ctx) =>
         createJob(tx, ctx, {
           name: plan.name,
           description: plan.description,
@@ -1062,13 +1064,13 @@ export class NorthlightSeeder {
     }
     const jobId = plan.jobId;
     if (!jobId) throw new Error(`seed: job #${plan.n} not created before ${def.k}`);
-    const version = () => this.job(plan).version;
+    const version = async () => (await this.job(plan)).version;
 
     switch (def.k) {
       case "link": {
-        const actor = def.actor === "editor" ? this.currentEditor(plan) : this.user(plan.photographerKey);
+        const actor = def.actor === "editor" ? await this.currentEditor(plan) : this.user(plan.photographerKey);
         if (!actor) return rt.skip(`#${plan.n} link ${def.kind}: no editor`);
-        const link = rt.act(actor, (tx, ctx) => addLink(tx, ctx, { jobId, kind: def.kind, url: this.url(plan, def.kind), label: null }));
+        const link = await rt.act(actor, (tx, ctx) => addLink(tx, ctx, { jobId, kind: def.kind, url: this.url(plan, def.kind), label: null }));
         if (def.kind === "raw_files") plan.rawLinkId = link.id;
         if (def.kind === "finished_files") plan.finishedLinkId = link.id;
         return;
@@ -1076,47 +1078,49 @@ export class NorthlightSeeder {
       case "replaceLink": {
         const linkId = def.slot === "raw" ? plan.rawLinkId : plan.finishedLinkId;
         if (!linkId) return rt.skip(`#${plan.n} replace ${def.slot}: no link`);
-        const link = rt.db.select().from(jobLinks).where(eq(jobLinks.id, linkId)).get();
-        const editor = this.currentEditor(plan);
-        const actor = link && editor && link.addedByUserId === editor && this.job(plan).statusCategory !== "completed" ? editor : this.user(plan.photographerKey);
+        const link = await first(rt.db.select().from(jobLinks).where(eq(jobLinks.id, linkId)));
+        const editor = await this.currentEditor(plan);
+        const actor = link && editor && link.addedByUserId === editor && (await this.job(plan)).statusCategory !== "completed" ? editor : this.user(plan.photographerKey);
         const kind: LinkKind = def.slot === "raw" ? "raw_files" : "finished_files";
-        const result = rt.act(actor, (tx, ctx) => replaceLink(tx, ctx, { linkId, url: this.url(plan, kind) }));
+        const result = await rt.act(actor, (tx, ctx) => replaceLink(tx, ctx, { linkId, url: this.url(plan, kind) }));
         if (def.slot === "raw") plan.rawLinkId = result.link.id;
         else plan.finishedLinkId = result.link.id;
         return;
       }
       case "note": {
-        const actor = def.actor === "editor" ? this.currentEditor(plan) : this.actorFor(plan, def.actor);
+        const actor = def.actor === "editor" ? await this.currentEditor(plan) : await this.actorFor(plan, def.actor);
         if (!actor) return rt.skip(`#${plan.n} note ${def.kind}: no actor`);
         const pool = def.kind === "photographer" ? PHOTOGRAPHER_NOTES : def.kind === "client" ? CLIENT_NOTES : def.kind === "internal" ? INTERNAL_NOTES : EDITOR_NOTES;
-        const note = rt.act(actor, (tx, ctx) => addNote(tx, ctx, { jobId, kind: def.kind, body: rng.pick(pool), isPinned: def.kind === "client" && rng.chance(0.3) }));
+        const note = await rt.act(actor, (tx, ctx) => addNote(tx, ctx, { jobId, kind: def.kind, body: rng.pick(pool), isPinned: def.kind === "client" && rng.chance(0.3) }));
         if (def.kind === "photographer" && !plan.photographerNoteId) plan.photographerNoteId = note.id;
         return;
       }
       case "noteEdit": {
         const noteId = plan.photographerNoteId;
         if (!noteId) return rt.skip(`#${plan.n} noteEdit: no note`);
-        const note = rt.db.select().from(jobNotes).where(eq(jobNotes.id, noteId)).get();
+        const note = await first(rt.db.select().from(jobNotes).where(eq(jobNotes.id, noteId)));
         if (!note) return;
-        rt.act(this.user(plan.photographerKey), (tx, ctx) =>
+        await rt.act(this.user(plan.photographerKey), (tx, ctx) =>
           editNote(tx, ctx, { noteId, expectedVersion: note.version, body: `${note.body} Update: agent added two extra frames of the garden.` }),
         );
         return;
       }
       case "migrate": {
-        rt.act(this.user(plan.managerKey), (tx, ctx) =>
+        const v = await version();
+        await rt.act(this.user(plan.managerKey), (tx, ctx) =>
           migrateWorkflow(tx, ctx, {
             jobId,
             workflowId: wf.quick.id,
             toStatusId: wf.quick.statuses.new,
-            expectedVersion: version(),
+            expectedVersion: v,
             reason: "Client only needs a quick retouch of the hero images",
           }),
         );
         return;
       }
       case "ready": {
-        rt.act(this.user(plan.photographerKey), (tx, ctx) => transitionJobStatus(tx, ctx, { jobId, toCategory: "ready", expectedVersion: version() }));
+        const v = await version();
+        await rt.act(this.user(plan.photographerKey), (tx, ctx) => transitionJobStatus(tx, ctx, { jobId, toCategory: "ready", expectedVersion: v }));
         return;
       }
       case "assign": {
@@ -1125,83 +1129,97 @@ export class NorthlightSeeder {
         const actor = def.slot === "initial" ? this.user(plan.assignerKey) : this.user(plan.managerKey);
         const reason =
           def.slot === "reassign" ? "Rebalancing workload" : def.slot === "after_decline" ? "Reassigned after decline" : null;
-        rt.act(actor, (tx, ctx) => assignEditor(tx, ctx, { jobId, userId: this.user(editorKey), reason, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(actor, (tx, ctx) => assignEditor(tx, ctx, { jobId, userId: this.user(editorKey), reason, expectedVersion: v }));
         return;
       }
       case "decline": {
-        const editor = this.requireActor(plan, "editor");
-        rt.act(editor, (tx, ctx) => declineJob(tx, ctx, { jobId, expectedVersion: version(), reason: "Fully booked this week, sorry" }));
+        const editor = await this.requireActor(plan, "editor");
+        const v = await version();
+        await rt.act(editor, (tx, ctx) => declineJob(tx, ctx, { jobId, expectedVersion: v, reason: "Fully booked this week, sorry" }));
         return;
       }
       case "accept": {
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => acceptJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => acceptJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "start": {
-        const job = this.job(plan);
+        const job = await this.job(plan);
         const toStatusId = job.workflowId === wf.video.id ? wf.video.statuses.in_progress : undefined;
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => startJob(tx, ctx, { jobId, expectedVersion: version(), toStatusId }));
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => startJob(tx, ctx, { jobId, expectedVersion: v, toStatusId }));
         return;
       }
       case "finalCut": {
         const finalCut = wf.video.statuses.final_cut;
-        if (!finalCut || this.job(plan).workflowId !== wf.video.id) return rt.skip(`#${plan.n} finalCut: not a video job`);
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => transitionJobStatus(tx, ctx, { jobId, toStatusId: finalCut, expectedVersion: version() }));
+        if (!finalCut || (await this.job(plan)).workflowId !== wf.video.id) return rt.skip(`#${plan.n} finalCut: not a video job`);
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => transitionJobStatus(tx, ctx, { jobId, toStatusId: finalCut, expectedVersion: v }));
         return;
       }
       case "timerStart": {
-        const job = this.job(plan);
+        const job = await this.job(plan);
         const editor = job.editorId;
-        if (!editor || job.isPaused || !CATEGORY_GROUPS.EDITOR_WORKING.includes(job.statusCategory) || !rt.isActive(editor)) {
+        if (!editor || job.isPaused || !CATEGORY_GROUPS.EDITOR_WORKING.includes(job.statusCategory) || !(await rt.isActive(editor))) {
           return rt.skip(`#${plan.n} timerStart: not workable`);
         }
-        rt.act(editor, (tx, ctx) => startTimer(tx, ctx, { jobId, switchFromRunning: true }));
+        await rt.act(editor, (tx, ctx) => startTimer(tx, ctx, { jobId, switchFromRunning: true }));
         plan.timerUserId = editor;
         return;
       }
       case "timerStop": {
         const userId = plan.timerUserId;
         if (!userId) return;
-        const running = rt.db
-          .select({ id: workSessions.id })
-          .from(workSessions)
-          .where(and(eq(workSessions.jobId, jobId), eq(workSessions.userId, userId), isNull(workSessions.endedAt)))
-          .get();
-        if (!running || !rt.isActive(userId)) return;
-        rt.act(userId, (tx, ctx) => stopTimer(tx, ctx, { jobId }));
+        const running = await first(
+          rt.db
+            .select({ id: workSessions.id })
+            .from(workSessions)
+            .where(and(eq(workSessions.jobId, jobId), eq(workSessions.userId, userId), isNull(workSessions.endedAt)))
+            .limit(1),
+        );
+        if (!running || !(await rt.isActive(userId))) return;
+        await rt.act(userId, (tx, ctx) => stopTimer(tx, ctx, { jobId }));
         return;
       }
       case "pause": {
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => pauseJob(tx, ctx, { jobId, expectedVersion: version(), reason: rng.pick(PAUSE_REASONS) }));
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => pauseJob(tx, ctx, { jobId, expectedVersion: v, reason: rng.pick(PAUSE_REASONS) }));
         return;
       }
       case "resume": {
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => resumeJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => resumeJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "cancel": {
         const actor = def.actor === "manager" ? this.user(plan.managerKey) : this.user(plan.photographerKey);
-        rt.act(actor, (tx, ctx) => cancelJob(tx, ctx, { jobId, expectedVersion: version(), reason: def.reason }));
+        const v = await version();
+        await rt.act(actor, (tx, ctx) => cancelJob(tx, ctx, { jobId, expectedVersion: v, reason: def.reason }));
         return;
       }
       case "restore": {
-        rt.act(this.user(plan.managerKey), (tx, ctx) => restoreJob(tx, ctx, { jobId, expectedVersion: version(), reason: "Vendor is going ahead after all" }));
+        const v = await version();
+        await rt.act(this.user(plan.managerKey), (tx, ctx) => restoreJob(tx, ctx, { jobId, expectedVersion: v, reason: "Vendor is going ahead after all" }));
         return;
       }
       case "submit": {
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) => submitJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) => submitJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "beginReview": {
-        rt.act(this.user(plan.reviewerKey), (tx, ctx) => beginReview(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(this.user(plan.reviewerKey), (tx, ctx) => beginReview(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "revision": {
         const req = rng.pick(REVISION_REQUESTS);
-        rt.act(this.user(plan.reviewerKey), (tx, ctx) =>
+        const v = await version();
+        await rt.act(this.user(plan.reviewerKey), (tx, ctx) =>
           requestRevision(tx, ctx, {
             jobId,
-            expectedVersion: version(),
+            expectedVersion: v,
             reason: req.reason,
             description: req.description,
             instructions: req.instructions,
@@ -1211,65 +1229,72 @@ export class NorthlightSeeder {
         return;
       }
       case "resubmit": {
-        const job = this.job(plan);
+        const job = await this.job(plan);
         if (!job.openRevisionId) throw new Error(`seed: job #${plan.n} has no open revision to resubmit`);
         const revisionId = job.openRevisionId;
-        rt.act(this.requireActor(plan, "editor"), (tx, ctx) =>
+        await rt.act(await this.requireActor(plan, "editor"), (tx, ctx) =>
           resolveRevision(tx, ctx, { revisionId, expectedVersion: job.version, note: rng.pick(RESUBMIT_NOTES) }),
         );
         return;
       }
       case "approve": {
-        rt.act(this.user(plan.reviewerKey), (tx, ctx) => approveJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(this.user(plan.reviewerKey), (tx, ctx) => approveJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "deliver": {
-        rt.act(this.user(plan.photographerKey), (tx, ctx) => deliverJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(this.user(plan.photographerKey), (tx, ctx) => deliverJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "complete": {
-        rt.act(this.user(plan.completerKey), (tx, ctx) => completeJob(tx, ctx, { jobId, expectedVersion: version() }));
+        const v = await version();
+        await rt.act(this.user(plan.completerKey), (tx, ctx) => completeJob(tx, ctx, { jobId, expectedVersion: v }));
         return;
       }
       case "reopen": {
-        rt.act(this.user(plan.photographerKey), (tx, ctx) =>
-          reopenJob(tx, ctx, { jobId, expectedVersion: version(), reason: "Agent spotted a missing room after delivery", toCategory: "in_progress" }),
+        const v = await version();
+        await rt.act(this.user(plan.photographerKey), (tx, ctx) =>
+          reopenJob(tx, ctx, { jobId, expectedVersion: v, reason: "Agent spotted a missing room after delivery", toCategory: "in_progress" }),
         );
         return;
       }
       case "setDue": {
         const value = plan.dueCivil;
         if (!value) return;
-        rt.act(this.user(plan.managerKey), (tx, ctx) => setDueDate(tx, ctx, { jobId, expectedVersion: version(), value }));
+        const v = await version();
+        await rt.act(this.user(plan.managerKey), (tx, ctx) => setDueDate(tx, ctx, { jobId, expectedVersion: v, value }));
         return;
       }
       case "setReviewDue": {
         const value = addCivilDays(this.today, def.days);
-        rt.act(this.user(plan.photographerKey), (tx, ctx) => setReviewDueDate(tx, ctx, { jobId, expectedVersion: version(), value }));
+        const v = await version();
+        await rt.act(this.user(plan.photographerKey), (tx, ctx) => setReviewDueDate(tx, ctx, { jobId, expectedVersion: v, value }));
         return;
       }
       case "priority": {
-        if (this.job(plan).priority === def.priority) return;
-        rt.act(this.user(plan.managerKey), (tx, ctx) => setPriority(tx, ctx, { jobId, expectedVersion: version(), priority: def.priority }));
+        if ((await this.job(plan)).priority === def.priority) return;
+        const v = await version();
+        await rt.act(this.user(plan.managerKey), (tx, ctx) => setPriority(tx, ctx, { jobId, expectedVersion: v, priority: def.priority }));
         return;
       }
       case "comment":
         return this.execComment(plan, def);
       case "commentEdit": {
         const c = plan.comments[def.idx];
-        if (!c || !rt.isActive(c.authorId)) return;
-        const job = this.job(plan);
+        if (!c || !(await rt.isActive(c.authorId))) return;
+        const job = await this.job(plan);
         const author = c.authorId;
         if (job.editorId !== author && author !== this.user(plan.photographerKey) && author !== this.user(plan.managerKey)) return;
-        rt.act(author, (tx, ctx) => editComment(tx, ctx, { commentId: c.id, body: `${rng.pick(PHOTOGRAPHER_COMMENTS)} (edited: typo)` }));
+        await rt.act(author, (tx, ctx) => editComment(tx, ctx, { commentId: c.id, body: `${rng.pick(PHOTOGRAPHER_COMMENTS)} (edited: typo)` }));
         return;
       }
       case "commentDelete": {
         const c = plan.comments[def.idx];
-        if (!c || !rt.isActive(c.authorId)) return;
-        const job = this.job(plan);
+        if (!c || !(await rt.isActive(c.authorId))) return;
+        const job = await this.job(plan);
         if (job.editorId !== c.authorId && c.authorId !== this.user(plan.photographerKey) && c.authorId !== this.user(plan.managerKey)) return;
-        rt.act(c.authorId, (tx, ctx) => deleteComment(tx, ctx, { commentId: c.id }));
+        await rt.act(c.authorId, (tx, ctx) => deleteComment(tx, ctx, { commentId: c.id }));
         plan.comments[def.idx] = null;
         return;
       }
@@ -1280,14 +1305,14 @@ export class NorthlightSeeder {
     }
   }
 
-  private execComment(plan: JobPlan, def: Extract<StepDef, { k: "comment" }>): void {
+  private async execComment(plan: JobPlan, def: Extract<StepDef, { k: "comment" }>): Promise<void> {
     const rt = this.rt;
     const rng = this.rng;
     const jobId = plan.jobId as string;
-    const job = this.job(plan);
+    const job = await this.job(plan);
     const photographer = this.user(plan.photographerKey);
     const manager = this.user(plan.managerKey);
-    const editor = job.editorId && rt.isActive(job.editorId) ? job.editorId : null;
+    const editor = job.editorId && (await rt.isActive(job.editorId)) ? job.editorId : null;
     let author = def.role === "editor" ? editor ?? photographer : def.role === "manager" ? manager : photographer;
     const parentEntry = def.reply ? [...plan.comments].reverse().find((c) => c !== null) ?? null : null;
     if (parentEntry && parentEntry.authorId === author) author = author === photographer ? editor ?? manager : photographer;
@@ -1296,13 +1321,13 @@ export class NorthlightSeeder {
     const mentionUserIds: string[] = [];
     if (def.mention) {
       const target = author === photographer ? editor ?? manager : author === editor ? photographer : editor ?? photographer;
-      if (target && target !== author && rt.isActive(target)) {
-        const name = this.userName(target);
+      if (target && target !== author && (await rt.isActive(target))) {
+        const name = await this.userName(target);
         body = `@${name} ${body}`;
         mentionUserIds.push(target);
       }
     }
-    const result = rt.act(author, (tx, ctx) =>
+    const result = await rt.act(author, (tx, ctx) =>
       addComment(tx, ctx, { jobId, body, kind: def.reply ? "comment" : rng.chance(0.15) ? "question" : "comment", parentCommentId: parentEntry?.id, mentionUserIds }),
     );
     plan.comments[def.idx] = { id: result.comment.id, authorId: author };
@@ -1310,10 +1335,10 @@ export class NorthlightSeeder {
 
   private readonly names = new Map<string, string>();
 
-  private userName(userId: string): string {
+  private async userName(userId: string): Promise<string> {
     let name = this.names.get(userId);
     if (!name) {
-      name = this.rt.db.select({ name: users.name }).from(users).where(eq(users.id, userId)).get()?.name ?? "team";
+      name = (await first(this.rt.db.select({ name: users.name }).from(users).where(eq(users.id, userId))))?.name ?? "team";
       this.names.set(userId, name);
     }
     return name;
