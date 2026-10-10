@@ -1,7 +1,7 @@
 /** `updateLink` (PATCH /api/links/:id { kind?, label? }) — re-file / relabel a current link. */
 import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Tx } from "@/db/index";
+import { first, type Tx } from "@/db/index";
 import { activityEvents, jobLinks } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import type { AuthContext } from "@/lib/types";
@@ -13,21 +13,21 @@ let db: TestDb;
 let ids: SeedIds;
 let jobId: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  db = makeTestDb();
-  ids = seedMinimalOrg(db);
-  jobId = insertJobFixture(db, ids, { statusKey: "in_progress" }).job.id;
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db);
+  jobId = (await insertJobFixture(db, ids, { statusKey: "in_progress" })).job.id;
 });
 afterEach(() => fakeClock.reset());
 
-function run<T>(userId: string, fn: (tx: Tx, ctx: AuthContext) => T): T {
-  const ctx = contextFor(db, userId);
+async function run<T>(userId: string, fn: (tx: Tx, ctx: AuthContext) => Promise<T>): Promise<T> {
+  const ctx = await contextFor(db, userId);
   return withTx((tx) => fn(tx, ctx), { db });
 }
-function status(fn: () => unknown): number {
+async function status(fn: () => Promise<unknown>): Promise<number> {
   try {
-    fn();
+    await fn();
   } catch (err) {
     if (err instanceof AppError) return err.status;
     throw err;
@@ -36,25 +36,38 @@ function status(fn: () => unknown): number {
 }
 
 describe("updateLink", () => {
-  it("raw_files → finished_files moves the link into Finished Work, keeps the URL and the history", () => {
-    const raw = run(ids.users.photographer1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://www.dropbox.com/sh/finals", label: "Finals" }));
-    const ctx = contextFor(db, ids.users.manager);
-    expect(finishedWorkLinks(db, ctx, jobId)).toEqual([]);
+  it("raw_files → finished_files moves the link into Finished Work, keeps the URL and the history", async () => {
+    const raw = await run(ids.users.photographer1, (tx, ctx) =>
+      addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://www.dropbox.com/sh/finals", label: "Finals" }),
+    );
+    const ctx = await contextFor(db, ids.users.manager);
+    expect(await finishedWorkLinks(db, ctx, jobId)).toEqual([]);
 
-    const updated = run(ids.users.manager, (tx, c) => updateLink(tx, c, { linkId: raw.id, kind: "finished_files" }));
+    const updated = await run(ids.users.manager, (tx, c) => updateLink(tx, c, { linkId: raw.id, kind: "finished_files" }));
     expect(updated).toMatchObject({ kind: "finished_files", url: raw.url, label: "Finals", supersedesLinkId: raw.id, provider: "dropbox" });
-    expect(finishedWorkLinks(db, ctx, jobId).map((l) => l.id)).toEqual([updated.id]);
-    const slots = listLinks(db, ctx, jobId, { history: true });
+    expect((await finishedWorkLinks(db, ctx, jobId)).map((l) => l.id)).toEqual([updated.id]);
+    const slots = await listLinks(db, ctx, jobId, { history: true });
     expect(slots).toHaveLength(1);
     expect(slots[0]).toMatchObject({ kind: "finished_files", current: { id: updated.id } });
     expect(slots[0].history.map((h) => h.kind)).toEqual(["raw_files", "finished_files"]);
-    expect(db.select().from(jobLinks).where(eq(jobLinks.id, raw.id)).get()).toMatchObject({ kind: "raw_files", supersededByLinkId: updated.id });
+    expect(await first(db.select().from(jobLinks).where(eq(jobLinks.id, raw.id)))).toMatchObject({
+      kind: "raw_files",
+      supersededByLinkId: updated.id,
+    });
   });
 
-  it("writes link.updated with before/after {kind,label}", () => {
-    const link = run(ids.users.photographer1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "reference", url: "https://example.com/ref", label: "Moodboard" }));
-    const updated = run(ids.users.photographer1, (tx, ctx) => updateLink(tx, ctx, { linkId: link.id, kind: "other", label: "Brief" }));
-    const evt = db.select().from(activityEvents).where(and(eq(activityEvents.jobId, jobId), eq(activityEvents.eventType, "link.updated"))).get();
+  it("writes link.updated with before/after {kind,label}", async () => {
+    const link = await run(ids.users.photographer1, (tx, ctx) =>
+      addLink(tx, ctx, { jobId, kind: "reference", url: "https://example.com/ref", label: "Moodboard" }),
+    );
+    const updated = await run(ids.users.photographer1, (tx, ctx) => updateLink(tx, ctx, { linkId: link.id, kind: "other", label: "Brief" }));
+    const evt = await first(
+      db
+        .select()
+        .from(activityEvents)
+        .where(and(eq(activityEvents.jobId, jobId), eq(activityEvents.eventType, "link.updated")))
+        .limit(1),
+    );
     expect(evt).toMatchObject({
       entityType: "link",
       entityId: updated.id,
@@ -66,19 +79,19 @@ describe("updateLink", () => {
     expect(updated.activityEventId).toBe(evt?.id);
   });
 
-  it("enforces the editor link-kind rules for the new kind; stale links are 409", () => {
-    const own = run(ids.users.editor1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "editing_workspace", url: "https://frame.io/p/1" }));
+  it("enforces the editor link-kind rules for the new kind; stale links are 409", async () => {
+    const own = await run(ids.users.editor1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "editing_workspace", url: "https://frame.io/p/1" }));
     // editors may not file links as raw_files / client_delivery
-    expect(status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, kind: "raw_files" })))).toBe(403);
+    expect(await status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, kind: "raw_files" })))).toBe(403);
     // allowed kind works
-    const moved = run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, kind: "finished_files" }));
+    const moved = await run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, kind: "finished_files" }));
     expect(moved.kind).toBe("finished_files");
     // the superseded row can no longer be edited
-    expect(status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, label: "x" })))).toBe(409);
+    expect(await status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: own.id, label: "x" })))).toBe(409);
     // someone else's link (link.replace: editors only their own)
-    const photogs = run(ids.users.photographer1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "gallery", url: "https://pixieset.com/g" }));
-    expect(status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id, label: "Mine" })))).toBe(403);
+    const photogs = await run(ids.users.photographer1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "gallery", url: "https://pixieset.com/g" }));
+    expect(await status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id, label: "Mine" })))).toBe(403);
     // nothing to change
-    expect(status(() => run(ids.users.manager, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id })))).toBe(400);
+    expect(await status(() => run(ids.users.manager, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id })))).toBe(400);
   });
 });

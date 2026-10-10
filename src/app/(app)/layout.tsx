@@ -33,7 +33,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   const organisationId = ctx.organisationId;
   try {
-    after(() => lazySweep(organisationId));
+    after(async () => {
+      await lazySweep(organisationId);
+    });
   } catch {
     // No request scope (e.g. prerender): skip; the next request sweeps.
   }
@@ -42,7 +44,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <AppShell
       user={{ id: viewer.id, name: viewer.name, email: viewer.email, role: viewer.role, avatarColour: viewer.avatarColour }}
       orgName={viewer.organisationName}
-      unreadCount={unreadCount(ctx)}
+      unreadCount={await unreadCount(ctx)}
       logoutAction="/api/auth/logout"
       navGrants={navGrants}
     >

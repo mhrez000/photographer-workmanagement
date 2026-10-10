@@ -11,41 +11,36 @@ import type { AuthContext, JobTypeView, WorkflowGraph, WorkflowListItem, Workflo
 import { generateCancelEdges, toStatusRef, validateWorkflowDefinition, type EdgeLike, type StatusLike } from "@/lib/workflow";
 import { assertCan, isManagement } from "@/server/auth/permissions";
 import { loadWorkflowInOrg } from "@/server/services/_shared";
+import { binaryAsc } from "./metrics";
 import { categoryIn } from "./scope";
 
-function openJobCountsBy(db: DbLike, ctx: AuthContext, column: typeof jobs.workflowId | typeof jobs.jobTypeId): Map<string, number> {
-  const rows = db
+async function openJobCountsBy(db: DbLike, ctx: AuthContext, column: typeof jobs.workflowId | typeof jobs.jobTypeId): Promise<Map<string, number>> {
+  const rows = await db
     .select({ key: column, n: sql<number>`count(*)`.mapWith(Number) })
     .from(jobs)
     .where(and(eq(jobs.organisationId, ctx.organisationId), categoryIn(CATEGORY_GROUPS.ACTIVE)))
-    .groupBy(column)
-    .all();
+    .groupBy(column);
   return new Map(rows.map((r) => [r.key, r.n]));
 }
 
-function listItems(db: DbLike, ctx: AuthContext, workflowId?: string): WorkflowListItem[] {
-  const rows = db
+async function listItems(db: DbLike, ctx: AuthContext, workflowId?: string): Promise<WorkflowListItem[]> {
+  const rows = await db
     .select()
     .from(workflows)
     .where(and(eq(workflows.organisationId, ctx.organisationId), workflowId ? eq(workflows.id, workflowId) : undefined))
-    .orderBy(sql`${workflows.isDefault} desc`, asc(workflows.name))
-    .all();
-  const statusCounts = new Map(
-    db
-      .select({ key: workflowStatuses.workflowId, n: sql<number>`count(*)`.mapWith(Number) })
-      .from(workflowStatuses)
-      .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), sql`${workflowStatuses.archivedAt} is null`))
-      .groupBy(workflowStatuses.workflowId)
-      .all()
-      .map((r) => [r.key, r.n]),
-  );
-  const openJobs = openJobCountsBy(db, ctx, jobs.workflowId);
-  const types = db
+    .orderBy(sql`${workflows.isDefault} desc`, binaryAsc(workflows.name), asc(workflows.id));
+  const statusCountRows = await db
+    .select({ key: workflowStatuses.workflowId, n: sql<number>`count(*)`.mapWith(Number) })
+    .from(workflowStatuses)
+    .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), sql`${workflowStatuses.archivedAt} is null`))
+    .groupBy(workflowStatuses.workflowId);
+  const statusCounts = new Map(statusCountRows.map((r) => [r.key, r.n]));
+  const openJobs = await openJobCountsBy(db, ctx, jobs.workflowId);
+  const types = await db
     .select({ id: jobTypes.id, name: jobTypes.name, colour: jobTypes.colour, workflowId: jobTypes.workflowId })
     .from(jobTypes)
     .where(and(eq(jobTypes.organisationId, ctx.organisationId), sql`${jobTypes.archivedAt} is null`))
-    .orderBy(asc(jobTypes.sortOrder), asc(jobTypes.name))
-    .all();
+    .orderBy(asc(jobTypes.sortOrder), binaryAsc(jobTypes.name), asc(jobTypes.id));
   return rows.map((w) => ({
     id: w.id,
     name: w.name,
@@ -60,7 +55,7 @@ function listItems(db: DbLike, ctx: AuthContext, workflowId?: string): WorkflowL
 }
 
 /** `GET /api/workflows` (workflow.view). */
-export function listWorkflows(db: DbLike, ctx: AuthContext): WorkflowListItem[] {
+export async function listWorkflows(db: DbLike, ctx: AuthContext): Promise<WorkflowListItem[]> {
   assertCan(ctx, "workflow.view");
   return listItems(db, ctx);
 }
@@ -70,29 +65,26 @@ export function listWorkflows(db: DbLike, ctx: AuthContext): WorkflowListItem[] 
  * the engine-generated cancel edges the workflow lacks, and validation
  * messages. Foreign ids → 404.
  */
-export function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: string): WorkflowGraph {
+export async function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: string): Promise<WorkflowGraph> {
   assertCan(ctx, "workflow.view");
-  const workflow = loadWorkflowInOrg(db, ctx, workflowId);
-  const statusRows = db
+  const workflow = await loadWorkflowInOrg(db, ctx, workflowId);
+  const statusRows = await db
     .select()
     .from(workflowStatuses)
     .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), eq(workflowStatuses.workflowId, workflow.id)))
-    .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.name))
-    .all();
-  const edgeRows = db
+    .orderBy(asc(workflowStatuses.sortOrder), binaryAsc(workflowStatuses.name), asc(workflowStatuses.id));
+  // SQLite returned these in insertion (rowid) order; Postgres needs an explicit ORDER BY.
+  const edgeRows = await db
     .select()
     .from(workflowTransitions)
     .where(and(eq(workflowTransitions.organisationId, ctx.organisationId), eq(workflowTransitions.workflowId, workflow.id)))
-    .all();
-  const jobCounts = new Map(
-    db
-      .select({ key: jobs.statusId, n: sql<number>`count(*)`.mapWith(Number) })
-      .from(jobs)
-      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.workflowId, workflow.id)))
-      .groupBy(jobs.statusId)
-      .all()
-      .map((r) => [r.key, r.n]),
-  );
+    .orderBy(asc(workflowTransitions.createdAt), asc(workflowTransitions.id));
+  const jobCountRows = await db
+    .select({ key: jobs.statusId, n: sql<number>`count(*)`.mapWith(Number) })
+    .from(jobs)
+    .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.workflowId, workflow.id)))
+    .groupBy(jobs.statusId);
+  const jobCounts = new Map(jobCountRows.map((r) => [r.key, r.n]));
 
   const statuses: StatusLike[] = statusRows.map((s) => ({
     id: s.id,
@@ -132,7 +124,7 @@ export function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: strin
   });
 
   return {
-    workflow: listItems(db, ctx, workflow.id)[0],
+    workflow: (await listItems(db, ctx, workflow.id))[0],
     statuses: statusRows.map((s, i) => ({
       ...toStatusRef(statuses[i]),
       isInitial: s.isInitial,
@@ -150,16 +142,15 @@ export function getWorkflowGraph(db: DbLike, ctx: AuthContext, workflowId: strin
  * `GET /api/job-types` — every authenticated user (the job form needs them);
  * archived types only for management.
  */
-export function listJobTypes(db: DbLike, ctx: AuthContext, opts: { includeArchived?: boolean } = {}): JobTypeView[] {
+export async function listJobTypes(db: DbLike, ctx: AuthContext, opts: { includeArchived?: boolean } = {}): Promise<JobTypeView[]> {
   const withArchived = opts.includeArchived === true && isManagement(ctx);
-  const rows = db
+  const rows = await db
     .select({ type: jobTypes, workflow: { id: workflows.id, name: workflows.name } })
     .from(jobTypes)
     .innerJoin(workflows, eq(workflows.id, jobTypes.workflowId))
     .where(and(eq(jobTypes.organisationId, ctx.organisationId), withArchived ? undefined : sql`${jobTypes.archivedAt} is null`))
-    .orderBy(asc(jobTypes.sortOrder), asc(jobTypes.name))
-    .all();
-  const open = openJobCountsBy(db, ctx, jobs.jobTypeId);
+    .orderBy(asc(jobTypes.sortOrder), binaryAsc(jobTypes.name), asc(jobTypes.id));
+  const open = await openJobCountsBy(db, ctx, jobs.jobTypeId);
   return rows.map(({ type, workflow }) => ({
     id: type.id,
     name: type.name,

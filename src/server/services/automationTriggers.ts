@@ -138,17 +138,16 @@ export function triggerMatches(trigger: AutomationTrigger, event: TriggerEventPa
  * event (inside the caller's transaction). Returns the new run ids (empty
  * when nothing matched or the runs already existed).
  */
-export function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEventInput): string[] {
+export async function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEventInput): Promise<string[]> {
   if (!TRIGGER_EVENT_TYPES.has(event.eventType)) return [];
 
   let previousValue = event.previousValue;
   let newValue = event.newValue;
   if (previousValue === undefined || newValue === undefined) {
-    const row = tx
+    const [row] = await tx
       .select({ previousValue: activityEvents.previousValue, newValue: activityEvents.newValue })
       .from(activityEvents)
-      .where(and(eq(activityEvents.id, event.eventId), eq(activityEvents.organisationId, ctx.organisationId)))
-      .get();
+      .where(and(eq(activityEvents.id, event.eventId), eq(activityEvents.organisationId, ctx.organisationId)));
     if (!row) return [];
     previousValue = row.previousValue;
     newValue = row.newValue;
@@ -157,7 +156,7 @@ export function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEv
   const types = triggerTypesForEvent(event.eventType, previousValue);
   if (types.length === 0) return [];
 
-  const rules = tx
+  const rules = await tx
     .select()
     .from(automations)
     .where(
@@ -168,22 +167,21 @@ export function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEv
         isNull(automations.archivedAt),
       ),
     )
-    .orderBy(asc(automations.sortOrder), asc(automations.createdAt), asc(automations.id))
-    .all();
+    .orderBy(asc(automations.sortOrder), asc(automations.createdAt), asc(automations.id));
   if (rules.length === 0) return [];
 
+  // triggerMatches() is synchronous: prefetch the only status key it can ask for
+  // (newValue.statusId, for status_changed.toStatusKey filters).
   const statusKeys = new Map<string, string | null>();
-  const statusKeyOf = (statusId: string): string | null => {
-    if (!statusKeys.has(statusId)) {
-      const row = tx
-        .select({ key: workflowStatuses.key })
-        .from(workflowStatuses)
-        .where(and(eq(workflowStatuses.id, statusId), eq(workflowStatuses.organisationId, ctx.organisationId)))
-        .get();
-      statusKeys.set(statusId, row?.key ?? null);
-    }
-    return statusKeys.get(statusId) ?? null;
-  };
+  const candidateStatusId = str(bag(newValue).statusId);
+  if (candidateStatusId) {
+    const [row] = await tx
+      .select({ key: workflowStatuses.key })
+      .from(workflowStatuses)
+      .where(and(eq(workflowStatuses.id, candidateStatusId), eq(workflowStatuses.organisationId, ctx.organisationId)));
+    statusKeys.set(candidateStatusId, row?.key ?? null);
+  }
+  const statusKeyOf = (statusId: string): string | null => statusKeys.get(statusId) ?? null;
 
   const payload: TriggerEventPayload = { eventType: event.eventType, previousValue, newValue };
   const matching = rules.filter((rule) => {
@@ -195,12 +193,12 @@ export function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEv
   const parentRunId = event.automationRunId ?? ctx.automationRunId ?? null;
   let depth = 0;
   if (parentRunId) {
-    const parent = tx.select({ depth: automationRuns.depth }).from(automationRuns).where(eq(automationRuns.id, parentRunId)).get();
+    const [parent] = await tx.select({ depth: automationRuns.depth }).from(automationRuns).where(eq(automationRuns.id, parentRunId));
     depth = (parent?.depth ?? 0) + 1;
   }
 
   const createdAt = ctx.now();
-  const inserted = tx
+  const inserted = await tx
     .insert(automationRuns)
     .values(
       matching.map((rule) => ({
@@ -215,7 +213,6 @@ export function enqueueAutomations(tx: Tx, ctx: AuthContext, event: AutomationEv
       })),
     )
     .onConflictDoNothing()
-    .returning({ id: automationRuns.id })
-    .all();
+    .returning({ id: automationRuns.id });
   return inserted.map((r) => r.id);
 }

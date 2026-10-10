@@ -22,11 +22,16 @@ export default async function AutomationsSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "automation.manage");
   const tz = ctx.settings.timezone;
-  const rules = load(() => listAutomations(db, ctx));
-  const { lookup } = loadAutomationLookups(db, ctx);
+  const rules = await load(() => listAutomations(db, ctx));
+  const { lookup } = await loadAutomationLookups(db, ctx);
   const canSeeRuns = allowed(ctx, "automation.view_runs");
   const lastRun = new Map(
-    rules.map((r) => [r.id, canSeeRuns && r.runCounts.total > 0 ? (listAutomationRuns(db, ctx, { automationId: r.id, limit: 1 }).items[0] ?? null) : null]),
+    await Promise.all(
+      rules.map(
+        async (r) =>
+          [r.id, canSeeRuns && r.runCounts.total > 0 ? ((await listAutomationRuns(db, ctx, { automationId: r.id, limit: 1 })).items[0] ?? null) : null] as const,
+      ),
+    ),
   );
   const killSwitchOff = !ctx.settings.automationsEnabled;
   const enabledCount = rules.filter((r) => r.isEnabled).length;

@@ -12,12 +12,13 @@ const nextConfig: NextConfig = {
       },
     },
   },
-  serverExternalPackages: ["better-sqlite3"],
-  // Hosted demo (Vercel): ship the seeded template DB and the build-time
-  // session secret with every server function (see src/db/index.ts).
+  // PGlite (local dev / e2e) loads its WASM + data bundle from its package
+  // directory at runtime, so it must not be bundled; same for the postgres driver.
+  serverExternalPackages: ["@electric-sql/pglite", "postgres"],
+  // Optional build-time session secret (src/server/auth/session.ts fallback).
   outputFileTracingIncludes: {
-    "/*": ["./data/demo.db", "./data/.session-secret"],
-    "/**": ["./data/demo.db", "./data/.session-secret"],
+    "/*": ["./data/.session-secret"],
+    "/**": ["./data/.session-secret"],
   },
   // forbidden() + src/app/forbidden.tsx for permission-denied pages.
   experimental: { authInterrupts: true },

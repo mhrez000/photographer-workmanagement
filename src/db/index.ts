@@ -1,131 +1,297 @@
 /**
- * Database client (better-sqlite3 + Drizzle).
+ * Database client — Postgres through Drizzle, two drivers, opened LAZILY.
  *
- * - DATABASE_PATH env (default ./data/app.db; ":memory:" for tests)
- * - PRAGMA journal_mode = WAL, foreign_keys = ON, busy_timeout = 5000
- * - append-only / consistency triggers are (re)installed on open whenever
- *   the tables already exist (src/db/guard.ts), so a database created by
- *   `drizzle-kit push` is protected the moment the app opens it.
+ *   DATABASE_URL set   → postgres-js (production: Supabase transaction pooler,
+ *                         port 6543 → prepare:false). int8/numeric parse to number.
+ *   DATABASE_URL unset → PGlite (in-process Postgres 17, WASM) for local dev,
+ *                         unit tests and local e2e. Data dir: PGLITE_DATA_DIR
+ *                         (default ./data/pglite; ":memory:" → in-memory). The
+ *                         committed ./drizzle migrations (schema + the integrity
+ *                         triggers in 0001_guards.sql) are applied automatically
+ *                         on first open, so a fresh checkout's `npm run dev` works.
+ *
+ * Nothing connects at import time (`next build` never opens a database):
+ * the first `getDb()` call creates the singleton (cached on globalThis so
+ * Next.js dev HMR reuses it).
+ *
+ * EVERYTHING IS ASYNC: `await db.select()…`, `await db.transaction(async (tx) => …)`.
+ * See docs/POSTGRES-MIGRATION.md for the conversion rules.
+ *
+ * PGlite is ONE connection: a query on the root `db` issued while a
+ * transaction callback is running would wait for that transaction forever.
+ * On PGlite the root handle therefore throws `RootDbInTransactionError`
+ * instead of deadlocking (detected with AsyncLocalStorage) — inside a
+ * transaction always use the `tx` you were given.
  *
  * Components never import this module (CLAUDE.md rule 6); services and
- * queries do. Tests call `createDatabase(":memory:")` for an isolated DB.
+ * queries do. Tests use `makeTestDb()` (src/db/test-db.ts) + `setDbOverride`.
  */
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import fs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
+import { PGlite, types as pgliteTypes } from "@electric-sql/pglite";
+import type { ExtractTablesWithRelations, SQL } from "drizzle-orm";
+import type { PgDatabase, PgQueryResultHKT, PgTransaction } from "drizzle-orm/pg-core";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
+import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import * as schema from "./schema";
-import { installGuards, tablesExist } from "./guard";
 
-export type Db = BetterSQLite3Database<typeof schema>;
-/** The transaction handle services receive. */
-export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/* ------------------------------------------------------------------ */
+/*  Shared types (both drivers satisfy them)                           */
+/* ------------------------------------------------------------------ */
+
+export type Schema = typeof schema;
+/** The root database handle (PGlite or postgres-js). */
+export type Db = PgDatabase<PgQueryResultHKT, Schema>;
+/** The transaction handle services receive (`db.transaction(async (tx) => …)`). */
+export type Tx = PgTransaction<PgQueryResultHKT, Schema, ExtractTablesWithRelations<Schema>>;
 /**
  * Anything you can run Drizzle queries on: the root `Db` or a `Tx`.
  * Read helpers (loaders, queries) accept this; writes take a `Tx`.
  */
-export type DbLike = BaseSQLiteDatabase<"sync", Database.RunResult, typeof schema>;
+export type DbLike = Db | Tx;
 
-export const DEFAULT_DATABASE_PATH = "./data/app.db";
+/* ------------------------------------------------------------------ */
+/*  Row helpers (replace SQLite `.get()`)                              */
+/* ------------------------------------------------------------------ */
 
 /**
- * Hosted demo mode (Vercel): the deployment filesystem is read-only, so the app
- * runs on a copy of the seeded demo database in /tmp. Each new server instance
- * starts from the bundled template (data/demo.db, built by scripts/build-demo-db.mjs);
- * changes last only as long as that instance. See README "Deploying to Vercel".
+ * First row of a query, or undefined — the replacement for `.get()`.
+ * `first(q)` does not add a LIMIT: add `.limit(1)` yourself when the WHERE
+ * is not on a primary key / unique column.
+ *
+ *   const job = await first(tx.select().from(jobs).where(eq(jobs.id, id)));
  */
-export const HOSTED_DEMO_DATABASE_PATH = "/tmp/proofline.db";
-export const DEMO_TEMPLATE_PATH = "./data/demo.db";
-
-function isHostedDemo(): boolean {
-  return Boolean(process.env.VERCEL) && !process.env.DATABASE_PATH?.trim();
+export async function first<T>(query: PromiseLike<readonly T[]>): Promise<T | undefined> {
+  const rows = await query;
+  return rows[0];
 }
 
-/** Template copied into an empty database path: DEMO_DB_TEMPLATE, or data/demo.db in hosted demo mode. */
-export function resolveTemplatePath(): string | null {
-  const raw = process.env.DEMO_DB_TEMPLATE?.trim();
-  if (raw) return path.isAbsolute(raw) ? raw : path.resolve(/*turbopackIgnore: true*/ process.cwd(), raw);
-  return isHostedDemo() ? path.resolve(/*turbopackIgnore: true*/ process.cwd(), DEMO_TEMPLATE_PATH) : null;
+/**
+ * Exactly the first row; throws a plain Error when the query returned none
+ * (a programming error — use loaders / NotFoundError for user-supplied ids).
+ *
+ *   const { n } = await one(tx.update(organisations).set(…).returning({ n: … }));
+ */
+export async function one<T>(query: PromiseLike<readonly T[]>, what = "row"): Promise<T> {
+  const rows = await query;
+  if (rows.length === 0) throw new Error(`one(): expected a ${what}, the query returned none`);
+  return rows[0];
 }
 
-export function resolveDatabasePath(): string {
-  const raw = process.env.DATABASE_PATH?.trim();
-  if (isHostedDemo()) return HOSTED_DEMO_DATABASE_PATH;
-  if (!raw) return path.resolve(/*turbopackIgnore: true*/ process.cwd(), DEFAULT_DATABASE_PATH);
-  if (raw === ":memory:") return raw;
-  // DATABASE_PATH is runtime config, not a bundled asset: keep Turbopack from
-  // tracing the whole project into the server output.
+/**
+ * Runs raw SQL and returns its rows on BOTH drivers (`db.execute()` returns an
+ * array on postgres-js but `{ rows }` on PGlite — never touch it directly).
+ * Raw SQL bypasses Drizzle's column mapping: you get snake_case keys and raw
+ * driver values (jsonb parsed, int8/numeric as number, booleans as booleans).
+ *
+ *   const rows = await execRows<{ n: number }>(tx, sql`select count(*)::int as n from jobs`);
+ */
+export async function execRows<T extends Record<string, unknown>>(db: DbLike, query: SQL): Promise<T[]> {
+  const result: unknown = await db.execute(query);
+  if (Array.isArray(result)) return result as T[];
+  const rows = (result as { rows?: unknown } | null)?.rows;
+  return Array.isArray(rows) ? (rows as T[]) : [];
+}
+
+export const DEFAULT_PGLITE_DATA_DIR = "./data/pglite";
+export const MIGRATIONS_FOLDER = "./drizzle";
+
+/** Absolute path of the committed drizzle migrations folder. */
+export function migrationsFolder(): string {
+  const raw = process.env.DRIZZLE_MIGRATIONS_DIR?.trim() || MIGRATIONS_FOLDER;
   return path.isAbsolute(raw) ? raw : path.resolve(/*turbopackIgnore: true*/ process.cwd(), raw);
 }
 
-export interface DatabaseHandle {
-  sqlite: Database.Database;
-  db: Db;
-  filePath: string;
+/** PGlite data dir: "memory://" for PGLITE_DATA_DIR=":memory:", else an absolute path. */
+export function resolvePgliteDataDir(): string {
+  const raw = process.env.PGLITE_DATA_DIR?.trim() || DEFAULT_PGLITE_DATA_DIR;
+  if (raw === ":memory:" || raw.startsWith("memory://")) return "memory://";
+  // Runtime config, not a bundled asset: keep Turbopack from tracing the project.
+  return path.isAbsolute(raw) ? raw : path.resolve(/*turbopackIgnore: true*/ process.cwd(), raw);
+}
+
+/** Which driver `getDb()` uses for the current environment. */
+export function activeDriver(): "postgres" | "pglite" {
+  return process.env.DATABASE_URL?.trim() ? "postgres" : "pglite";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Root-db-inside-a-transaction guard (PGlite deadlock → error)       */
+/* ------------------------------------------------------------------ */
+
+export class RootDbInTransactionError extends Error {
+  constructor(entry: string) {
+    super(
+      `db.${entry}() was called on the ROOT database while a transaction callback is running. ` +
+        "Use the `tx` handle you were given (on PGlite this would deadlock; on Postgres it reads outside the transaction).",
+    );
+    this.name = "RootDbInTransactionError";
+  }
+}
+
+const txScope = new AsyncLocalStorage<boolean>();
+
+/** True while the current async context is inside a guarded `db.transaction` callback. */
+export function insideTransaction(): boolean {
+  return txScope.getStore() === true;
+}
+
+const GUARDED_ENTRIES: ReadonlySet<PropertyKey> = new Set([
+  "select",
+  "selectDistinct",
+  "selectDistinctOn",
+  "insert",
+  "update",
+  "delete",
+  "execute",
+  "with",
+  "$with",
+  "$count",
+  "refreshMaterializedView",
+]);
+
+/**
+ * Wraps a root Drizzle handle so that (a) `transaction()` marks its callback's
+ * async context and (b) every query entry point on the ROOT handle throws
+ * `RootDbInTransactionError` from inside such a callback. The `tx` handle
+ * itself is never wrapped. Used for PGlite (app + tests).
+ */
+export function guardRootDb<T extends Db>(db: T): T {
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === "transaction") {
+        const original = target.transaction.bind(target);
+        const wrapped: Db["transaction"] = (fn, config) => {
+          if (insideTransaction()) throw new RootDbInTransactionError("transaction");
+          return txScope.run(true, () => original(fn, config));
+        };
+        return wrapped;
+      }
+      if (prop === "query" && insideTransaction()) throw new RootDbInTransactionError("query");
+      const value: unknown = Reflect.get(target, prop, receiver);
+      if (GUARDED_ENTRIES.has(prop) && typeof value === "function") {
+        return (...args: unknown[]) => {
+          if (insideTransaction()) throw new RootDbInTransactionError(String(prop));
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      }
+      return value;
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Drivers                                                            */
+/* ------------------------------------------------------------------ */
+
+/** int8 / numeric come back as JS numbers on BOTH drivers (count(), sum(), bigint ids). */
+const toNumber = (value: string): number => Number(value);
+
+/** PGlite parser overrides shared by the app instance and test clones. */
+export const PGLITE_PARSERS = {
+  [pgliteTypes.INT8]: toNumber,
+  [pgliteTypes.NUMERIC]: toNumber,
+};
+
+/** postgres-js client for DATABASE_URL (Supabase transaction pooler → prepare:false). */
+export function createPostgresClient(url: string, opts: { max?: number } = {}): postgres.Sql {
+  return postgres(url, {
+    prepare: false,
+    max: opts.max ?? 5,
+    idle_timeout: 20,
+    connect_timeout: 15,
+    types: {
+      int8: { to: 20, from: [20], serialize: (v: number) => String(v), parse: toNumber },
+      numeric: { to: 1700, from: [1700], serialize: (v: number) => String(v), parse: toNumber },
+    },
+  });
+}
+
+/** Drizzle over postgres-js. */
+export function createPostgresDb(url: string, opts: { max?: number } = {}): { db: Db; client: postgres.Sql } {
+  const client = createPostgresClient(url, opts);
+  return { db: drizzlePostgres(client, { schema }), client };
+}
+
+/** Applies the committed ./drizzle migrations to a PGlite instance (idempotent). */
+export async function migratePgliteClient(client: PGlite): Promise<void> {
+  await migratePglite(drizzlePglite(client, { schema }), { migrationsFolder: migrationsFolder() });
 }
 
 /**
- * Opens (and creates if needed) a SQLite file and returns both the raw
- * better-sqlite3 handle and the Drizzle instance bound to the schema.
+ * A PGlite client whose query entry points first await `ready` (the auto
+ * migration), so the app can be handed a Drizzle instance synchronously.
  */
-export function createDatabase(filePath: string = resolveDatabasePath(), opts: { installGuards?: boolean } = {}): DatabaseHandle {
-  if (filePath !== ":memory:") {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const template = resolveTemplatePath();
-    if (template && !fs.existsSync(/*turbopackIgnore: true*/ filePath) && fs.existsSync(/*turbopackIgnore: true*/ template)) {
-      // Copy to a temp name and rename, so concurrent cold starts never open a half-copied file.
-      const staging = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-      fs.copyFileSync(/*turbopackIgnore: true*/ template, staging);
-      try {
-        fs.renameSync(staging, filePath);
-      } catch {
-        fs.rmSync(staging, { force: true });
-      }
-    }
-  }
-  const sqlite = new Database(filePath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  sqlite.pragma("busy_timeout = 5000");
-  sqlite.pragma("synchronous = NORMAL");
+function deferUntilReady(client: PGlite, ready: Promise<void>): PGlite {
+  const deferred: ReadonlySet<PropertyKey> = new Set(["query", "exec", "sql", "transaction"]);
+  return new Proxy(client, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      const bound = (value as (...a: unknown[]) => unknown).bind(target);
+      if (!deferred.has(prop)) return bound;
+      return async (...args: unknown[]) => {
+        await ready;
+        return bound(...args);
+      };
+    },
+  });
+}
 
-  if (opts.installGuards !== false && tablesExist(sqlite)) {
-    installGuards(sqlite);
-  }
+export interface PgliteHandle {
+  db: Db;
+  client: PGlite;
+  /** Resolves once migrations are applied. */
+  ready: Promise<void>;
+}
 
-  const db = drizzle(sqlite, { schema });
-  return { sqlite, db, filePath };
+/** Opens PGlite at `dataDir` and starts applying migrations (queries wait for them). */
+export function openPglite(dataDir: string = resolvePgliteDataDir()): PgliteHandle {
+  const client = new PGlite(dataDir, { parsers: PGLITE_PARSERS });
+  const ready = migratePgliteClient(client);
+  // Keep an unhandled rejection from crashing the process; queries rethrow it.
+  ready.catch(() => undefined);
+  const db = guardRootDb(drizzlePglite(deferUntilReady(client, ready), { schema }) as unknown as Db);
+  return { db, client, ready };
 }
 
 /* ------------------------------------------------------------------ */
-/*  Process-wide singleton (survives Next.js dev HMR via globalThis)    */
+/*  Process-wide singleton (lazy; survives Next.js dev HMR)            */
 /* ------------------------------------------------------------------ */
 
-const globalForDb = globalThis as unknown as { __pwmDb?: DatabaseHandle };
+interface DbHandle {
+  driver: "postgres" | "pglite";
+  db: Db;
+  close: () => Promise<void>;
+  ready: Promise<void>;
+}
 
-function getHandle(): DatabaseHandle {
-  if (!globalForDb.__pwmDb) {
-    globalForDb.__pwmDb = createDatabase();
+const globalForDb = globalThis as unknown as { __pwmDb?: DbHandle };
+
+function openDefault(): DbHandle {
+  const url = process.env.DATABASE_URL?.trim();
+  if (url) {
+    const { db, client } = createPostgresDb(url);
+    return { driver: "postgres", db, close: () => client.end({ timeout: 5 }), ready: Promise.resolve() };
   }
+  const handle = openPglite();
+  return { driver: "pglite", db: handle.db, close: () => handle.client.close(), ready: handle.ready };
+}
+
+function handle(): DbHandle {
+  globalForDb.__pwmDb ??= openDefault();
   return globalForDb.__pwmDb;
 }
-
-const handle = getHandle();
-
-/** Shared Drizzle instance for the running app. */
-export const db: Db = handle.db;
-
-/** Raw better-sqlite3 handle (used by guard/verify/tests; never by components). */
-export const sqlite: Database.Database = handle.sqlite;
 
 /* ------------------------------------------------------------------ */
 /*  Injection point                                                    */
 /*                                                                     */
 /*  Convention: every service mutation is                               */
-/*    `fn(tx: Tx, ctx: AuthContext, input: unknown)`                    */
+/*    `async fn(tx: Tx, ctx: AuthContext, input: unknown)`              */
 /*  and route handlers / server actions wrap it with                    */
-/*  `withTx((tx) => fn(tx, ctx, input))` from services/_shared.ts.      */
+/*  `await withTx((tx) => fn(tx, ctx, input))` (services/_shared.ts).   */
 /*  Read helpers take `DbLike` (a Db or a Tx). Code that has no db/tx  */
 /*  parameter (session, layout, route glue) calls `getDb()`, which      */
 /*  tests can redirect with `setDbOverride(testDb)`.                    */
@@ -133,9 +299,23 @@ export const sqlite: Database.Database = handle.sqlite;
 
 let dbOverride: Db | null = null;
 
-/** The Drizzle instance to use when none is passed explicitly. */
+/** The Drizzle instance to use when none is passed explicitly (opens it on first use). */
 export function getDb(): Db {
-  return dbOverride ?? db;
+  return dbOverride ?? handle().db;
+}
+
+/** Resolves when the default database is open and migrated (scripts await it). */
+export async function dbReady(): Promise<void> {
+  if (dbOverride) return;
+  await handle().ready;
+}
+
+/** Closes the default database (scripts call this before exiting). No-op when never opened. */
+export async function closeDb(): Promise<void> {
+  const h = globalForDb.__pwmDb;
+  if (!h) return;
+  globalForDb.__pwmDb = undefined;
+  await h.close();
 }
 
 /** Tests only: route `getDb()` to another database (pass null to restore). */

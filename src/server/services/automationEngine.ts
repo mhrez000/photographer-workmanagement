@@ -8,8 +8,9 @@
  *      trigger event enqueues `pending` runs atomically with its evidence.
  *   2. EXECUTE — `runPendingAutomations(db, organisationId)` runs AFTER the
  *      outer transaction committed (`withTxThenAutomations` in ./_shared,
- *      the bulk runner, the sweep). Each run gets its own IMMEDIATE
- *      transaction and a system context stamped with the run id
+ *      the bulk runner, the sweep). Each run gets its own transaction (the
+ *      run row is claimed with SELECT … FOR UPDATE, so two executors never
+ *      both act on it) and a system context stamped with the run id
  *      (`activity_events.automation_run_id`, `metadata.cause = "automation"`):
  *        pending → skipped                (kill switch, depth cap, rule disabled /
  *                                          archived, conditions not met)
@@ -27,6 +28,7 @@
  *      the dedupe key, so this is safe.
  */
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { rootErrorMessage } from "@/db/errors";
 import type { Db, DbLike, Tx } from "@/db/index";
 import {
   activityEvents,
@@ -59,7 +61,7 @@ import { recordEvent } from "@/server/audit";
 import { systemContext } from "@/server/auth/session";
 import { nowIso } from "@/server/clock";
 import { AppError, NotFoundError, ValidationError } from "@/server/errors";
-import { withTx } from "./_shared";
+import { first, withSavepoint, withTx } from "./_shared";
 import { assignEditor } from "./assignments";
 import { triggerMatches, triggerTypesForEvent } from "./automationTriggers";
 import { applyJobFieldChanges } from "./jobs";
@@ -95,7 +97,8 @@ function str(value: unknown): string | null {
 /** Message for a failed action / run: domain errors verbatim, never a stack. */
 export function errorMessage(err: unknown): string {
   if (err instanceof AppError) return err.message;
-  if (err instanceof Error && err.message) return err.message.slice(0, 500);
+  // DB errors: the Postgres message (a guard trigger's text), not Drizzle's "Failed query: …" wrapper.
+  if (err instanceof Error && err.message) return rootErrorMessage(err).slice(0, 500);
   return "Unexpected error";
 }
 
@@ -115,7 +118,7 @@ export interface ConditionsEvaluation {
 }
 
 /** One condition against the CURRENT job state (null job → never met). */
-export function evaluateCondition(db: DbLike, job: Job | null, condition: AutomationCondition, now: string): ConditionResult {
+export async function evaluateCondition(db: DbLike, job: Job | null, condition: AutomationCondition, now: string): Promise<ConditionResult> {
   if (!job) return { condition, met: false, detail: `${condition.field}: this trigger has no job` };
   const list = (values: readonly string[] | undefined) => (values ?? []).join(", ");
   switch (condition.field) {
@@ -150,7 +153,7 @@ export function evaluateCondition(db: DbLike, job: Job | null, condition: Automa
       return { condition, met: overdue === condition.value, detail: overdue ? "the job is overdue" : "the job is not overdue" };
     }
     case "hasLinkKind": {
-      const exists = hasCurrentLinkOfKind(db, job.id, condition.kind);
+      const exists = await hasCurrentLinkOfKind(db, job.id, condition.kind);
       const met = condition.op === "exists" ? exists : !exists;
       return { condition, met, detail: `${exists ? "has" : "has no"} current ${condition.kind.replace(/_/g, " ")} link` };
     }
@@ -160,8 +163,14 @@ export function evaluateCondition(db: DbLike, job: Job | null, condition: Automa
 }
 
 /** AND of every condition (an empty list is met). */
-export function evaluateConditions(db: DbLike, job: Job | null, conditions: readonly AutomationCondition[], now: string): ConditionsEvaluation {
-  const results = conditions.map((c) => evaluateCondition(db, job, c, now));
+export async function evaluateConditions(
+  db: DbLike,
+  job: Job | null,
+  conditions: readonly AutomationCondition[],
+  now: string,
+): Promise<ConditionsEvaluation> {
+  const results: ConditionResult[] = [];
+  for (const c of conditions) results.push(await evaluateCondition(db, job, c, now));
   return { met: results.every((r) => r.met), results };
 }
 
@@ -193,9 +202,9 @@ interface ActionOutcome {
   activityEventId?: string;
 }
 
-function loadJobForRun(db: DbLike, ctx: AuthContext, jobId: string | null): Job | null {
+async function loadJobForRun(db: DbLike, ctx: AuthContext, jobId: string | null): Promise<Job | null> {
   if (!jobId) return null;
-  return db.select().from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.organisationId, ctx.organisationId))).get() ?? null;
+  return (await first(db.select().from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.organisationId, ctx.organisationId))))) ?? null;
 }
 
 function requireJob(job: Job | null): Job {
@@ -209,25 +218,26 @@ function workloadSubject(event: TriggerEventInfo | null): string | null {
 }
 
 /** Earliest editor ever assigned to the job. */
-export function originalEditorOf(db: DbLike, jobId: string): string | null {
-  const row = db
-    .select({ userId: jobAssignments.userId })
-    .from(jobAssignments)
-    .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.role, "editor")))
-    .orderBy(asc(jobAssignments.assignedAt), asc(sql`rowid`))
-    .limit(1)
-    .get();
+export async function originalEditorOf(db: DbLike, jobId: string): Promise<string | null> {
+  const row = await first(
+    db
+      .select({ userId: jobAssignments.userId })
+      .from(jobAssignments)
+      .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.role, "editor")))
+      .orderBy(asc(jobAssignments.assignedAt), asc(jobAssignments.rowid))
+      .limit(1),
+  );
   return row?.userId ?? null;
 }
 
 /** Recipients of a `notify` action (before notify()'s own active/prefs filtering). */
-export function notifyRecipients(
+export async function notifyRecipients(
   db: DbLike,
   organisationId: string,
   action: Extract<AutomationAction, { type: "notify" }>,
   job: Job | null,
   event: TriggerEventInfo | null,
-): string[] {
+): Promise<string[]> {
   switch (action.target) {
     case "photographer":
       return job?.photographerId ? [job.photographerId] : [];
@@ -241,9 +251,9 @@ export function notifyRecipients(
     case "creator":
       return job ? [job.createdByUserId] : [];
     case "managers":
-      return managersOf(db, organisationId);
+      return await managersOf(db, organisationId);
     case "owner":
-      return ownersOf(db, organisationId);
+      return await ownersOf(db, organisationId);
     case "user":
       return action.userId ? [action.userId] : [];
     default:
@@ -252,30 +262,33 @@ export function notifyRecipients(
 }
 
 /** Candidate editor of an `assign_editor` action (null = none on record). */
-export function assignCandidate(db: DbLike, action: Extract<AutomationAction, { type: "assign_editor" }>, job: Job): string | null {
+export async function assignCandidate(db: DbLike, action: Extract<AutomationAction, { type: "assign_editor" }>, job: Job): Promise<string | null> {
   if (action.target === "user") return action.userId ?? null;
   if (action.target === "previous_editor") return job.previousEditorId;
   return originalEditorOf(db, job.id);
 }
 
-function userName(db: DbLike, userId: string | null): string | null {
+async function userName(db: DbLike, userId: string | null): Promise<string | null> {
   if (!userId) return null;
-  return db.select({ name: users.name }).from(users).where(eq(users.id, userId)).get()?.name ?? null;
+  return (await first(db.select({ name: users.name }).from(users).where(eq(users.id, userId))))?.name ?? null;
 }
 
-function maxEventRowid(tx: Tx): number {
-  return tx.select({ m: sql<number>`coalesce(max(rowid), 0)` }).from(activityEvents).get()?.m ?? 0;
+async function maxEventRowid(tx: Tx): Promise<number> {
+  const row = await first(tx.select({ m: sql<number>`coalesce(max(${activityEvents.rowid}), 0)`.mapWith(Number) }).from(activityEvents));
+  return row?.m ?? 0;
 }
 
 /** First event this run wrote after `afterRowid` (the action's primary event). */
-function firstRunEventSince(tx: Tx, runId: string, afterRowid: number): string | undefined {
-  return tx
-    .select({ id: activityEvents.id })
-    .from(activityEvents)
-    .where(and(eq(activityEvents.automationRunId, runId), sql`rowid > ${afterRowid}`))
-    .orderBy(asc(sql`rowid`))
-    .limit(1)
-    .get()?.id;
+async function firstRunEventSince(tx: Tx, runId: string, afterRowid: number): Promise<string | undefined> {
+  const row = await first(
+    tx
+      .select({ id: activityEvents.id })
+      .from(activityEvents)
+      .where(and(eq(activityEvents.automationRunId, runId), sql`${activityEvents.rowid} > ${afterRowid}`))
+      .orderBy(asc(activityEvents.rowid))
+      .limit(1),
+  );
+  return row?.id;
 }
 
 /**
@@ -287,34 +300,42 @@ function firstRunEventSince(tx: Tx, runId: string, afterRowid: number): string |
  * `job.became_overdue` event an overdue rule fires on. A rule never sends
  * them a second notice for the same thing (ARCHITECTURE.md §7).
  */
-export function alreadyNotifiedForTrigger(db: DbLike, organisationId: string, jobId: string | null, event: TriggerEventInfo | null): Set<string> {
+export async function alreadyNotifiedForTrigger(
+  db: DbLike,
+  organisationId: string,
+  jobId: string | null,
+  event: TriggerEventInfo | null,
+): Promise<Set<string>> {
   if (!jobId || !event) return new Set();
   const transitionId = str(bag(event.metadata).transitionId);
   const sameTrigger = transitionId
     ? sql`(${notifications.activityEventId} = ${event.id} OR ${notifications.activityEventId} IN (
         SELECT e.id FROM activity_events e
          WHERE e.organisation_id = ${organisationId} AND e.job_id = ${jobId}
-           AND json_extract(e.metadata, '$.transitionId') = ${transitionId}))`
+           AND e.metadata->>'transitionId' = ${transitionId}::text))`
     : eq(notifications.activityEventId, event.id);
-  return new Set(
-    db
-      .select({ userId: notifications.userId })
-      .from(notifications)
-      .where(and(eq(notifications.organisationId, organisationId), eq(notifications.jobId, jobId), sql`${notifications.type} <> 'automation'`, sameTrigger))
-      .all()
-      .map((r) => r.userId),
-  );
+  const rows = await db
+    .select({ userId: notifications.userId })
+    .from(notifications)
+    .where(and(eq(notifications.organisationId, organisationId), eq(notifications.jobId, jobId), sql`${notifications.type} <> 'automation'`, sameTrigger));
+  return new Set(rows.map((r) => r.userId));
 }
 
-function performNotify(tx: Tx, ctx: AuthContext, action: Extract<AutomationAction, { type: "notify" }>, job: Job | null, env: ActionEnv): ActionOutcome {
+async function performNotify(
+  tx: Tx,
+  ctx: AuthContext,
+  action: Extract<AutomationAction, { type: "notify" }>,
+  job: Job | null,
+  env: ActionEnv,
+): Promise<ActionOutcome> {
   const subject = workloadSubject(env.event);
   if (!job && !subject && !["managers", "owner", "user"].includes(action.target)) {
     throw new ValidationError("This trigger has no job to take recipients from");
   }
   if (action.target === "user" && !action.userId) throw new ValidationError("No user chosen to notify");
-  const candidates = notifyRecipients(tx, ctx.organisationId, action, job, env.event);
+  const candidates = await notifyRecipients(tx, ctx.organisationId, action, job, env.event);
   if (candidates.length === 0) return { detail: `No ${action.target.replace(/_/g, " ")} to notify` };
-  const covered = alreadyNotifiedForTrigger(tx, ctx.organisationId, job?.id ?? null, env.event);
+  const covered = await alreadyNotifiedForTrigger(tx, ctx.organisationId, job?.id ?? null, env.event);
   const recipients = candidates.filter((id) => !covered.has(id));
   if (recipients.length === 0) return { detail: "Already notified about this by the built-in notice" };
 
@@ -328,12 +349,12 @@ function performNotify(tx: Tx, ctx: AuthContext, action: Extract<AutomationActio
   } else {
     const next = bag(env.event?.newValue);
     const band = str(next.band) as WorkloadBand | null;
-    const who = userName(tx, subject) ?? "An editor";
+    const who = (await userName(tx, subject)) ?? "An editor";
     title = env.automation.name;
     body = action.message ?? (band && band in WORKLOAD_BAND_META ? `${who}’s workload is ${WORKLOAD_BAND_META[band].label.toLowerCase()}` : null);
     linkPath = subject ? `/team/users/${subject}` : "/team/workloads";
   }
-  const sent = notify(tx, ctx, {
+  const sent = await notify(tx, ctx, {
     userIds: recipients,
     type: "automation",
     title,
@@ -346,39 +367,39 @@ function performNotify(tx: Tx, ctx: AuthContext, action: Extract<AutomationActio
   return { detail: sent.recipientIds.length === 0 ? "Nobody eligible to notify" : `Notified ${sent.recipientIds.length} user${sent.recipientIds.length === 1 ? "" : "s"}` };
 }
 
-function performAction(tx: Tx, ctx: AuthContext, action: AutomationAction, env: ActionEnv): ActionOutcome {
-  const job = loadJobForRun(tx, ctx, env.run.jobId);
+async function performAction(tx: Tx, ctx: AuthContext, action: AutomationAction, env: ActionEnv): Promise<ActionOutcome> {
+  const job = await loadJobForRun(tx, ctx, env.run.jobId);
   const reason = `Automation: ${env.automation.name}`;
   switch (action.type) {
     case "notify":
       return performNotify(tx, ctx, action, job, env);
     case "assign_editor": {
       const current = requireJob(job);
-      const candidate = assignCandidate(tx, action, current);
+      const candidate = await assignCandidate(tx, action, current);
       if (!candidate) {
         throw new ValidationError(action.target === "previous_editor" ? "The job has no previous editor" : "The job has never had an editor");
       }
-      if (candidate === current.editorId) return { detail: `${userName(tx, candidate) ?? "The editor"} already holds the job` };
-      const result = assignEditor(tx, ctx, { jobId: current.id, userId: candidate, reason });
-      return { detail: `Assigned ${userName(tx, candidate) ?? "editor"}${result.transition ? ` (now ${result.transition.toStatus.name})` : ""}` };
+      if (candidate === current.editorId) return { detail: `${(await userName(tx, candidate)) ?? "The editor"} already holds the job` };
+      const result = await assignEditor(tx, ctx, { jobId: current.id, userId: candidate, reason });
+      return { detail: `Assigned ${(await userName(tx, candidate)) ?? "editor"}${result.transition ? ` (now ${result.transition.toStatus.name})` : ""}` };
     }
     case "transition": {
       const current = requireJob(job);
       const label = STATUS_CATEGORY_META[action.toCategory].label;
       if (current.statusCategory === action.toCategory) return { detail: `Already ${label}` };
-      const result = transitionLoadedJob(tx, ctx, current.id, { toCategory: action.toCategory }, { reason: action.reason ?? reason, cause: "automation" });
+      const result = await transitionLoadedJob(tx, ctx, current.id, { toCategory: action.toCategory }, { reason: action.reason ?? reason, cause: "automation" });
       return { detail: `Moved to ${result.toStatus.name}`, activityEventId: result.eventId };
     }
     case "set_priority": {
       const current = requireJob(job);
       if (current.priority === action.priority) return { detail: `Priority already ${PRIORITY_META[action.priority].label}` };
-      const visible = loadVisibleJob(tx, ctx, current.id);
-      applyJobFieldChanges(tx, ctx, visible.job, visible.ref, { priority: action.priority });
+      const visible = await loadVisibleJob(tx, ctx, current.id);
+      await applyJobFieldChanges(tx, ctx, visible.job, visible.ref, { priority: action.priority });
       return { detail: `Priority set to ${PRIORITY_META[action.priority].label}` };
     }
     case "add_note": {
       const current = requireJob(job);
-      addNote(tx, ctx, { jobId: current.id, kind: action.kind, body: action.body });
+      await addNote(tx, ctx, { jobId: current.id, kind: action.kind, body: action.body });
       return { detail: `Added ${NOTE_KIND_META[action.kind].label.toLowerCase().replace(/s$/, "")}` };
     }
     default:
@@ -390,12 +411,13 @@ function performAction(tx: Tx, ctx: AuthContext, action: AutomationAction, env: 
 /*  Execution                                                          */
 /* ------------------------------------------------------------------ */
 
-function loadTriggerEvent(db: DbLike, organisationId: string, eventId: string): TriggerEventInfo | null {
-  const row = db
-    .select()
-    .from(activityEvents)
-    .where(and(eq(activityEvents.id, eventId), eq(activityEvents.organisationId, organisationId)))
-    .get();
+async function loadTriggerEvent(db: DbLike, organisationId: string, eventId: string): Promise<TriggerEventInfo | null> {
+  const row = await first(
+    db
+      .select()
+      .from(activityEvents)
+      .where(and(eq(activityEvents.id, eventId), eq(activityEvents.organisationId, organisationId))),
+  );
   return row ? toTriggerEventInfo(row) : null;
 }
 
@@ -411,7 +433,7 @@ function toTriggerEventInfo(row: ActivityEvent): TriggerEventInfo {
   };
 }
 
-function runContext(db: DbLike, organisationId: string, runId: string, requestId?: string): AuthContext {
+function runContext(db: DbLike, organisationId: string, runId: string, requestId?: string): Promise<AuthContext> {
   return systemContext(organisationId, { db, automationRunId: runId, cause: "automation", requestId });
 }
 
@@ -424,9 +446,16 @@ interface FinishInput {
   audit: boolean;
 }
 
-function finishRun(tx: Tx, ctx: AuthContext, run: AutomationRun, automation: Automation | undefined, input: FinishInput): AutomationRunStatus {
+async function finishRun(
+  tx: Tx,
+  ctx: AuthContext,
+  run: AutomationRun,
+  automation: Automation | undefined,
+  input: FinishInput,
+): Promise<AutomationRunStatus> {
   const now = ctx.now();
-  tx.update(automationRuns)
+  await tx
+    .update(automationRuns)
     .set({
       status: input.status,
       actionsPerformed: input.results,
@@ -435,10 +464,9 @@ function finishRun(tx: Tx, ctx: AuthContext, run: AutomationRun, automation: Aut
       startedAt: run.startedAt ?? now,
       finishedAt: now,
     })
-    .where(and(eq(automationRuns.id, run.id), isNull(automationRuns.finishedAt)))
-    .run();
+    .where(and(eq(automationRuns.id, run.id), isNull(automationRuns.finishedAt)));
   if (input.audit) {
-    recordEvent(tx, ctx, {
+    await recordEvent(tx, ctx, {
       entityType: "automation_run",
       entityId: run.id,
       jobId: run.jobId,
@@ -459,15 +487,18 @@ function finishRun(tx: Tx, ctx: AuthContext, run: AutomationRun, automation: Aut
   return input.status;
 }
 
-function executeRunInTx(tx: Tx, organisationId: string, runId: string, requestId?: string): AutomationRunStatus | null {
-  const run = tx
-    .select()
-    .from(automationRuns)
-    .where(and(eq(automationRuns.id, runId), eq(automationRuns.organisationId, organisationId)))
-    .get();
+async function executeRunInTx(tx: Tx, organisationId: string, runId: string, requestId?: string): Promise<AutomationRunStatus | null> {
+  // Row lock: a concurrent executor of the same run waits here, then sees it is no longer pending.
+  const run = await first(
+    tx
+      .select()
+      .from(automationRuns)
+      .where(and(eq(automationRuns.id, runId), eq(automationRuns.organisationId, organisationId)))
+      .for("update"),
+  );
   if (!run || run.status !== "pending" || run.finishedAt !== null) return null;
-  const automation = tx.select().from(automations).where(eq(automations.id, run.automationId)).get();
-  const ctx = runContext(tx, organisationId, run.id, requestId);
+  const automation = await first(tx.select().from(automations).where(eq(automations.id, run.automationId)));
+  const ctx = await runContext(tx, organisationId, run.id, requestId);
   const conditions = automation ? parseJsonColumn(AutomationConditionsSchema, automation.conditions, []) : [];
   const skip = (reason: string) => finishRun(tx, ctx, run, automation, { status: "skipped", results: [], error: reason, conditions, audit: false });
 
@@ -479,28 +510,29 @@ function executeRunInTx(tx: Tx, organisationId: string, runId: string, requestId
   if (actions.length === 0) return skip("The rule has no valid actions");
 
   const now = ctx.now();
-  const event = loadTriggerEvent(tx, organisationId, run.triggerEventId);
-  const job = loadJobForRun(tx, ctx, run.jobId);
-  const evaluation = evaluateConditions(tx, job, conditions, now);
+  const event = await loadTriggerEvent(tx, organisationId, run.triggerEventId);
+  const job = await loadJobForRun(tx, ctx, run.jobId);
+  const evaluation = await evaluateConditions(tx, job, conditions, now);
   if (!evaluation.met) {
     const failing = evaluation.results.find((r) => !r.met);
     return skip(`Condition not met: ${failing?.detail ?? "unknown"}`);
   }
 
-  tx.update(automationRuns).set({ status: "matched", startedAt: now, conditionsSnapshot: conditions }).where(eq(automationRuns.id, run.id)).run();
+  await tx.update(automationRuns).set({ status: "matched", startedAt: now, conditionsSnapshot: conditions }).where(eq(automationRuns.id, run.id));
   const matchedRun: AutomationRun = { ...run, status: "matched", startedAt: now };
 
   const results: AutomationActionResult[] = [];
-  actions.forEach((action, index) => {
-    const before = maxEventRowid(tx);
+  for (const [index, action] of actions.entries()) {
+    const before = await maxEventRowid(tx);
     try {
-      const outcome = tx.transaction((sp) => performAction(sp, ctx, action, { run: matchedRun, automation, event, index }));
-      const activityEventId = outcome.activityEventId ?? firstRunEventSince(tx, run.id, before);
+      // SAVEPOINT per action: a failing action rolls back alone and the outer tx stays usable.
+      const outcome = await withSavepoint(tx, (sp) => performAction(sp, ctx, action, { run: matchedRun, automation, event, index }));
+      const activityEventId = outcome.activityEventId ?? (await firstRunEventSince(tx, run.id, before));
       results.push({ action, ok: true, detail: outcome.detail, ...(activityEventId ? { activityEventId } : {}) });
     } catch (err) {
       results.push({ action, ok: false, detail: errorMessage(err) });
     }
-  });
+  }
 
   const failures = results.filter((r) => !r.ok);
   return finishRun(tx, ctx, matchedRun, automation, {
@@ -513,15 +545,17 @@ function executeRunInTx(tx: Tx, organisationId: string, runId: string, requestId
 }
 
 /** Marks a run whose transaction died as failed (fresh transaction). */
-function failRunInTx(tx: Tx, organisationId: string, runId: string, message: string, requestId?: string): AutomationRunStatus | null {
-  const run = tx
-    .select()
-    .from(automationRuns)
-    .where(and(eq(automationRuns.id, runId), eq(automationRuns.organisationId, organisationId)))
-    .get();
+async function failRunInTx(tx: Tx, organisationId: string, runId: string, message: string, requestId?: string): Promise<AutomationRunStatus | null> {
+  const run = await first(
+    tx
+      .select()
+      .from(automationRuns)
+      .where(and(eq(automationRuns.id, runId), eq(automationRuns.organisationId, organisationId)))
+      .for("update"),
+  );
   if (!run || run.finishedAt !== null) return null;
-  const automation = tx.select().from(automations).where(eq(automations.id, run.automationId)).get();
-  const ctx = runContext(tx, organisationId, run.id, requestId);
+  const automation = await first(tx.select().from(automations).where(eq(automations.id, run.automationId)));
+  const ctx = await runContext(tx, organisationId, run.id, requestId);
   const conditions = automation ? parseJsonColumn(AutomationConditionsSchema, automation.conditions, []) : [];
   return finishRun(tx, ctx, run, automation, { status: "failed", results: [], error: message, conditions, audit: true });
 }
@@ -530,12 +564,17 @@ function failRunInTx(tx: Tx, organisationId: string, runId: string, message: str
  * Executes one pending run in its own transaction. Never throws: returns the
  * final status, or null when the run was not pending (already handled).
  */
-export function executeAutomationRun(db: Db, organisationId: string, runId: string, opts: { requestId?: string } = {}): AutomationRunStatus | null {
+export async function executeAutomationRun(
+  db: Db,
+  organisationId: string,
+  runId: string,
+  opts: { requestId?: string } = {},
+): Promise<AutomationRunStatus | null> {
   try {
-    return withTx((tx) => executeRunInTx(tx, organisationId, runId, opts.requestId), { db });
+    return await withTx((tx) => executeRunInTx(tx, organisationId, runId, opts.requestId), { db });
   } catch (err) {
     try {
-      return withTx((tx) => failRunInTx(tx, organisationId, runId, errorMessage(err), opts.requestId), { db });
+      return await withTx((tx) => failRunInTx(tx, organisationId, runId, errorMessage(err), opts.requestId), { db });
     } catch {
       return null;
     }
@@ -572,7 +611,7 @@ const draining = new Set<string>();
  * nested call for an org already draining returns immediately (the outer
  * loop picks the new runs up).
  */
-export function runPendingAutomations(db: Db, organisationId: string, opts: RunPendingOptions = {}): RunPendingResult {
+export async function runPendingAutomations(db: Db, organisationId: string, opts: RunPendingOptions = {}): Promise<RunPendingResult> {
   const result = emptyRunPendingResult();
   if (draining.has(organisationId)) return result;
   draining.add(organisationId);
@@ -583,7 +622,7 @@ export function runPendingAutomations(db: Db, organisationId: string, opts: RunP
     for (let pass = 0; pass < passes; pass++) {
       let pending: { id: string }[];
       try {
-        pending = db
+        const rows = await db
           .select({ id: automationRuns.id })
           .from(automationRuns)
           .where(
@@ -593,17 +632,16 @@ export function runPendingAutomations(db: Db, organisationId: string, opts: RunP
               cutoff ? lte(automationRuns.createdAt, cutoff) : undefined,
             ),
           )
-          .orderBy(asc(automationRuns.createdAt), asc(sql`rowid`))
-          .limit(opts.limit ?? 500)
-          .all()
-          .filter((r) => !attempted.has(r.id));
+          .orderBy(asc(automationRuns.createdAt), asc(automationRuns.rowid))
+          .limit(opts.limit ?? 500);
+        pending = rows.filter((r) => !attempted.has(r.id));
       } catch {
         break;
       }
       if (pending.length === 0) break;
       for (const { id } of pending) {
         attempted.add(id);
-        const status = executeAutomationRun(db, organisationId, id, { requestId: opts.requestId });
+        const status = await executeAutomationRun(db, organisationId, id, { requestId: opts.requestId });
         if (status === null) continue;
         result.processed += 1;
         result.runIds.push(id);
@@ -619,7 +657,7 @@ export function runPendingAutomations(db: Db, organisationId: string, opts: RunP
 }
 
 /** Sweep hook: re-runs pending runs older than PENDING_REPLAY_AGE_SECONDS (§7 replay). */
-export function replayStalePendingRuns(db: Db, organisationId: string, olderThanSeconds = PENDING_REPLAY_AGE_SECONDS): RunPendingResult {
+export function replayStalePendingRuns(db: Db, organisationId: string, olderThanSeconds = PENDING_REPLAY_AGE_SECONDS): Promise<RunPendingResult> {
   return runPendingAutomations(db, organisationId, { olderThanSeconds });
 }
 
@@ -640,36 +678,42 @@ const TRIGGER_SOURCE_EVENTS: Record<AutomationTrigger["type"], readonly string[]
   workload_threshold: ["user.workload_band_changed"],
 };
 
-function statusKeyLookup(db: DbLike, organisationId: string): (statusId: string) => string | null {
-  return (statusId) =>
-    db
-      .select({ key: workflowStatuses.key })
-      .from(workflowStatuses)
-      .where(and(eq(workflowStatuses.id, statusId), eq(workflowStatuses.organisationId, organisationId)))
-      .get()?.key ?? null;
+/** `triggerMatches()` takes a synchronous status-key lookup: prefetch the organisation's statuses once. */
+async function statusKeyLookup(db: DbLike, organisationId: string): Promise<(statusId: string) => string | null> {
+  const rows = await db
+    .select({ id: workflowStatuses.id, key: workflowStatuses.key })
+    .from(workflowStatuses)
+    .where(eq(workflowStatuses.organisationId, organisationId));
+  const keys = new Map(rows.map((r) => [r.id, r.key]));
+  return (statusId) => keys.get(statusId) ?? null;
 }
 
-function previewAction(db: DbLike, sys: AuthContext, action: AutomationAction, job: Job, automation: Automation): { description: string; problem: string | null } {
+async function previewAction(
+  db: DbLike,
+  sys: AuthContext,
+  action: AutomationAction,
+  job: Job,
+  automation: Automation,
+): Promise<{ description: string; problem: string | null }> {
   switch (action.type) {
     case "notify": {
-      const ids = notifyRecipients(db, sys.organisationId, action, job, null);
-      const names = ids.length
-        ? db
+      const ids = await notifyRecipients(db, sys.organisationId, action, job, null);
+      const rows = ids.length
+        ? await db
             .select({ name: users.name, isActive: users.isActive })
             .from(users)
             .where(and(inArray(users.id, ids), eq(users.organisationId, sys.organisationId)))
-            .all()
-            .filter((u) => u.isActive)
-            .map((u) => u.name)
+            .orderBy(asc(users.name), asc(users.id))
         : [];
+      const names = rows.filter((u) => u.isActive).map((u) => u.name);
       return names.length
         ? { description: `Notify ${names.join(", ")}${action.message ? `: “${action.message}”` : ""}`, problem: null }
         : { description: `Notify the ${action.target.replace(/_/g, " ")}`, problem: "Nobody to notify for this job" };
     }
     case "assign_editor": {
-      const candidate = assignCandidate(db, action, job);
+      const candidate = await assignCandidate(db, action, job);
       if (!candidate) return { description: `Assign the ${action.target.replace(/_/g, " ")}`, problem: "No such editor on record for this job" };
-      const user = db.select().from(users).where(and(eq(users.id, candidate), eq(users.organisationId, sys.organisationId))).get();
+      const user = await first(db.select().from(users).where(and(eq(users.id, candidate), eq(users.organisationId, sys.organisationId))));
       if (!user) return { description: "Assign an editor", problem: "The editor is not in this organisation" };
       if (candidate === job.editorId) return { description: `Assign ${user.name}`, problem: `${user.name} already holds the job (no change)` };
       if (!user.isActive || user.role !== "editor") return { description: `Assign ${user.name}`, problem: `${user.name} is not an active editor` };
@@ -679,8 +723,8 @@ function previewAction(db: DbLike, sys: AuthContext, action: AutomationAction, j
     case "transition": {
       const label = STATUS_CATEGORY_META[action.toCategory].label;
       if (job.statusCategory === action.toCategory) return { description: `Move to ${label}`, problem: `Already ${label} (no change)` };
-      const graph = loadWorkflowGraph(db, sys.organisationId, job.workflowId);
-      const moves = movesFor(sys, toWorkflowJob(db, job), graph).filter((m) => m.toStatus.category === action.toCategory);
+      const graph = await loadWorkflowGraph(db, sys.organisationId, job.workflowId);
+      const moves = movesFor(sys, await toWorkflowJob(db, job), graph).filter((m) => m.toStatus.category === action.toCategory);
       if (moves.length === 0) return { description: `Move to ${label}`, problem: `No workflow edge lets an automation move this job to ${label}` };
       if (moves.length > 1) return { description: `Move to ${label}`, problem: `Several ${label} statuses match: ${moves.map((m) => m.toStatus.name).join(", ")}` };
       return { description: `Move to ${moves[0]?.toStatus.name ?? label}`, problem: moves[0]?.requiresRevisionPayload ? "A revision request needs details an automation cannot supply" : null };
@@ -703,30 +747,30 @@ function previewAction(db: DbLike, sys: AuthContext, action: AutomationAction, j
  * trigger against the job's latest matching event (or `triggerEventId`),
  * every condition against the current job, and a preview of each action.
  */
-export function dryRunAutomation(
+export async function dryRunAutomation(
   db: DbLike,
   ctx: AuthContext,
   automation: Automation,
   job: Job,
   opts: { triggerEventId?: string } = {},
-): AutomationDryRunResult {
+): Promise<AutomationDryRunResult> {
   const now = ctx.now();
   const trigger = parseJsonColumn(AutomationTriggerSchema, automation.trigger, { type: "job_created" });
   const conditions = parseJsonColumn(AutomationConditionsSchema, automation.conditions, []);
   const actions = parseJsonColumn(AutomationActionsSchema, automation.actions, []);
-  const statusKeyOf = statusKeyLookup(db, ctx.organisationId);
+  const statusKeyOf = await statusKeyLookup(db, ctx.organisationId);
 
   let triggerResult: AutomationDryRunResult["trigger"];
   if (trigger.type === "workload_threshold") {
     triggerResult = { type: trigger.type, matched: null, eventId: null, detail: "Workload triggers fire for an editor, not a job" };
   } else if (opts.triggerEventId) {
-    const event = loadTriggerEvent(db, ctx.organisationId, opts.triggerEventId);
-    const row = event ? db.select({ jobId: activityEvents.jobId }).from(activityEvents).where(eq(activityEvents.id, event.id)).get() : undefined;
+    const event = await loadTriggerEvent(db, ctx.organisationId, opts.triggerEventId);
+    const row = event ? await first(db.select({ jobId: activityEvents.jobId }).from(activityEvents).where(eq(activityEvents.id, event.id))) : undefined;
     if (!event || row?.jobId !== job.id) throw new NotFoundError("Event");
     const matched = triggerMatches(trigger, event, statusKeyOf);
     triggerResult = { type: trigger.type, matched, eventId: event.id, detail: matched ? `Matches ${event.eventType}` : `${event.eventType} does not match this trigger` };
   } else {
-    const candidates = db
+    const rows = await db
       .select()
       .from(activityEvents)
       .where(
@@ -736,17 +780,16 @@ export function dryRunAutomation(
           inArray(activityEvents.eventType, [...TRIGGER_SOURCE_EVENTS[trigger.type]]),
         ),
       )
-      .orderBy(desc(activityEvents.createdAt), desc(sql`rowid`))
-      .limit(200)
-      .all()
-      .filter((e) => triggerTypesForEvent(e.eventType, e.previousValue).includes(trigger.type));
+      .orderBy(desc(activityEvents.createdAt), desc(activityEvents.rowid))
+      .limit(200);
+    const candidates = rows.filter((e) => triggerTypesForEvent(e.eventType, e.previousValue).includes(trigger.type));
     const hit = candidates.find((e) => triggerMatches(trigger, toTriggerEventInfo(e), statusKeyOf));
     if (hit) triggerResult = { type: trigger.type, matched: true, eventId: hit.id, detail: `Matches ${hit.eventType} at ${hit.createdAt}` };
     else if (candidates[0]) triggerResult = { type: trigger.type, matched: false, eventId: candidates[0].id, detail: `The job's ${candidates[0].eventType} events do not match the trigger filters` };
     else triggerResult = { type: trigger.type, matched: null, eventId: null, detail: "No event on this job has fired this trigger yet" };
   }
 
-  const evaluation = evaluateConditions(db, job, conditions, now);
+  const evaluation = await evaluateConditions(db, job, conditions, now);
   const settingsOn = ctx.settings.automationsEnabled;
   const blockedBy = !settingsOn
     ? "Automations are switched off for this organisation"
@@ -755,7 +798,9 @@ export function dryRunAutomation(
       : !automation.isEnabled
         ? "The rule is disabled"
         : null;
-  const sys = systemContext(ctx.organisationId, { db, cause: "automation", requestId: ctx.requestId, now: ctx.now });
+  const sys = await systemContext(ctx.organisationId, { db, cause: "automation", requestId: ctx.requestId, now: ctx.now });
+  const previews: AutomationDryRunResult["actions"] = [];
+  for (const action of actions) previews.push({ action, ...(await previewAction(db, sys, action, job, automation)) });
 
   return {
     automationId: automation.id,
@@ -765,6 +810,6 @@ export function dryRunAutomation(
     conditionsMet: evaluation.met,
     blockedBy,
     wouldRun: blockedBy === null && evaluation.met && triggerResult.matched !== false,
-    actions: actions.map((action) => ({ action, ...previewAction(db, sys, action, job, automation) })),
+    actions: previews,
   };
 }

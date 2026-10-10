@@ -3,8 +3,8 @@ import { mutateById, readBy, methodNotAllowed } from "@/app/api/_lib/route";
 import { getJobDetail } from "@/server/queries/jobDetail";
 import { requestRevision } from "@/server/services/revisions";
 
-export const GET = readBy((db, ctx, id) => {
-  const detail = getJobDetail(db, ctx, id);
+export const GET = readBy(async (db, ctx, id) => {
+  const detail = await getJobDetail(db, ctx, id);
   return { revisions: detail.revisions, openRevision: detail.openRevision };
 });
 export const POST = mutateById("jobId", requestRevision);

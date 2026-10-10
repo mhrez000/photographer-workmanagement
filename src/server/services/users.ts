@@ -4,7 +4,7 @@
  * Every mutation: permission check → Zod parse → writes (one tx) → recordEvent.
  * Passwords: bcrypt is slow, so the temp password + hash can be prepared
  * outside the transaction (`prepareTempPassword`) and passed in as `secret`;
- * when omitted the services hash synchronously (cost BCRYPT_COST). The
+ * when omitted the services hash it themselves (cost BCRYPT_COST). The
  * plaintext temp password is returned once and never stored or audited.
  *
  * Guards:
@@ -17,18 +17,9 @@
  * - deactivate/role change/password reset bump `session_version` (immediate
  *   revocation of every cookie)
  */
-import { hashSync } from "bcryptjs";
 import { and, count, eq, inArray, or } from "drizzle-orm";
 import { jobs, userNotificationPrefs, users } from "@/db/schema";
-import {
-  AVATAR_PALETTE,
-  BCRYPT_COST,
-  CATEGORY_GROUPS,
-  NOTIFICATION_TYPES,
-  NOTIFICATION_TYPE_META,
-  type NotificationType,
-  type Role,
-} from "@/lib/constants";
+import { AVATAR_PALETTE, BCRYPT_COST, CATEGORY_GROUPS, NOTIFICATION_TYPES, NOTIFICATION_TYPE_META, type NotificationType, type Role } from "@/lib/constants";
 import { newId } from "@/lib/ids";
 import type { AuthContext, User } from "@/lib/types";
 import {
@@ -45,7 +36,7 @@ import { recordEvent } from "@/server/audit";
 import { generateTempPassword, hashPassword } from "@/server/auth/password";
 import { assertCan, isManagement, type UserPermissionRef } from "@/server/auth/permissions";
 import { ForbiddenError, UnauthorizedError } from "@/server/errors";
-import { loadUserInOrg, parseInput, safeUser, withTx, type Db, type DbLike, type SafeUser, type Tx } from "./_shared";
+import { first, loadUserInOrg, one, parseInput, safeUser, withTx, type Db, type DbLike, type SafeUser, type Tx } from "./_shared";
 import { checkVersion, diffFields, ruleViolation } from "./_admin";
 import { assertRoleMayEver } from "./clients";
 import { assignEditor, unassignEditor } from "./assignments";
@@ -69,10 +60,8 @@ export async function prepareTempPassword(cost: number = BCRYPT_COST): Promise<P
   return { tempPassword, passwordHash: await hashPassword(tempPassword, cost) };
 }
 
-function secretOrSync(secret: PreparedSecret | undefined): PreparedSecret {
-  if (secret) return secret;
-  const tempPassword = generateTempPassword();
-  return { tempPassword, passwordHash: hashSync(tempPassword, BCRYPT_COST) };
+async function secretOrHash(secret: PreparedSecret | undefined): Promise<PreparedSecret> {
+  return secret ?? prepareTempPassword(BCRYPT_COST);
 }
 
 export function userPermissionRef(row: User, nextRole?: Role): UserPermissionRef {
@@ -84,17 +73,18 @@ function requireHuman(ctx: AuthContext, action: Parameters<typeof assertRoleMayE
   return ctx.userId;
 }
 
-export function activeOwnerCount(db: DbLike, organisationId: string): number {
-  const row = db
-    .select({ n: count() })
-    .from(users)
-    .where(and(eq(users.organisationId, organisationId), eq(users.role, "owner"), eq(users.isActive, true)))
-    .get();
+export async function activeOwnerCount(db: DbLike, organisationId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: count() })
+      .from(users)
+      .where(and(eq(users.organisationId, organisationId), eq(users.role, "owner"), eq(users.isActive, true))),
+  );
   return row?.n ?? 0;
 }
 
-function isEmailTaken(db: DbLike, email: string, exceptUserId?: string): boolean {
-  const row = db.select({ id: users.id }).from(users).where(eq(users.email, email)).get();
+async function isEmailTaken(db: DbLike, email: string, exceptUserId?: string): Promise<boolean> {
+  const row = await first(db.select({ id: users.id }).from(users).where(eq(users.email, email)));
   return !!row && row.id !== exceptUserId;
 }
 
@@ -106,8 +96,8 @@ export interface OpenJobRef {
 }
 
 /** Active (non-terminal) jobs where the user is the current editor or photographer. */
-export function openJobsForUser(db: DbLike, ctx: AuthContext, userId: string): OpenJobRef[] {
-  const rows = db
+export async function openJobsForUser(db: DbLike, ctx: AuthContext, userId: string): Promise<OpenJobRef[]> {
+  const rows = await db
     .select({ id: jobs.id, jobNumber: jobs.jobNumber, editorId: jobs.editorId, photographerId: jobs.photographerId, version: jobs.version })
     .from(jobs)
     .where(
@@ -117,8 +107,7 @@ export function openJobsForUser(db: DbLike, ctx: AuthContext, userId: string): O
         or(eq(jobs.editorId, userId), eq(jobs.photographerId, userId)),
       ),
     )
-    .orderBy(jobs.jobNumber)
-    .all();
+    .orderBy(jobs.jobNumber, jobs.id);
   const out: OpenJobRef[] = [];
   for (const r of rows) {
     if (r.editorId === userId) out.push({ jobId: r.id, jobNumber: r.jobNumber, role: "editor", version: r.version });
@@ -132,8 +121,8 @@ function assertNotAnonymised(user: User): void {
 }
 
 /** Rejects demoting/deactivating the last active owner. */
-function assertNotLastOwner(db: DbLike, target: User, what: string): void {
-  if (target.role === "owner" && target.isActive && activeOwnerCount(db, target.organisationId) <= 1) {
+async function assertNotLastOwner(db: DbLike, target: User, what: string): Promise<void> {
+  if (target.role === "owner" && target.isActive && (await activeOwnerCount(db, target.organisationId)) <= 1) {
     throw ruleViolation(`You cannot ${what} the last active owner. Make someone else an owner first.`);
   }
 }
@@ -148,36 +137,37 @@ export interface InviteResult {
   tempPassword: string;
 }
 
-export function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): InviteResult {
+export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<InviteResult> {
   assertCan(ctx, "user.invite");
   requireHuman(ctx, "user.invite");
   const data = parseInput(InviteUserInput, input);
   assertCan(ctx, "user.invite", { id: "new", role: data.role, isActive: true, organisationId: ctx.organisationId, nextRole: data.role });
-  if (isEmailTaken(tx, data.email)) throw ruleViolation("This email address is already registered", {}, "email");
+  if (await isEmailTaken(tx, data.email)) throw ruleViolation("This email address is already registered", {}, "email");
 
-  const { tempPassword, passwordHash } = secretOrSync(secret);
+  const { tempPassword, passwordHash } = await secretOrHash(secret);
   const now = ctx.now();
   const palette = AVATAR_PALETTE;
-  const row = tx
-    .insert(users)
-    .values({
-      organisationId: ctx.organisationId,
-      email: data.email,
-      passwordHash,
-      name: data.name,
-      role: data.role,
-      title: data.title ?? null,
-      avatarColour: data.avatarColour ?? palette[Math.floor(Date.parse(now) / 1000) % palette.length],
-      capacityHoursPerWeek: data.capacityHoursPerWeek ?? null,
-      canViewTeamWorkloads: data.canViewTeamWorkloads ?? false,
-      canViewAnalytics: data.canViewAnalytics ?? false,
-      isActive: true,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .insert(users)
+      .values({
+        organisationId: ctx.organisationId,
+        email: data.email,
+        passwordHash,
+        name: data.name,
+        role: data.role,
+        title: data.title ?? null,
+        avatarColour: data.avatarColour ?? palette[Math.floor(Date.parse(now) / 1000) % palette.length],
+        capacityHoursPerWeek: data.capacityHoursPerWeek ?? null,
+        canViewTeamWorkloads: data.canViewTeamWorkloads ?? false,
+        canViewAnalytics: data.canViewAnalytics ?? false,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: row.id,
     eventType: "user.created",
@@ -216,10 +206,10 @@ const PROFILE_FIELDS = ["name", "title", "avatarColour", "email"] as const;
  * Everything else — and any edit of another user — needs `user.edit`
  * (owner any; manager photographers/editors).
  */
-export function updateUser(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function updateUser(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   const actorId = requireHuman(ctx, "user.edit");
   const data = parseInput(UpdateUserInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   const selfOnly = target.id === actorId && data.email === undefined;
   if (!selfOnly) assertCan(ctx, "user.edit", userPermissionRef(target));
   // Photographers/editors edit only their own name/title/avatar (§3.2 "self (name, avatar)").
@@ -229,16 +219,17 @@ export function updateUser(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
 
   const diff = diffFields(target, data, selfOnly ? SELF_FIELDS : PROFILE_FIELDS);
   if (diff.changed.length === 0) return safeUser(target);
-  if (diff.set.email && isEmailTaken(tx, diff.set.email, target.id)) {
+  if (diff.set.email && (await isEmailTaken(tx, diff.set.email, target.id))) {
     throw ruleViolation("This email address is already registered", {}, "email");
   }
-  const row = tx
-    .update(users)
-    .set({ ...diff.set, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({ ...diff.set, updatedAt: ctx.now(), version: target.version + 1 })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.updated",
@@ -254,18 +245,18 @@ export function updateUser(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
 /*  Role                                                               */
 /* ------------------------------------------------------------------ */
 
-export function changeRole(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function changeRole(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   assertRoleMayEver(ctx, "user.change_role");
   requireHuman(ctx, "user.change_role");
   const data = parseInput(ChangeRoleInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.change_role", userPermissionRef(target, data.role));
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.role === data.role) return safeUser(target);
-  if (data.role !== "owner") assertNotLastOwner(tx, target, "demote");
+  if (data.role !== "owner") await assertNotLastOwner(tx, target, "demote");
 
-  const open = openJobsForUser(tx, ctx, target.id);
+  const open = await openJobsForUser(tx, ctx, target.id);
   const editorJobs = open.filter((j) => j.role === "editor");
   const photographerJobs = open.filter((j) => j.role === "photographer");
   if (data.role !== "editor" && editorJobs.length > 0) {
@@ -279,13 +270,14 @@ export function changeRole(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
     });
   }
 
-  const row = tx
-    .update(users)
-    .set({ role: data.role, sessionVersion: target.sessionVersion + 1, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({ role: data.role, sessionVersion: target.sessionVersion + 1, updatedAt: ctx.now(), version: target.version + 1 })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.role_changed",
@@ -316,19 +308,19 @@ export interface DeactivateResult {
  * keeps it (it then shows as an editor_unavailable bottleneck). Photographer
  * jobs are kept. Event `user.deactivated` with the `openJobs` list.
  */
-export function deactivateUser(tx: Tx, ctx: AuthContext, input: unknown): DeactivateResult {
+export async function deactivateUser(tx: Tx, ctx: AuthContext, input: unknown): Promise<DeactivateResult> {
   assertRoleMayEver(ctx, "user.deactivate");
   const actorId = requireHuman(ctx, "user.deactivate");
   const data = parseInput(DeactivateUserInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.deactivate", userPermissionRef(target));
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (!target.isActive) throw ruleViolation(`${target.name} is already deactivated`);
-  assertNotLastOwner(tx, target, "deactivate");
+  await assertNotLastOwner(tx, target, "deactivate");
 
   let reassignTo: User | null = null;
   if (data.reassignTo) {
-    reassignTo = loadUserInOrg(tx, ctx, data.reassignTo);
+    reassignTo = await loadUserInOrg(tx, ctx, data.reassignTo);
     if (reassignTo.id === target.id) throw ruleViolation("Choose a different editor to take over", {}, "reassignTo");
     if (!reassignTo.isActive || reassignTo.role !== "editor") {
       throw ruleViolation("Jobs can only be reassigned to an active editor", {}, "reassignTo");
@@ -337,38 +329,39 @@ export function deactivateUser(tx: Tx, ctx: AuthContext, input: unknown): Deacti
 
   const now = ctx.now();
   // 1. Stop the running timer first so it ends with the deactivation reason.
-  closeRunningSessionForUser(tx, ctx, { userId: target.id, reason: "auto_deactivated" });
+  await closeRunningSessionForUser(tx, ctx, { userId: target.id, reason: "auto_deactivated" });
 
   // 2. Revoke access immediately.
-  const row = tx
-    .update(users)
-    .set({
-      isActive: false,
-      deactivatedAt: now,
-      deactivatedByUserId: actorId,
-      sessionVersion: target.sessionVersion + 1,
-      updatedAt: now,
-      version: target.version + 1,
-    })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
+  const row = await one(
+    tx
+      .update(users)
+      .set({
+        isActive: false,
+        deactivatedAt: now,
+        deactivatedByUserId: actorId,
+        sessionVersion: target.sessionVersion + 1,
+        updatedAt: now,
+        version: target.version + 1,
+      })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
 
   // 3. Hand over open editor jobs.
   const openJobs: DeactivateResult["openJobs"] = [];
-  for (const job of openJobsForUser(tx, ctx, target.id)) {
+  for (const job of await openJobsForUser(tx, ctx, target.id)) {
     let action: OpenJobAction = "kept";
     if (job.role === "editor" && reassignTo) {
-      assignEditor(tx, ctx, { jobId: job.jobId, userId: reassignTo.id, reason: "user_deactivated", unassignReason: "user_deactivated" });
+      await assignEditor(tx, ctx, { jobId: job.jobId, userId: reassignTo.id, reason: "user_deactivated", unassignReason: "user_deactivated" });
       action = "reassigned";
     } else if (job.role === "editor" && data.unassign) {
-      unassignEditor(tx, ctx, { jobId: job.jobId, userId: null, reason: "user_deactivated", unassignReason: "user_deactivated" });
+      await unassignEditor(tx, ctx, { jobId: job.jobId, userId: null, reason: "user_deactivated", unassignReason: "user_deactivated" });
       action = "unassigned";
     }
     openJobs.push({ jobId: job.jobId, jobNumber: job.jobNumber, role: job.role, action });
   }
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.deactivated",
@@ -386,22 +379,23 @@ export function deactivateUser(tx: Tx, ctx: AuthContext, input: unknown): Deacti
   return { user: safeUser(row), openJobs };
 }
 
-export function reactivateUser(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function reactivateUser(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   assertRoleMayEver(ctx, "user.reactivate");
   requireHuman(ctx, "user.reactivate");
   const data = parseInput(UserIdInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.reactivate", userPermissionRef(target));
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.isActive) throw ruleViolation(`${target.name} is already active`);
-  const row = tx
-    .update(users)
-    .set({ isActive: true, deactivatedAt: null, deactivatedByUserId: null, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({ isActive: true, deactivatedAt: null, deactivatedByUserId: null, updatedAt: ctx.now(), version: target.version + 1 })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.reactivated",
@@ -428,21 +422,21 @@ export interface ResetPasswordResult {
  * fresh temp password and bumps `session_version`. Changing your own
  * password with the current one is `changePassword` in services/auth.ts.
  */
-export function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): ResetPasswordResult {
+export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<ResetPasswordResult> {
   assertRoleMayEver(ctx, "user.reset_password");
   const actorId = requireHuman(ctx, "user.reset_password");
   const data = parseInput(UserIdInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.reset_password", userPermissionRef(target));
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
-  const { tempPassword, passwordHash } = secretOrSync(secret);
+  const { tempPassword, passwordHash } = await secretOrHash(secret);
   const nextSession = target.sessionVersion + 1;
-  tx.update(users)
+  await tx
+    .update(users)
     .set({ passwordHash, sessionVersion: nextSession, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .run();
-  recordEvent(tx, ctx, {
+    .where(eq(users.id, target.id));
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.password_changed",
@@ -465,22 +459,23 @@ export async function resetPasswordWithTempPassword(ctx: AuthContext, input: unk
 /*  Capacity / visibility flags                                        */
 /* ------------------------------------------------------------------ */
 
-export function setCapacity(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function setCapacity(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   assertRoleMayEver(ctx, "user.set_capacity");
   requireHuman(ctx, "user.set_capacity");
   const data = parseInput(SetCapacityInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.set_capacity", userPermissionRef(target));
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.capacityHoursPerWeek === data.capacityHoursPerWeek) return safeUser(target);
-  const row = tx
-    .update(users)
-    .set({ capacityHoursPerWeek: data.capacityHoursPerWeek, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({ capacityHoursPerWeek: data.capacityHoursPerWeek, updatedAt: ctx.now(), version: target.version + 1 })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.capacity_changed",
@@ -494,23 +489,24 @@ export function setCapacity(tx: Tx, ctx: AuthContext, input: unknown): SafeUser 
 
 const FLAG_FIELDS = ["canViewTeamWorkloads", "canViewAnalytics"] as const;
 
-export function setVisibilityFlags(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function setVisibilityFlags(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   assertRoleMayEver(ctx, "user.set_visibility_flags");
   requireHuman(ctx, "user.set_visibility_flags");
   const data = parseInput(SetVisibilityFlagsInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   assertCan(ctx, "user.set_visibility_flags", userPermissionRef(target));
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   const diff = diffFields(target, data, FLAG_FIELDS);
   if (diff.changed.length === 0) return safeUser(target);
-  const row = tx
-    .update(users)
-    .set({ ...diff.set, updatedAt: ctx.now(), version: target.version + 1 })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({ ...diff.set, updatedAt: ctx.now(), version: target.version + 1 })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.flags_changed",
@@ -531,34 +527,35 @@ export function setVisibilityFlags(tx: Tx, ctx: AuthContext, input: unknown): Sa
  * rewrites PII on the users row only. Comments and events stay; names are
  * joined at read time, so feeds show "Former team member".
  */
-export function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): SafeUser {
+export async function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): Promise<SafeUser> {
   assertRoleMayEver(ctx, "user.anonymise");
   requireHuman(ctx, "user.anonymise");
   const data = parseInput(UserIdInput, input);
-  const target = loadUserInOrg(tx, ctx, data.userId);
+  const target = await loadUserInOrg(tx, ctx, data.userId);
   if (target.isActive) throw ruleViolation("Deactivate this user before anonymising them");
   assertCan(ctx, "user.anonymise", userPermissionRef(target));
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.anonymisedAt) throw ruleViolation("This user is already anonymised");
   const now = ctx.now();
-  const row = tx
-    .update(users)
-    .set({
-      name: ANONYMISED_NAME,
-      email: `anon-${target.id}@invalid`,
-      // Not a bcrypt hash: verifyPassword() returns false for it, so nobody can log in.
-      passwordHash: `!anonymised!${newId()}${newId()}`,
-      avatarColour: ANONYMISED_AVATAR,
-      title: null,
-      anonymisedAt: now,
-      sessionVersion: target.sessionVersion + 1,
-      updatedAt: now,
-      version: target.version + 1,
-    })
-    .where(eq(users.id, target.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(users)
+      .set({
+        name: ANONYMISED_NAME,
+        email: `anon-${target.id}@invalid`,
+        // Not a bcrypt hash: verifyPassword() returns false for it, so nobody can log in.
+        passwordHash: `!anonymised!${newId()}${newId()}`,
+        avatarColour: ANONYMISED_AVATAR,
+        title: null,
+        anonymisedAt: now,
+        sessionVersion: target.sessionVersion + 1,
+        updatedAt: now,
+        version: target.version + 1,
+      })
+      .where(eq(users.id, target.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
     eventType: "user.anonymised",
@@ -582,12 +579,12 @@ export interface NotificationPrefView {
 }
 
 /** Own preferences (missing row = enabled; mandatory types always on). */
-export function getNotificationPrefs(db: DbLike, ctx: AuthContext, userId?: string): NotificationPrefView[] {
+export async function getNotificationPrefs(db: DbLike, ctx: AuthContext, userId?: string): Promise<NotificationPrefView[]> {
   const target = userId ?? ctx.userId;
   if (!target) throw new UnauthorizedError();
   assertCan(ctx, "notification.prefs", { userId: target, organisationId: ctx.organisationId });
-  loadUserInOrg(db, ctx, target);
-  const rows = db.select().from(userNotificationPrefs).where(eq(userNotificationPrefs.userId, target)).all();
+  await loadUserInOrg(db, ctx, target);
+  const rows = await db.select().from(userNotificationPrefs).where(eq(userNotificationPrefs.userId, target));
   const byType = new Map(rows.map((r) => [r.type, r.enabled]));
   return NOTIFICATION_TYPES.map((type) => {
     const mandatory = NOTIFICATION_TYPE_META[type].mandatory;
@@ -595,14 +592,14 @@ export function getNotificationPrefs(db: DbLike, ctx: AuthContext, userId?: stri
   });
 }
 
-export function setNotificationPrefs(tx: Tx, ctx: AuthContext, input: unknown): NotificationPrefView[] {
+export async function setNotificationPrefs(tx: Tx, ctx: AuthContext, input: unknown): Promise<NotificationPrefView[]> {
   const actorId = requireHuman(ctx, "notification.prefs");
   assertCan(ctx, "notification.prefs", { userId: actorId, organisationId: ctx.organisationId });
   const data = parseInput(SetNotificationPrefsInput, input);
   const target = data.userId ?? actorId;
   assertCan(ctx, "notification.prefs", { userId: target, organisationId: ctx.organisationId });
 
-  const current = new Map(getNotificationPrefs(tx, ctx, target).map((p) => [p.type, p.enabled]));
+  const current = new Map((await getNotificationPrefs(tx, ctx, target)).map((p) => [p.type, p.enabled]));
   const previous: Record<string, boolean> = {};
   const next: Record<string, boolean> = {};
   const now = ctx.now();
@@ -616,13 +613,13 @@ export function setNotificationPrefs(tx: Tx, ctx: AuthContext, input: unknown): 
     if (current.get(type) === enabled) continue;
     previous[type] = current.get(type) ?? true;
     next[type] = enabled;
-    tx.insert(userNotificationPrefs)
+    await tx
+      .insert(userNotificationPrefs)
       .values({ organisationId: ctx.organisationId, userId: target, type, enabled, updatedAt: now })
-      .onConflictDoUpdate({ target: [userNotificationPrefs.userId, userNotificationPrefs.type], set: { enabled, updatedAt: now } })
-      .run();
+      .onConflictDoUpdate({ target: [userNotificationPrefs.userId, userNotificationPrefs.type], set: { enabled, updatedAt: now } });
   }
   if (Object.keys(next).length > 0) {
-    recordEvent(tx, ctx, {
+    await recordEvent(tx, ctx, {
       entityType: "user",
       entityId: target,
       eventType: "user.notification_prefs_changed",

@@ -58,3 +58,6 @@ next-env.d.ts
 /e2e/.auth/
 test-results/
 /data/.session-secret
+
+# PGlite data dirs (local dev / e2e)
+/data/pglite*/

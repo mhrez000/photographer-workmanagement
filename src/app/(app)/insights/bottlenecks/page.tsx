@@ -28,10 +28,10 @@ export default async function BottlenecksPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "bottlenecks.view");
   const tz = ctx.settings.timezone;
-  const alerts = load(() => getBottlenecks(db, ctx));
-  const settings = loadOrgSettings(db, ctx);
+  const alerts = await load(() => getBottlenecks(db, ctx));
+  const settings = await loadOrgSettings(db, ctx);
   const jobIds = [...new Set(alerts.flatMap((a) => a.jobs.map((j) => j.id)))];
-  const rows = new Map(load(() => getJobRowsByIds(db, ctx, jobIds)).map((j) => [j.id, j]));
+  const rows = new Map((await load(() => getJobRowsByIds(db, ctx, jobIds))).map((j) => [j.id, j]));
   const canReassign = allowed(ctx, "job.bulk_reassign");
   const firing = new Set(alerts.map((a) => a.kind));
   const critical = alerts.filter((a) => a.severity === "critical").length;

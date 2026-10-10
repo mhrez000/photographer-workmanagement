@@ -13,14 +13,14 @@ import { canViewTeamWorkloads, getWorkloads } from "@/server/queries/workloads";
  * band / capacity and the photographer's output this month. Every figure
  * comes from an existing permission-checked query.
  */
-export function loadDirectory(db: DbLike, ctx: AuthContext, role: DirectoryRole): { people: DirectoryPerson[]; showStats: boolean } {
-  const entries = getDirectory(db, ctx, role);
+export async function loadDirectory(db: DbLike, ctx: AuthContext, role: DirectoryRole): Promise<{ people: DirectoryPerson[]; showStats: boolean }> {
+  const entries = await getDirectory(db, ctx, role);
   const showStats = canViewTeamWorkloads(ctx);
 
-  const workloads = role === "editor" ? new Map(getWorkloads(db, ctx).map((w) => [w.editor.id, w])) : new Map();
+  const workloads = role === "editor" ? new Map((await getWorkloads(db, ctx)).map((w) => [w.editor.id, w])) : new Map();
   const output =
     role === "photographer" && can(ctx, "analytics.view")
-      ? new Map(getAnalyticsPhotographers(db, ctx, { range: "this_month" }).photographers.map((p) => [p.user.id, p]))
+      ? new Map((await getAnalyticsPhotographers(db, ctx, { range: "this_month" })).photographers.map((p) => [p.user.id, p]))
       : new Map();
 
   const people: DirectoryPerson[] = entries.map((e) => {

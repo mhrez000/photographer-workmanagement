@@ -13,8 +13,8 @@
  * intended day.
  */
 import { and, asc, desc, eq, inArray, isNull, sql, type SQL, type SQLWrapper } from "drizzle-orm";
-import { alias } from "drizzle-orm/sqlite-core";
-import type { DbLike } from "@/db/index";
+import { alias } from "drizzle-orm/pg-core";
+import { first, type DbLike } from "@/db/index";
 import {
   clients,
   jobLinks,
@@ -129,22 +129,22 @@ export interface SelectJobsOptions {
 }
 
 /** Visible jobs (visibility ∧ org ∧ `where`) as raw joined rows. */
-export function selectRawJobs(db: DbLike, ctx: AuthContext, opts: SelectJobsOptions = {}): RawJobRow[] {
+export async function selectRawJobs(db: DbLike, ctx: AuthContext, opts: SelectJobsOptions = {}): Promise<RawJobRow[]> {
   let q = jobRowQuery(db).where(and(visibleJobsWhere(ctx), opts.where));
   q = q.orderBy(...(opts.orderBy && opts.orderBy.length > 0 ? opts.orderBy : defaultJobOrder()));
   if (opts.limit !== undefined) q = q.limit(opts.limit);
   if (opts.offset !== undefined && opts.offset > 0) q = q.offset(opts.offset);
-  return q.all() as RawJobRow[];
+  return (await q) as RawJobRow[];
 }
 
 /** Visible jobs mapped to `JobRow` (primary links loaded in one extra query). */
-export function selectJobRows(db: DbLike, ctx: AuthContext, opts: SelectJobsOptions = {}): JobRow[] {
-  return mapJobRows(db, ctx, selectRawJobs(db, ctx, opts));
+export async function selectJobRows(db: DbLike, ctx: AuthContext, opts: SelectJobsOptions = {}): Promise<JobRow[]> {
+  return mapJobRows(db, ctx, await selectRawJobs(db, ctx, opts));
 }
 
 /** Count of visible jobs matching `where`. */
-export function countJobs(db: DbLike, ctx: AuthContext, where?: SQL): number {
-  const row = jobCountQuery(db).where(and(visibleJobsWhere(ctx), where)).get();
+export async function countJobs(db: DbLike, ctx: AuthContext, where?: SQL): Promise<number> {
+  const row = await first(jobCountQuery(db).where(and(visibleJobsWhere(ctx), where)));
   return Number(row?.n ?? 0);
 }
 
@@ -167,10 +167,10 @@ function linkRank(kind: LinkKind): number {
 }
 
 /** Most relevant current link per job (finished work, else workspace, else raw files; latest wins). */
-export function loadPrimaryLinks(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Map<string, NonNullable<PrimaryLink>> {
+export async function loadPrimaryLinks(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Promise<Map<string, NonNullable<PrimaryLink>>> {
   const out = new Map<string, NonNullable<PrimaryLink> & { rank: number; createdAt: string }>();
   if (jobIds.length === 0) return new Map();
-  const rows = db
+  const rows = await db
     .select({ id: jobLinks.id, jobId: jobLinks.jobId, kind: jobLinks.kind, url: jobLinks.url, label: jobLinks.label, createdAt: jobLinks.createdAt })
     .from(jobLinks)
     .where(
@@ -181,7 +181,7 @@ export function loadPrimaryLinks(db: DbLike, ctx: AuthContext, jobIds: readonly 
         isNull(jobLinks.removedAt),
       ),
     )
-    .all();
+    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
   for (const r of rows) {
     const rank = linkRank(r.kind);
     if (rank === 0) continue;
@@ -253,8 +253,8 @@ export function toJobRow(raw: RawJobRow, ctx: AuthContext, now: string, primaryL
 }
 
 /** Maps raw rows to JobRows (one query for all primary links). */
-export function mapJobRows(db: DbLike, ctx: AuthContext, raws: readonly RawJobRow[], now: string = ctx.now()): JobRow[] {
-  const links = loadPrimaryLinks(
+export async function mapJobRows(db: DbLike, ctx: AuthContext, raws: readonly RawJobRow[], now: string = ctx.now()): Promise<JobRow[]> {
+  const links = await loadPrimaryLinks(
     db,
     ctx,
     raws.map((r) => r.job.id),
@@ -295,17 +295,16 @@ export interface WorkflowGraph {
 }
 
 /** Statuses + edges (archived rows included; helpers filter them) per workflow id. */
-export function loadWorkflowGraphs(db: DbLike, ctx: AuthContext, workflowIds: readonly string[]): Map<string, WorkflowGraph> {
+export async function loadWorkflowGraphs(db: DbLike, ctx: AuthContext, workflowIds: readonly string[]): Promise<Map<string, WorkflowGraph>> {
   const ids = [...new Set(workflowIds)];
   const out = new Map<string, WorkflowGraph>();
   if (ids.length === 0) return out;
   for (const id of ids) out.set(id, { statuses: [], edges: [] });
-  const statuses = db
+  const statuses = await db
     .select()
     .from(workflowStatuses)
     .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), inArray(workflowStatuses.workflowId, ids)))
-    .orderBy(asc(workflowStatuses.sortOrder))
-    .all();
+    .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.createdAt), asc(workflowStatuses.id));
   for (const s of statuses) {
     out.get(s.workflowId)?.statuses.push({
       id: s.id,
@@ -318,11 +317,11 @@ export function loadWorkflowGraphs(db: DbLike, ctx: AuthContext, workflowIds: re
       colour: s.colour,
     });
   }
-  const edges = db
+  const edges = await db
     .select()
     .from(workflowTransitions)
     .where(and(eq(workflowTransitions.organisationId, ctx.organisationId), inArray(workflowTransitions.workflowId, ids)))
-    .all();
+    .orderBy(asc(workflowTransitions.createdAt), asc(workflowTransitions.id));
   for (const e of edges) {
     out.get(e.workflowId)?.edges.push({
       id: e.id,
@@ -366,17 +365,17 @@ export function likePattern(q: string): string {
   return `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 }
 
-/** `column LIKE %q% ESCAPE '\'` (ASCII case-insensitive in SQLite). */
+/** `column ILIKE %q% ESCAPE '\'` — case-insensitive substring match (Postgres LIKE is case-sensitive). */
 export function likeSql(column: SQLWrapper, q: string): SQL {
-  return sql`${column} like ${likePattern(q)} escape '\\'`;
+  return sql`${column} ilike ${likePattern(q)} escape '\\'`;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Org clock helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-export function loadOrgSettingsRow(db: DbLike, ctx: AuthContext): OrganisationSettings | undefined {
-  return db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, ctx.organisationId)).get();
+export async function loadOrgSettingsRow(db: DbLike, ctx: AuthContext): Promise<OrganisationSettings | undefined> {
+  return first(db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, ctx.organisationId)));
 }
 
 export interface OrgDayBounds {
@@ -429,33 +428,37 @@ export interface VisibleJob {
  * default). Missing, foreign AND not-visible jobs all throw NotFoundError, so
  * existence never leaks. Editors get `pastEditorIds` (the read-only scope).
  */
-export function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string, action: "job.view" | "job.view_history" = "job.view"): VisibleJob {
-  const job = loadJobInOrg(db, ctx, jobId);
-  const ref = permissionRefOf(job, ctx.role === "editor" ? loadPastEditorIds(db, job.id) : undefined);
+export async function loadVisibleJob(
+  db: DbLike,
+  ctx: AuthContext,
+  jobId: string,
+  action: "job.view" | "job.view_history" = "job.view",
+): Promise<VisibleJob> {
+  const job = await loadJobInOrg(db, ctx, jobId);
+  const ref = permissionRefOf(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
   if (!can(ctx, action, ref)) throw new NotFoundError("Job");
   return { job, ref };
 }
 
 /** UserRefs for ids in the actor's organisation (unknown / foreign ids are absent). */
-export function loadUserRefs(db: DbLike, ctx: AuthContext, ids: Iterable<string | null | undefined>): Map<string, UserRef> {
+export async function loadUserRefs(db: DbLike, ctx: AuthContext, ids: Iterable<string | null | undefined>): Promise<Map<string, UserRef>> {
   const unique = [...new Set([...ids].filter((x): x is string => typeof x === "string" && x.length > 0))];
   const out = new Map<string, UserRef>();
   if (unique.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
     .from(users)
-    .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, unique)))
-    .all();
+    .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, unique)));
   for (const r of rows) out.set(r.id, { ...r });
   return out;
 }
 
 /** StatusRefs by id (org-scoped; archived statuses included so history renders). */
-export function loadStatusRefs(db: DbLike, ctx: AuthContext, ids: Iterable<string | null | undefined>): Map<string, StatusRef> {
+export async function loadStatusRefs(db: DbLike, ctx: AuthContext, ids: Iterable<string | null | undefined>): Promise<Map<string, StatusRef>> {
   const unique = [...new Set([...ids].filter((x): x is string => typeof x === "string" && x.length > 0))];
   const out = new Map<string, StatusRef>();
   if (unique.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({
       id: workflowStatuses.id,
       key: workflowStatuses.key,
@@ -465,8 +468,8 @@ export function loadStatusRefs(db: DbLike, ctx: AuthContext, ids: Iterable<strin
       sortOrder: workflowStatuses.sortOrder,
     })
     .from(workflowStatuses)
-    .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), inArray(workflowStatuses.id, unique)))
-    .all();
+    .where(and(eq(workflowStatuses.organisationId, ctx.organisationId), inArray(workflowStatuses.id, unique)));
+
   for (const r of rows) out.set(r.id, { ...r });
   return out;
 }

@@ -16,7 +16,7 @@
  *   mutation that causes the close).
  */
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
-import type { DbLike, Tx } from "@/db/index";
+import { first, one, type DbLike, type Tx } from "@/db/index";
 import { jobStatusTransitions, jobs, organisationSettings, workSessions } from "@/db/schema";
 import { CATEGORY_GROUPS, type SessionEndReason, type StatusCategory } from "@/lib/constants";
 import type { AuthContext, Job, RunningSessionView, SessionTotals, WorkSession, WorkSessionView } from "@/lib/types";
@@ -55,51 +55,55 @@ const TERMINAL = CATEGORY_GROUPS.TERMINAL;
 /*  Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
-function runningForUser(db: DbLike, organisationId: string, userId: string): WorkSession | undefined {
-  return db
-    .select()
-    .from(workSessions)
-    .where(and(eq(workSessions.organisationId, organisationId), eq(workSessions.userId, userId), isNull(workSessions.endedAt)))
-    .get();
+async function runningForUser(db: DbLike, organisationId: string, userId: string): Promise<WorkSession | undefined> {
+  return first(
+    db
+      .select()
+      .from(workSessions)
+      .where(and(eq(workSessions.organisationId, organisationId), eq(workSessions.userId, userId), isNull(workSessions.endedAt)))
+      .limit(1),
+  );
 }
 
-function jobLabel(db: DbLike, ctx: AuthContext, jobId: string): Pick<Job, "id" | "jobNumber" | "name"> | undefined {
-  return db
-    .select({ id: jobs.id, jobNumber: jobs.jobNumber, name: jobs.name })
-    .from(jobs)
-    .where(and(eq(jobs.id, jobId), eq(jobs.organisationId, ctx.organisationId)))
-    .get();
+async function jobLabel(db: DbLike, ctx: AuthContext, jobId: string): Promise<Pick<Job, "id" | "jobNumber" | "name"> | undefined> {
+  return first(
+    db
+      .select({ id: jobs.id, jobNumber: jobs.jobNumber, name: jobs.name })
+      .from(jobs)
+      .where(and(eq(jobs.id, jobId), eq(jobs.organisationId, ctx.organisationId))),
+  );
 }
 
 /**
  * Closes one open session (fill-once) and writes `work_session.ended`.
  * Returns null when the row was already closed (lost a race).
  */
-function endSession(
+async function endSession(
   tx: Tx,
   ctx: AuthContext,
   session: WorkSession,
   reason: SessionEndReason,
   opts: CloseSessionOptions & { note?: string | null; job?: Pick<Job, "jobNumber" | "name"> } = {},
-): WorkSession | null {
+): Promise<WorkSession | null> {
   const requested = opts.endedAt ?? ctx.now();
   const endedAt = requested < session.startedAt ? session.startedAt : requested;
   const seconds = durationSeconds(session.startedAt, endedAt, endedAt);
-  const closed = tx
-    .update(workSessions)
-    .set({
-      endedAt,
-      endReason: reason,
-      durationSeconds: seconds,
-      ...(opts.note !== undefined && opts.note !== null ? { note: opts.note } : {}),
-    })
-    .where(and(eq(workSessions.id, session.id), isNull(workSessions.endedAt)))
-    .returning()
-    .get();
+  const closed = await first(
+    tx
+      .update(workSessions)
+      .set({
+        endedAt,
+        endReason: reason,
+        durationSeconds: seconds,
+        ...(opts.note !== undefined && opts.note !== null ? { note: opts.note } : {}),
+      })
+      .where(and(eq(workSessions.id, session.id), isNull(workSessions.endedAt)))
+      .returning(),
+  );
   if (!closed) return null;
 
-  const job = opts.job ?? jobLabel(tx, ctx, session.jobId);
-  recordEvent(tx, ctx, {
+  const job = opts.job ?? (await jobLabel(tx, ctx, session.jobId));
+  await recordEvent(tx, ctx, {
     entityType: "work_session",
     entityId: session.id,
     jobId: session.jobId,
@@ -136,9 +140,9 @@ export interface StartTimerResult {
  * `timer.use` (O/M: jobs assigned to self; P: own jobs; E: assigned jobs in
  * EDITOR_WORKING). Refused on terminal or paused jobs.
  */
-export function startTimer(tx: Tx, ctx: AuthContext, input: unknown): StartTimerResult {
+export async function startTimer(tx: Tx, ctx: AuthContext, input: unknown): Promise<StartTimerResult> {
   const data = parseInput(StartTimerInput, input);
-  const { job, ref } = loadJobWithRef(tx, ctx, data.jobId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, data.jobId);
   if (!ctx.settings.timeTrackingEnabled) {
     throw new ForbiddenError("timer.use", "Time tracking is turned off for this organisation");
   }
@@ -148,40 +152,44 @@ export function startTimer(tx: Tx, ctx: AuthContext, input: unknown): StartTimer
   if (TERMINAL.includes(job.statusCategory)) throw new ValidationError("The timer can't run on a completed or cancelled job");
   if (job.isPaused) throw new ValidationError("Resume work on the job before starting the timer");
 
-  const running = runningForUser(tx, ctx.organisationId, userId);
+  const running = await runningForUser(tx, ctx.organisationId, userId);
   let stopped: WorkSession | null = null;
   if (running) {
     if (running.jobId === job.id) return { session: running, alreadyRunning: true, stopped: null };
     if (!data.switchFromRunning) {
-      const other = jobLabel(tx, ctx, running.jobId);
+      const other = await jobLabel(tx, ctx, running.jobId);
       throw new ConflictError(`Your timer is already running on ${other?.jobNumber ?? "another job"}. Stop it first.`, running);
     }
-    stopped = endSession(tx, ctx, running, "stopped", { closedBy: "switch", metadata: { switchedToJobId: job.id } });
+    stopped = await endSession(tx, ctx, running, "stopped", { closedBy: "switch", metadata: { switchedToJobId: job.id } });
   }
 
-  const transition = tx
-    .select({ id: jobStatusTransitions.id })
-    .from(jobStatusTransitions)
-    .where(and(eq(jobStatusTransitions.jobId, job.id), isNull(jobStatusTransitions.exitedAt)))
-    .get();
+  const transition = await first(
+    tx
+      .select({ id: jobStatusTransitions.id })
+      .from(jobStatusTransitions)
+      .where(and(eq(jobStatusTransitions.jobId, job.id), isNull(jobStatusTransitions.exitedAt)))
+      .limit(1),
+  );
   if (!transition) throw new ConflictError("The job has no open stage. Reload and try again.", job);
 
-  const session = tx
-    .insert(workSessions)
-    .values({
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      userId,
-      statusIdAtStart: job.statusId,
-      categoryAtStart: job.statusCategory,
-      transitionId: transition.id,
-      startedAt: ctx.now(),
-      note: data.note ?? null,
-    })
-    .returning()
-    .get();
+  const session = await one(
+    tx
+      .insert(workSessions)
+      .values({
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        userId,
+        statusIdAtStart: job.statusId,
+        categoryAtStart: job.statusCategory,
+        transitionId: transition.id,
+        startedAt: ctx.now(),
+        note: data.note ?? null,
+      })
+      .returning(),
+    "work session",
+  );
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "work_session",
     entityId: session.id,
     jobId: job.id,
@@ -194,42 +202,43 @@ export function startTimer(tx: Tx, ctx: AuthContext, input: unknown): StartTimer
   return { session, alreadyRunning: false, stopped };
 }
 
-function endTimer(tx: Tx, ctx: AuthContext, input: unknown, reason: "paused" | "stopped"): WorkSession {
+async function endTimer(tx: Tx, ctx: AuthContext, input: unknown, reason: "paused" | "stopped"): Promise<WorkSession> {
   const data = parseInput(EndTimerInput, input);
   const userId = ctx.userId;
   if (!userId) throw new ForbiddenError("timer.use");
 
   let session: WorkSession | undefined;
   if (data.sessionId) {
-    session = tx
-      .select()
-      .from(workSessions)
-      .where(and(eq(workSessions.id, data.sessionId), eq(workSessions.organisationId, ctx.organisationId)))
-      .get();
+    session = await first(
+      tx
+        .select()
+        .from(workSessions)
+        .where(and(eq(workSessions.id, data.sessionId), eq(workSessions.organisationId, ctx.organisationId))),
+    );
     if (!session || (data.jobId && session.jobId !== data.jobId)) throw new NotFoundError("Timer");
     if (session.userId !== userId) {
       // Someone else's timer: owners/managers only (and only on jobs they can see).
-      const { ref } = loadJobWithRef(tx, ctx, session.jobId);
+      const { ref } = await loadJobWithRef(tx, ctx, session.jobId);
       if (!isManagement(ctx) || !can(ctx, "timer.view_others", ref)) throw new ForbiddenError("timer.use");
     }
     if (session.endedAt) return session;
   } else {
-    session = runningForUser(tx, ctx.organisationId, userId);
+    session = await runningForUser(tx, ctx.organisationId, userId);
     if (!session || (data.jobId && session.jobId !== data.jobId)) throw new NotFoundError("Running timer");
   }
 
-  const closed = endSession(tx, ctx, session, reason, { note: data.note });
+  const closed = await endSession(tx, ctx, session, reason, { note: data.note });
   if (!closed) throw new ConflictError("The timer was already stopped. Reload and try again.");
   return closed;
 }
 
 /** Pauses the actor's running timer (`end_reason = paused`; resuming starts a new session). */
-export function pauseTimer(tx: Tx, ctx: AuthContext, input: unknown): WorkSession {
+export async function pauseTimer(tx: Tx, ctx: AuthContext, input: unknown): Promise<WorkSession> {
   return endTimer(tx, ctx, input, "paused");
 }
 
 /** Stops the actor's running timer (`end_reason = stopped`). */
-export function stopTimer(tx: Tx, ctx: AuthContext, input: unknown): WorkSession {
+export async function stopTimer(tx: Tx, ctx: AuthContext, input: unknown): Promise<WorkSession> {
   return endTimer(tx, ctx, input, "stopped");
 }
 
@@ -253,26 +262,36 @@ export interface CloseRunningSessionArgs extends CloseSessionOptions {
  * (`auto_status_change`), completion, cancellation and reassignment.
  * Accepts `(tx, ctx, jobId, reason, opts?)` or `(tx, ctx, { jobId, reason, ...opts })`.
  */
-export function closeSessionsForJob(tx: Tx, ctx: AuthContext, jobId: string, reason: SessionEndReason, opts?: CloseSessionOptions): WorkSession[];
-export function closeSessionsForJob(tx: Tx, ctx: AuthContext, args: CloseSessionsForJobArgs): WorkSession[];
 export function closeSessionsForJob(
+  tx: Tx,
+  ctx: AuthContext,
+  jobId: string,
+  reason: SessionEndReason,
+  opts?: CloseSessionOptions,
+): Promise<WorkSession[]>;
+export function closeSessionsForJob(tx: Tx, ctx: AuthContext, args: CloseSessionsForJobArgs): Promise<WorkSession[]>;
+export async function closeSessionsForJob(
   tx: Tx,
   ctx: AuthContext,
   jobIdOrArgs: string | CloseSessionsForJobArgs,
   reasonArg?: SessionEndReason,
   optsArg: CloseSessionOptions = {},
-): WorkSession[] {
+): Promise<WorkSession[]> {
   const { jobId, reason, ...opts } =
     typeof jobIdOrArgs === "string" ? { ...optsArg, jobId: jobIdOrArgs, reason: requireReason(reasonArg) } : jobIdOrArgs;
-  const open = tx
+  const open = await tx
     .select()
     .from(workSessions)
     .where(and(eq(workSessions.organisationId, ctx.organisationId), eq(workSessions.jobId, jobId), isNull(workSessions.endedAt)))
-    .orderBy(asc(workSessions.startedAt))
-    .all();
+    .orderBy(asc(workSessions.startedAt), asc(workSessions.id));
   if (open.length === 0) return [];
-  const job = jobLabel(tx, ctx, jobId);
-  return open.map((s) => endSession(tx, ctx, s, reason, { ...opts, job })).filter((s): s is WorkSession => s !== null);
+  const job = await jobLabel(tx, ctx, jobId);
+  const closed: WorkSession[] = [];
+  for (const s of open) {
+    const row = await endSession(tx, ctx, s, reason, { ...opts, job });
+    if (row) closed.push(row);
+  }
+  return closed;
 }
 
 function requireReason(reason: SessionEndReason | undefined): SessionEndReason {
@@ -291,18 +310,18 @@ export function closeRunningSessionForUser(
   userId: string,
   reason: SessionEndReason,
   opts?: CloseSessionOptions,
-): WorkSession | null;
-export function closeRunningSessionForUser(tx: Tx, ctx: AuthContext, args: CloseRunningSessionArgs): WorkSession | null;
-export function closeRunningSessionForUser(
+): Promise<WorkSession | null>;
+export function closeRunningSessionForUser(tx: Tx, ctx: AuthContext, args: CloseRunningSessionArgs): Promise<WorkSession | null>;
+export async function closeRunningSessionForUser(
   tx: Tx,
   ctx: AuthContext,
   userIdOrArgs: string | CloseRunningSessionArgs,
   reasonArg?: SessionEndReason,
   optsArg: CloseSessionOptions = {},
-): WorkSession | null {
+): Promise<WorkSession | null> {
   const { userId, reason, ...opts } =
     typeof userIdOrArgs === "string" ? { ...optsArg, userId: userIdOrArgs, reason: requireReason(reasonArg) } : userIdOrArgs;
-  const running = runningForUser(tx, ctx.organisationId, userId);
+  const running = await runningForUser(tx, ctx.organisationId, userId);
   if (!running) return null;
   return endSession(tx, ctx, running, reason, opts);
 }
@@ -312,28 +331,33 @@ export function closeRunningSessionForUser(
  * `work_session_auto_timeout_minutes` (`auto_timeout`), ended at
  * `started_at + timeout` (never later than now).
  */
-export function closeTimedOutSessions(tx: Tx, ctx: AuthContext, opts: { timeoutMinutes?: number } = {}): WorkSession[] {
+export async function closeTimedOutSessions(tx: Tx, ctx: AuthContext, opts: { timeoutMinutes?: number } = {}): Promise<WorkSession[]> {
   const timeoutMinutes =
     opts.timeoutMinutes ??
-    tx
-      .select({ minutes: organisationSettings.workSessionAutoTimeoutMinutes })
-      .from(organisationSettings)
-      .where(eq(organisationSettings.organisationId, ctx.organisationId))
-      .get()?.minutes ??
+    (
+      await first(
+        tx
+          .select({ minutes: organisationSettings.workSessionAutoTimeoutMinutes })
+          .from(organisationSettings)
+          .where(eq(organisationSettings.organisationId, ctx.organisationId))
+          .limit(1),
+      )
+    )?.minutes ??
     600;
   const now = ctx.now();
   const nowMs = Date.parse(now);
   const timeoutMs = timeoutMinutes * 60_000;
-  const open = tx
-    .select()
-    .from(workSessions)
-    .where(and(eq(workSessions.organisationId, ctx.organisationId), isNull(workSessions.endedAt)))
-    .all()
-    .filter((s) => nowMs - Date.parse(s.startedAt) > timeoutMs);
+  const open = (
+    await tx
+      .select()
+      .from(workSessions)
+      .where(and(eq(workSessions.organisationId, ctx.organisationId), isNull(workSessions.endedAt)))
+      .orderBy(asc(workSessions.startedAt), asc(workSessions.id))
+  ).filter((s) => nowMs - Date.parse(s.startedAt) > timeoutMs);
   const closed: WorkSession[] = [];
   for (const s of open) {
     const endedAt = new Date(Math.min(nowMs, Date.parse(s.startedAt) + timeoutMs)).toISOString();
-    const row = endSession(tx, ctx, s, "auto_timeout", { endedAt });
+    const row = await endSession(tx, ctx, s, "auto_timeout", { endedAt });
     if (row) closed.push(row);
   }
   return closed;
@@ -343,19 +367,16 @@ export function closeTimedOutSessions(tx: Tx, ctx: AuthContext, opts: { timeoutM
 /*  Reads                                                              */
 /* ------------------------------------------------------------------ */
 
-function toViews(db: DbLike, ctx: AuthContext, rows: readonly WorkSession[]): WorkSessionView[] {
+async function toViews(db: DbLike, ctx: AuthContext, rows: readonly WorkSession[]): Promise<WorkSessionView[]> {
   if (rows.length === 0) return [];
   const now = ctx.now();
-  const people = loadUserRefMap(db, ctx, rows.map((r) => r.userId));
+  const people = await loadUserRefMap(db, ctx, rows.map((r) => r.userId));
   const transitionIds = Array.from(new Set(rows.map((r) => r.transitionId)));
-  const names = new Map(
-    db
-      .select({ id: jobStatusTransitions.id, statusName: jobStatusTransitions.statusName })
-      .from(jobStatusTransitions)
-      .where(inArray(jobStatusTransitions.id, transitionIds))
-      .all()
-      .map((t) => [t.id, t.statusName]),
-  );
+  const transitions = await db
+    .select({ id: jobStatusTransitions.id, statusName: jobStatusTransitions.statusName })
+    .from(jobStatusTransitions)
+    .where(inArray(jobStatusTransitions.id, transitionIds));
+  const names = new Map(transitions.map((t) => [t.id, t.statusName]));
   return rows.map((r) => ({
     id: r.id,
     user: people.get(r.userId) ?? unknownUserRef(r.userId),
@@ -371,8 +392,8 @@ function toViews(db: DbLike, ctx: AuthContext, rows: readonly WorkSession[]): Wo
 }
 
 /** Sessions on a job the actor may see (all with `timer.view_others`, else their own), newest first. */
-function visibleSessions(db: DbLike, ctx: AuthContext, jobId: string): WorkSession[] {
-  const { job, ref } = loadJobWithRef(db, ctx, jobId);
+async function visibleSessions(db: DbLike, ctx: AuthContext, jobId: string): Promise<WorkSession[]> {
+  const { job, ref } = await loadJobWithRef(db, ctx, jobId);
   assertCan(ctx, "job.view", ref);
   const seeAll = can(ctx, "timer.view_others", ref);
   if (!seeAll && !ctx.userId) return [];
@@ -386,33 +407,37 @@ function visibleSessions(db: DbLike, ctx: AuthContext, jobId: string): WorkSessi
         seeAll || !ctx.userId ? undefined : eq(workSessions.userId, ctx.userId),
       ),
     )
-    .orderBy(desc(workSessions.startedAt), desc(workSessions.id))
-    .all();
+    .orderBy(desc(workSessions.startedAt), desc(workSessions.id));
 }
 
 /** The job's Time tab: sessions newest first (others' only with `timer.view_others`). */
-export function listSessions(db: DbLike, ctx: AuthContext, jobId: string): WorkSessionView[] {
-  return toViews(db, ctx, visibleSessions(db, ctx, jobId));
+export async function listSessions(db: DbLike, ctx: AuthContext, jobId: string): Promise<WorkSessionView[]> {
+  return toViews(db, ctx, await visibleSessions(db, ctx, jobId));
 }
 
 /**
  * `userId`'s running timer with its job (default: the actor). Another
  * user's timer requires owner/manager. Null when none is running.
  */
-export function runningSessionFor(db: DbLike, ctx: AuthContext, userId: string | null = ctx.userId): RunningSessionView | null {
+export async function runningSessionFor(
+  db: DbLike,
+  ctx: AuthContext,
+  userId: string | null = ctx.userId,
+): Promise<RunningSessionView | null> {
   if (!userId) return null;
   if (userId !== ctx.userId && !isManagement(ctx) && !ctx.isSystem) throw new ForbiddenError("timer.view_others");
-  const running = runningForUser(db, ctx.organisationId, userId);
+  const running = await runningForUser(db, ctx.organisationId, userId);
   if (!running) return null;
-  const job = jobLabel(db, ctx, running.jobId);
+  const job = await jobLabel(db, ctx, running.jobId);
   if (!job) return null;
-  const [view] = toViews(db, ctx, [running]);
+  const [view] = await toViews(db, ctx, [running]);
   return { ...view, job: { id: job.id, jobNumber: job.jobNumber, name: job.name } };
 }
 
 /** Totals for a job's visible sessions; running sessions count up to now. */
-export function sessionTotals(db: DbLike, ctx: AuthContext, jobId: string): SessionTotals {
-  const views = toViews(db, ctx, visibleSessions(db, ctx, jobId));
+export async function sessionTotals(db: DbLike, ctx: AuthContext, jobId: string): Promise<SessionTotals> {
+  const views = await toViews(db, ctx, await visibleSessions(db, ctx, jobId));
+
   const byUser = new Map<string, { user: WorkSessionView["user"]; seconds: number }>();
   const byCategory: Partial<Record<StatusCategory, number>> = {};
   let totalSeconds = 0;

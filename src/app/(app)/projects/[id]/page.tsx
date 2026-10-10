@@ -50,7 +50,7 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
   guard(ctx, "project.view");
   const { id } = await params;
   const tz = ctx.settings.timezone;
-  const detail = load(() => getProjectDetail(db, ctx, id));
+  const detail = await load(() => getProjectDetail(db, ctx, id));
   const { project, client, counts } = detail;
   const viewer = await getViewer();
   const resource = { organisationId: ctx.organisationId, createdByUserId: project.createdByUserId ?? undefined };
@@ -58,9 +58,9 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
   const canArchive = allowed(ctx, "project.archive", resource);
   const canAddJob = allowed(ctx, "job.create") && !project.archivedAt;
   const canSeeActivity = allowed(ctx, "activity.view_global");
-  const activity = canSeeActivity ? load(() => listActivity(db, ctx, { projectId: project.id, limit: ACTIVITY_PREVIEW })) : null;
-  const people: Record<string, string> = canSeeActivity ? Object.fromEntries(load(() => listUsers(db, ctx)).map((u) => [u.id, u.name])) : {};
-  const clientOptions = canEdit ? load(() => getClientOptions(db, ctx)) : [];
+  const activity = canSeeActivity ? await load(() => listActivity(db, ctx, { projectId: project.id, limit: ACTIVITY_PREVIEW })) : null;
+  const people: Record<string, string> = canSeeActivity ? Object.fromEntries((await load(() => listUsers(db, ctx))).map((u) => [u.id, u.name])) : {};
+  const clientOptions = canEdit ? await load(() => getClientOptions(db, ctx)) : [];
   if (canEdit && !clientOptions.some((c) => c.id === client.id)) clientOptions.unshift({ id: client.id, name: client.name, colour: "#64748b" });
   const groups = groupByType(detail.jobs);
   const addJobHref = `/jobs/new?projectId=${project.id}`;

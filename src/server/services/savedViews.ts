@@ -16,8 +16,8 @@ import { CreateSavedViewInput, DeleteSavedViewInput, UpdateSavedViewInput } from
 import { recordEvent } from "@/server/audit";
 import { assertCan, can } from "@/server/auth/permissions";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
-import { loadSavedViewInOrg, parseInput, type DbLike, type Tx } from "./_shared";
-import { checkVersion, ruleViolation } from "./_admin";
+import { loadSavedViewInOrg, one, parseInput, type DbLike, type Tx } from "./_shared";
+import { checkVersion, jsonEqual, ruleViolation } from "./_admin";
 
 function actorOf(ctx: AuthContext): string {
   if (!ctx.userId || ctx.isSystem) throw new ForbiddenError("saved_view.manage");
@@ -45,8 +45,8 @@ function assertCanModify(ctx: AuthContext, view: SavedView): void {
   throw new ForbiddenError("saved_view.manage");
 }
 
-function clearDefault(tx: Tx, ctx: AuthContext, ownerUserId: string, scope: SavedViewScope, exceptId: string | null): void {
-  const rows = tx
+async function clearDefault(tx: Tx, ctx: AuthContext, ownerUserId: string, scope: SavedViewScope, exceptId: string | null): Promise<void> {
+  const rows = await tx
     .select()
     .from(savedViews)
     .where(
@@ -59,9 +59,12 @@ function clearDefault(tx: Tx, ctx: AuthContext, ownerUserId: string, scope: Save
         exceptId ? ne(savedViews.id, exceptId) : undefined,
       ),
     )
-    .all();
+    .orderBy(asc(savedViews.id));
   for (const r of rows) {
-    tx.update(savedViews).set({ isDefault: false, updatedAt: ctx.now(), version: r.version + 1 }).where(eq(savedViews.id, r.id)).run();
+    await tx
+      .update(savedViews)
+      .set({ isDefault: false, updatedAt: ctx.now(), version: r.version + 1 })
+      .where(eq(savedViews.id, r.id));
   }
 }
 
@@ -70,7 +73,7 @@ function snapshot(v: SavedView) {
 }
 
 /** The actor's own views plus views shared in the organisation (non-archived), optionally for one scope. */
-export function listSavedViews(db: DbLike, ctx: AuthContext, scope?: SavedViewScope): SavedView[] {
+export async function listSavedViews(db: DbLike, ctx: AuthContext, scope?: SavedViewScope): Promise<SavedView[]> {
   const me = actorOf(ctx);
   return db
     .select()
@@ -83,33 +86,33 @@ export function listSavedViews(db: DbLike, ctx: AuthContext, scope?: SavedViewSc
         scope ? eq(savedViews.scope, scope) : undefined,
       ),
     )
-    .orderBy(asc(savedViews.scope), asc(savedViews.name))
-    .all();
+    .orderBy(asc(savedViews.scope), asc(savedViews.name), asc(savedViews.id));
 }
 
-export function createSavedView(tx: Tx, ctx: AuthContext, input: unknown): SavedView {
+export async function createSavedView(tx: Tx, ctx: AuthContext, input: unknown): Promise<SavedView> {
   const me = actorOf(ctx);
   assertCan(ctx, "saved_view.manage", { userId: me, organisationId: ctx.organisationId });
   const data = parseInput(CreateSavedViewInput, input);
   if (data.isShared) assertCan(ctx, "saved_view.share");
-  if (data.isDefault) clearDefault(tx, ctx, me, data.scope, null);
+  if (data.isDefault) await clearDefault(tx, ctx, me, data.scope, null);
   const now = ctx.now();
-  const row = tx
-    .insert(savedViews)
-    .values({
-      organisationId: ctx.organisationId,
-      ownerUserId: me,
-      name: data.name,
-      scope: data.scope,
-      config: data.config,
-      isShared: data.isShared ?? false,
-      isDefault: data.isDefault ?? false,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .insert(savedViews)
+      .values({
+        organisationId: ctx.organisationId,
+        ownerUserId: me,
+        name: data.name,
+        scope: data.scope,
+        config: data.config,
+        isShared: data.isShared ?? false,
+        isDefault: data.isDefault ?? false,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "saved_view",
     entityId: row.id,
     eventType: "saved_view.created",
@@ -121,10 +124,10 @@ export function createSavedView(tx: Tx, ctx: AuthContext, input: unknown): Saved
   return row;
 }
 
-export function updateSavedView(tx: Tx, ctx: AuthContext, input: unknown): SavedView {
+export async function updateSavedView(tx: Tx, ctx: AuthContext, input: unknown): Promise<SavedView> {
   actorOf(ctx);
   const data = parseInput(UpdateSavedViewInput, input);
-  const view = loadSavedViewInOrg(tx, ctx, data.viewId);
+  const view = await loadSavedViewInOrg(tx, ctx, data.viewId);
   assertVisible(ctx, view);
   if (view.archivedAt) throw ruleViolation("This view was deleted");
   assertCanModify(ctx, view);
@@ -134,21 +137,22 @@ export function updateSavedView(tx: Tx, ctx: AuthContext, input: unknown): Saved
 
   const set: Partial<SavedView> = {};
   if (data.name !== undefined && data.name !== view.name) set.name = data.name;
-  if (data.config !== undefined && JSON.stringify(data.config) !== JSON.stringify(view.config)) set.config = data.config;
+  if (data.config !== undefined && !jsonEqual(data.config, view.config)) set.config = data.config;
   if (data.isShared !== undefined && data.isShared !== view.isShared) set.isShared = data.isShared;
   if (data.isDefault !== undefined && data.isDefault !== view.isDefault) set.isDefault = data.isDefault;
   if (Object.keys(set).length === 0) return view;
-  if (set.isDefault) clearDefault(tx, ctx, view.ownerUserId, view.scope, view.id);
+  if (set.isDefault) await clearDefault(tx, ctx, view.ownerUserId, view.scope, view.id);
 
-  const row = tx
-    .update(savedViews)
-    .set({ ...set, updatedAt: ctx.now(), version: view.version + 1 })
-    .where(eq(savedViews.id, view.id))
-    .returning()
-    .get();
+  const row = await one(
+    tx
+      .update(savedViews)
+      .set({ ...set, updatedAt: ctx.now(), version: view.version + 1 })
+      .where(eq(savedViews.id, view.id))
+      .returning(),
+  );
   const prev: Record<string, unknown> = {};
   for (const k of Object.keys(set) as (keyof SavedView)[]) prev[k] = view[k];
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "saved_view",
     entityId: view.id,
     eventType: "saved_view.updated",
@@ -161,22 +165,23 @@ export function updateSavedView(tx: Tx, ctx: AuthContext, input: unknown): Saved
 }
 
 /** Soft delete (archived_at); audited as saved_view.deleted. */
-export function deleteSavedView(tx: Tx, ctx: AuthContext, input: unknown): SavedView {
+export async function deleteSavedView(tx: Tx, ctx: AuthContext, input: unknown): Promise<SavedView> {
   actorOf(ctx);
   const data = parseInput(DeleteSavedViewInput, input);
-  const view = loadSavedViewInOrg(tx, ctx, data.viewId);
+  const view = await loadSavedViewInOrg(tx, ctx, data.viewId);
   assertVisible(ctx, view);
   if (view.archivedAt) throw ruleViolation("This view was already deleted");
   assertCanModify(ctx, view);
   checkVersion(view, data.expectedVersion, view);
   const now = ctx.now();
-  const row = tx
-    .update(savedViews)
-    .set({ archivedAt: now, isDefault: false, updatedAt: now, version: view.version + 1 })
-    .where(eq(savedViews.id, view.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(savedViews)
+      .set({ archivedAt: now, isDefault: false, updatedAt: now, version: view.version + 1 })
+      .where(eq(savedViews.id, view.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "saved_view",
     entityId: view.id,
     eventType: "saved_view.deleted",

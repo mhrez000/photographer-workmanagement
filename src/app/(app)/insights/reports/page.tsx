@@ -69,9 +69,9 @@ export default async function ReportsPage({ searchParams }: PageProps<"/insights
   const kindParam = param(sp, "kind");
   const kind: ReportKind = isKind(kindParam) ? kindParam : "production";
   const rangeInput = rangeFromParams(sp, DEFAULT_PRESET);
-  const report = load(() => getReport(db, ctx, kind, rangeInput));
-  const overview = (kind === "production" || kind === "business") && allowed(ctx, "analytics.view") ? load(() => getAnalyticsOverview(db, ctx, report.range)) : null;
-  const bottlenecks = kind === "business" && allowed(ctx, "bottlenecks.view") ? load(() => getBottlenecks(db, ctx)) : null;
+  const report = await load(() => getReport(db, ctx, kind, rangeInput));
+  const overview = (kind === "production" || kind === "business") && allowed(ctx, "analytics.view") ? await load(() => getAnalyticsOverview(db, ctx, report.range)) : null;
+  const bottlenecks = kind === "business" && allowed(ctx, "bottlenecks.view") ? await load(() => getBottlenecks(db, ctx)) : null;
 
   const qs = new URLSearchParams(Object.entries(rangeInput).filter((e): e is [string, string] => typeof e[1] === "string"));
   const tabHref = (k: ReportKind) => {
@@ -192,7 +192,7 @@ export default async function ReportsPage({ searchParams }: PageProps<"/insights
 
 type Tile = Pick<StatTileProps, "label" | "value" | "sub" | "tone" | "icon" | "href">;
 
-function summaryTiles(kind: ReportKind, report: Report, overview: ReturnType<typeof getAnalyticsOverview> | null, bottlenecks: number | null): Tile[] {
+function summaryTiles(kind: ReportKind, report: Report, overview: Awaited<ReturnType<typeof getAnalyticsOverview>> | null, bottlenecks: number | null): Tile[] {
   const t = report.totals ?? {};
   const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v)}%`);
   const onTimeTone = (v: number | null): Tile["tone"] => (v === null ? "default" : v >= 85 ? "success" : v < 70 ? "attention" : "default");

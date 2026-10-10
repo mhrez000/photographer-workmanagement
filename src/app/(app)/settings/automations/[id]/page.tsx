@@ -111,8 +111,8 @@ export default async function AutomationDetailPage({ params }: PageProps<"/setti
   const { id } = await params;
   const tz = ctx.settings.timezone;
   const isNew = id === "new";
-  const rule = isNew ? null : load(() => getAutomationDetail(db, ctx, id));
-  const { users, jobTypes, clients, lookup } = loadAutomationLookups(db, ctx);
+  const rule = isNew ? null : await load(() => getAutomationDetail(db, ctx, id));
+  const { users, jobTypes, clients, lookup } = await loadAutomationLookups(db, ctx);
   const canSeeRuns = allowed(ctx, "automation.view_runs");
 
   return (

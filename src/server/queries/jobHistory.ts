@@ -17,31 +17,28 @@ import { loadStatusRefs, loadUserRefs, loadVisibleJob } from "./scope";
 import { getJobTimelineRow } from "./timeline";
 
 /** All transitions of a job (org-scoped), by sequence. */
-export function loadTransitions(db: DbLike, ctx: AuthContext, jobId: string): JobStatusTransition[] {
+export async function loadTransitions(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobStatusTransition[]> {
   return db
     .select()
     .from(jobStatusTransitions)
     .where(and(eq(jobStatusTransitions.organisationId, ctx.organisationId), eq(jobStatusTransitions.jobId, jobId)))
-    .orderBy(asc(jobStatusTransitions.sequence))
-    .all();
+    .orderBy(asc(jobStatusTransitions.sequence));
 }
 
 /** Tracked seconds per transition id (running sessions count up to `now`). */
-export function activeSecondsByTransition(db: DbLike, ctx: AuthContext, transitionIds: readonly string[], now: string): Map<string, number> {
+export async function activeSecondsByTransition(db: DbLike, ctx: AuthContext, transitionIds: readonly string[], now: string): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (transitionIds.length === 0) return out;
-  const closed = db
-    .select({ transitionId: workSessions.transitionId, total: sql<number>`coalesce(sum(${workSessions.durationSeconds}), 0)` })
+  const closed = await db
+    .select({ transitionId: workSessions.transitionId, total: sql<number>`coalesce(sum(${workSessions.durationSeconds}), 0)`.mapWith(Number) })
     .from(workSessions)
     .where(and(eq(workSessions.organisationId, ctx.organisationId), inArray(workSessions.transitionId, [...transitionIds])))
-    .groupBy(workSessions.transitionId)
-    .all();
+    .groupBy(workSessions.transitionId);
   for (const r of closed) out.set(r.transitionId, Number(r.total));
-  const running = db
+  const running = await db
     .select({ transitionId: workSessions.transitionId, startedAt: workSessions.startedAt })
     .from(workSessions)
-    .where(and(eq(workSessions.organisationId, ctx.organisationId), inArray(workSessions.transitionId, [...transitionIds]), isNull(workSessions.endedAt)))
-    .all();
+    .where(and(eq(workSessions.organisationId, ctx.organisationId), inArray(workSessions.transitionId, [...transitionIds]), isNull(workSessions.endedAt)));
   for (const r of running) out.set(r.transitionId, (out.get(r.transitionId) ?? 0) + durationSeconds(r.startedAt, null, now));
   return out;
 }
@@ -51,18 +48,18 @@ function fallbackStatusRef(id: string, name: string, category: StatusRef["catego
 }
 
 /** Maps transitions to StageViews (status refs, people, tracked seconds). */
-export function toStageViews(db: DbLike, ctx: AuthContext, transitions: readonly JobStatusTransition[], now: string = ctx.now()): StageView[] {
-  const statuses = loadStatusRefs(
+export async function toStageViews(db: DbLike, ctx: AuthContext, transitions: readonly JobStatusTransition[], now: string = ctx.now()): Promise<StageView[]> {
+  const statuses = await loadStatusRefs(
     db,
     ctx,
     transitions.flatMap((t) => [t.fromStatusId, t.toStatusId]),
   );
-  const users = loadUserRefs(
+  const users = await loadUserRefs(
     db,
     ctx,
     transitions.flatMap((t) => [t.actorUserId, t.editorIdAtEntry, t.photographerIdAtEntry]),
   );
-  const active = activeSecondsByTransition(
+  const active = await activeSecondsByTransition(
     db,
     ctx,
     transitions.map((t) => t.id),
@@ -92,15 +89,15 @@ export function toStageViews(db: DbLike, ctx: AuthContext, transitions: readonly
 }
 
 /** StageViews for a job already loaded + permission-checked by the caller. */
-export function loadStageViews(db: DbLike, ctx: AuthContext, job: Pick<Job, "id">, now: string = ctx.now()): StageView[] {
-  return toStageViews(db, ctx, loadTransitions(db, ctx, job.id), now);
+export async function loadStageViews(db: DbLike, ctx: AuthContext, job: Pick<Job, "id">, now: string = ctx.now()): Promise<StageView[]> {
+  return toStageViews(db, ctx, await loadTransitions(db, ctx, job.id), now);
 }
 
 /**
  * Stages + milestone events merged oldest → newest (stage first on equal
  * timestamps). Ties inside each kind fall back to an insertion key — the
  * transition `sequence` for stages, the input position for events (which
- * `jobEvents` returns in rowid = insertion order) — never to the random id,
+ * `jobEvents` returns in `rowid` = insertion order) — never to the random id,
  * so e.g. `assignment.ended` always precedes the `assignment.created` written
  * in the same millisecond.
  */
@@ -114,21 +111,22 @@ export function mergeHistory(stages: readonly StageView[], events: readonly Acti
 }
 
 /** History tab: stages + milestone events (HISTORY_EVENT_TYPES), management events redacted per role. */
-export function getJobHistory(db: DbLike, ctx: AuthContext, jobId: string): HistoryEntry[] {
-  const { job } = loadVisibleJob(db, ctx, jobId, "job.view_history");
-  const stages = loadStageViews(db, ctx, job);
-  const events = jobEvents(db, ctx, job.id, HISTORY_EVENT_TYPES);
+export async function getJobHistory(db: DbLike, ctx: AuthContext, jobId: string): Promise<HistoryEntry[]> {
+  const { job } = await loadVisibleJob(db, ctx, jobId, "job.view_history");
+  const stages = await loadStageViews(db, ctx, job);
+  const events = await jobEvents(db, ctx, job.id, HISTORY_EVENT_TYPES);
   return mergeHistory(stages, events);
 }
 
 /** Activity tab: every event of the job, newest first, cursor-paginated (input as listActivity minus jobId). */
-export function getJobActivity(db: DbLike, ctx: AuthContext, jobId: string, input: unknown = {}): Paginated<ActivityFeedItem> {
-  const { job } = loadVisibleJob(db, ctx, jobId, "job.view_history");
+export async function getJobActivity(db: DbLike, ctx: AuthContext, jobId: string, input: unknown = {}): Promise<Paginated<ActivityFeedItem>> {
+  const { job } = await loadVisibleJob(db, ctx, jobId, "job.view_history");
   const base = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   return listActivity(db, ctx, { ...base, jobId: job.id });
 }
 
 /** Timeline tab: one row with every stage bar of the job. */
-export function getJobTimeline(db: DbLike, ctx: AuthContext, jobId: string): TimelineRow {
+export async function getJobTimeline(db: DbLike, ctx: AuthContext, jobId: string): Promise<TimelineRow> {
+
   return getJobTimelineRow(db, ctx, jobId);
 }

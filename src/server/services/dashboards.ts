@@ -14,7 +14,7 @@ import { PutDashboardLayoutInput } from "@/lib/validation/views";
 import { recordEvent } from "@/server/audit";
 import { assertCan, can } from "@/server/auth/permissions";
 import { ConflictError, ForbiddenError } from "@/server/errors";
-import { parseInput, type DbLike, type Tx } from "./_shared";
+import { first, one, parseInput, type DbLike, type Tx } from "./_shared";
 import { ruleViolation } from "./_admin";
 
 type Widget = DashboardLayout["widgets"][number];
@@ -69,7 +69,16 @@ export function defaultLayoutFor(role: Role): DashboardLayout {
 
 /** Widget types this actor may place (data behind each widget must be visible to them). */
 export function allowedWidgetTypes(ctx: AuthContext): Set<DashboardWidgetType> {
-  const allowed = new Set<DashboardWidgetType>(["kpis", "my_workload", "due_today", "overdue", "recent_activity", "calendar", "recent_completed", "my_performance"]);
+  const allowed = new Set<DashboardWidgetType>([
+    "kpis",
+    "my_workload",
+    "due_today",
+    "overdue",
+    "recent_activity",
+    "calendar",
+    "recent_completed",
+    "my_performance",
+  ]);
   if (can(ctx, "workloads.view_team")) allowed.add("team_workload");
   if (can(ctx, "performance.view")) allowed.add("editor_performance");
   if (can(ctx, "analytics.view")) {
@@ -93,15 +102,16 @@ function actorOf(ctx: AuthContext): string {
 }
 
 /** The actor's layout, or the role default (filtered to widgets they may see). */
-export function getDashboardLayout(db: DbLike, ctx: AuthContext): DashboardLayoutView {
+export async function getDashboardLayout(db: DbLike, ctx: AuthContext): Promise<DashboardLayoutView> {
   const me = actorOf(ctx);
   assertCan(ctx, "dashboard.customise", { userId: me, organisationId: ctx.organisationId });
   const allowed = allowedWidgetTypes(ctx);
-  const row = db
-    .select()
-    .from(dashboardLayouts)
-    .where(and(eq(dashboardLayouts.userId, me), eq(dashboardLayouts.organisationId, ctx.organisationId)))
-    .get();
+  const row = await first(
+    db
+      .select()
+      .from(dashboardLayouts)
+      .where(and(eq(dashboardLayouts.userId, me), eq(dashboardLayouts.organisationId, ctx.organisationId))),
+  );
   const fallback = defaultLayoutFor(ctx.role);
   const layout = row ? parseJsonColumn(DashboardLayoutSchema, row.layout, fallback) : fallback;
   return {
@@ -112,7 +122,7 @@ export function getDashboardLayout(db: DbLike, ctx: AuthContext): DashboardLayou
 }
 
 /** Saves the actor's layout (upsert). `expectedVersion` 0 = "no row yet". */
-export function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknown): DashboardLayoutView {
+export async function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknown): Promise<DashboardLayoutView> {
   const me = actorOf(ctx);
   assertCan(ctx, "dashboard.customise", { userId: me, organisationId: ctx.organisationId });
   const data = parseInput(PutDashboardLayoutInput, input);
@@ -120,25 +130,22 @@ export function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknown): Da
   const forbidden = Array.from(new Set(data.layout.widgets.map((x) => x.type).filter((t) => !allowed.has(t))));
   if (forbidden.length > 0) throw ruleViolation(`These widgets are not available to you: ${forbidden.join(", ")}`, { forbidden }, "layout");
 
-  const row = tx.select().from(dashboardLayouts).where(eq(dashboardLayouts.userId, me)).get();
+  const row = await first(tx.select().from(dashboardLayouts).where(eq(dashboardLayouts.userId, me)));
   if (data.expectedVersion !== undefined && (row?.version ?? 0) !== data.expectedVersion) {
     throw new ConflictError(undefined, row ? { layout: row.layout, version: row.version } : { layout: defaultLayoutFor(ctx.role), version: 0 });
   }
   const now = ctx.now();
   const previous = row ? row.layout : null;
   const saved = row
-    ? tx
-        .update(dashboardLayouts)
-        .set({ layout: data.layout, updatedAt: now, version: row.version + 1 })
-        .where(eq(dashboardLayouts.id, row.id))
-        .returning()
-        .get()
-    : tx
-        .insert(dashboardLayouts)
-        .values({ organisationId: ctx.organisationId, userId: me, layout: data.layout, updatedAt: now })
-        .returning()
-        .get();
-  recordEvent(tx, ctx, {
+    ? await one(
+        tx
+          .update(dashboardLayouts)
+          .set({ layout: data.layout, updatedAt: now, version: row.version + 1 })
+          .where(eq(dashboardLayouts.id, row.id))
+          .returning(),
+      )
+    : await one(tx.insert(dashboardLayouts).values({ organisationId: ctx.organisationId, userId: me, layout: data.layout, updatedAt: now }).returning());
+  await recordEvent(tx, ctx, {
     entityType: "dashboard",
     entityId: saved.id,
     eventType: "dashboard.updated",
@@ -151,7 +158,7 @@ export function putDashboardLayout(tx: Tx, ctx: AuthContext, input: unknown): Da
 }
 
 /** Restores the role default (saved as the user's row so the change is audited). */
-export function resetDashboardLayout(tx: Tx, ctx: AuthContext): DashboardLayoutView {
+export async function resetDashboardLayout(tx: Tx, ctx: AuthContext): Promise<DashboardLayoutView> {
   const allowed = allowedWidgetTypes(ctx);
   const layout = defaultLayoutFor(ctx.role);
   return putDashboardLayout(tx, ctx, { layout: { widgets: layout.widgets.filter((x) => allowed.has(x.type)) } });

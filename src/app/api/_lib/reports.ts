@@ -4,8 +4,8 @@ import { getReport, reportFileName, toCsv } from "@/server/queries/reports";
 import { one } from "./route";
 
 /** A report as JSON (`{ data }` via the route factory) or, with `format=csv`, a text/csv attachment. */
-export function reportResponse(db: DbLike, ctx: AuthContext, kind: string, q: Record<string, string | string[]>): unknown {
-  const report = getReport(db, ctx, kind, q);
+export async function reportResponse(db: DbLike, ctx: AuthContext, kind: string, q: Record<string, string | string[]>): Promise<unknown> {
+  const report = await getReport(db, ctx, kind, q);
   if (one(q, "format") !== "csv") return report;
   return new Response(toCsv(report, ctx.settings.timezone), {
     status: 200,

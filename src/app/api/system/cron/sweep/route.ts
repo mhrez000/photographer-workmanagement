@@ -11,13 +11,13 @@ import { methodNotAllowed } from "@/app/api/_lib/route";
  * editor unavailable, session timeouts, pending automations) for every org.
  * GET is accepted because common schedulers (e.g. Vercel Cron) only send GET.
  */
-function run(req: Request): Response {
+async function run(req: Request): Promise<Response> {
   const secret = cronSecret();
   if (!secret) return errorJson(404, { code: "not_found", message: "Scheduler endpoint is disabled (CRON_SECRET not set)" });
   if (!isAuthorisedCronRequest(req.headers.get("authorization"), secret)) {
     return errorJson(401, { code: "unauthorized", message: "Invalid scheduler credentials" });
   }
-  return json(sweepAllOrganisations(getDb()));
+  return json(await sweepAllOrganisations(getDb()));
 }
 
 export const GET = run;

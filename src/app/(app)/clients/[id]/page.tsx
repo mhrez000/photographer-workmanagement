@@ -30,7 +30,7 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
   guard(ctx, "client.view");
   const { id } = await params;
   const tz = ctx.settings.timezone;
-  const detail = load(() => getClientDetail(db, ctx, id));
+  const detail = await load(() => getClientDetail(db, ctx, id));
   const { client, counts } = detail;
   const resource = { organisationId: ctx.organisationId, createdByUserId: client.createdByUserId ?? undefined };
   const canEdit = allowed(ctx, "client.edit", resource);
@@ -38,8 +38,8 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
   const canCreateProject = allowed(ctx, "project.create") && !client.archivedAt;
   const canCreateJob = allowed(ctx, "job.create") && !client.archivedAt;
   const canSeeActivity = allowed(ctx, "activity.view_global");
-  const activity = canSeeActivity ? load(() => listActivity(db, ctx, { clientId: client.id, limit: ACTIVITY_PREVIEW })) : null;
-  const people: Record<string, string> = canSeeActivity ? Object.fromEntries(load(() => listUsers(db, ctx)).map((u) => [u.id, u.name])) : {};
+  const activity = canSeeActivity ? await load(() => listActivity(db, ctx, { clientId: client.id, limit: ACTIVITY_PREVIEW })) : null;
+  const people: Record<string, string> = canSeeActivity ? Object.fromEntries((await load(() => listUsers(db, ctx))).map((u) => [u.id, u.name])) : {};
   const activeProjects = detail.projects.filter((p) => !p.project.archivedAt);
   const archivedProjects = detail.projects.filter((p) => p.project.archivedAt);
 

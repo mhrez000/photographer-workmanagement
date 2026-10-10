@@ -9,10 +9,10 @@
  * - `withdrawRevision` = back to the status the revision was requested from
  *   (from_status_id of its request transition), resolution "withdrawn"
  *
- * Every function is synchronous (better-sqlite3 transactions).
+ * Every function is async (Postgres); callers await them inside one `withTx`.
  */
 import { and, eq, isNull } from "drizzle-orm";
-import type { Tx } from "@/db/index";
+import { first, type Tx } from "@/db/index";
 import { jobRevisions, jobStatusTransitions } from "@/db/schema";
 import type { AuthContext, JobRevision } from "@/lib/types";
 import { optionalDeadlineToIso } from "@/lib/validation/jobs";
@@ -37,18 +37,18 @@ export interface RevisionTransitionResult extends TransitionResult {
   revision: JobRevision;
 }
 
-function loadRevision(tx: Tx, id: string): JobRevision {
-  const row = tx.select().from(jobRevisions).where(eq(jobRevisions.id, id)).get();
+async function loadRevision(tx: Tx, id: string): Promise<JobRevision> {
+  const row = await first(tx.select().from(jobRevisions).where(eq(jobRevisions.id, id)));
   if (!row) throw new NotFoundError("Revision");
   return row;
 }
 
 /** `POST /api/jobs/:id/revisions` — request revision #n (job moves to a revision status). */
-export function requestRevision(tx: Tx, ctx: AuthContext, input: unknown): RevisionTransitionResult {
+export async function requestRevision(tx: Tx, ctx: AuthContext, input: unknown): Promise<RevisionTransitionResult> {
   const p = parseInput(RequestRevisionInput, input);
-  const { job } = loadVisibleJob(tx, ctx, p.jobId);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
-  const target = resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: "revision" });
+  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: "revision" });
   if (target.category !== "revision") {
     throw new ValidationError("That status is not a revision status", { formErrors: [], fieldErrors: { toStatusId: ["Wrong category"] } });
   }
@@ -57,9 +57,9 @@ export function requestRevision(tx: Tx, ctx: AuthContext, input: unknown): Revis
   void _jobId;
   void _version;
   void _toStatusId;
-  const result = applyMove(tx, ctx, job, target, graph, { mode: "user", revision: payload, reason: payload.reason });
+  const result = await applyMove(tx, ctx, job, target, graph, { mode: "user", revision: payload, reason: payload.reason });
   if (!result.revisionId) throw new ValidationError("No revision was created");
-  return { ...result, revision: loadRevision(tx, result.revisionId) };
+  return { ...result, revision: await loadRevision(tx, result.revisionId) };
 }
 
 export interface UpdateRevisionResult {
@@ -77,10 +77,10 @@ export interface UpdateRevisionResult {
  * the stage, re-points this revision and sends the new editor the mandatory
  * `revision_requested` notice. Nobody is ever told about a job they cannot open.
  */
-export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): UpdateRevisionResult {
+export async function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateRevisionResult> {
   const p = parseInput(UpdateRevisionInput, input);
-  let revision = loadRevisionInOrg(tx, ctx, p.revisionId);
-  const { job, ref } = loadVisibleJob(tx, ctx, revision.jobId);
+  let revision = await loadRevisionInOrg(tx, ctx, p.revisionId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, revision.jobId);
   assertCan(ctx, "revision.request", ref);
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is closed and can no longer be edited");
 
@@ -90,15 +90,15 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
   const changed: string[] = [];
   if (p.assigneeUserId !== undefined && p.assigneeUserId !== revision.assigneeUserId) {
     if (p.assigneeUserId) {
-      const user = loadUserInOrg(tx, ctx, p.assigneeUserId);
+      const user = await loadUserInOrg(tx, ctx, p.assigneeUserId);
       if (!user.isActive) throw new ValidationError(`${user.name} is deactivated`);
       if (user.role !== "editor") throw new ValidationError(`${user.name} is not an editor`);
     }
     if (p.assigneeUserId && p.assigneeUserId !== job.editorId) {
       // Hand the JOB over (stage re-attribution + revision re-point + notices).
       assertCan(ctx, "job.assign_editor", ref);
-      assignEditorToJob(tx, ctx, job, p.assigneeUserId, { reason: "Revision assignee changed" });
-      revision = loadRevision(tx, revision.id);
+      await assignEditorToJob(tx, ctx, job, p.assigneeUserId, { reason: "Revision assignee changed" });
+      revision = await loadRevision(tx, revision.id);
       changed.push("assigneeUserId");
     } else {
       patch.assigneeUserId = p.assigneeUserId;
@@ -120,14 +120,15 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
     next[k] = patch[k];
   }
 
-  const updated = tx
-    .update(jobRevisions)
-    .set(patch)
-    .where(and(eq(jobRevisions.id, revision.id), isNull(jobRevisions.resolvedAt)))
-    .returning()
-    .get();
+  const updated = await first(
+    tx
+      .update(jobRevisions)
+      .set(patch)
+      .where(and(eq(jobRevisions.id, revision.id), isNull(jobRevisions.resolvedAt)))
+      .returning(),
+  );
   if (!updated) throw new ValidationError("This revision is closed and can no longer be edited");
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "revision",
     entityId: revision.id,
     jobId: job.id,
@@ -138,7 +139,7 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
     metadata: jobEventMeta(job, { revisionId: revision.id, revisionNumber: revision.revisionNumber }),
   });
   if (patch.assigneeUserId) {
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [patch.assigneeUserId],
       type: "revision_requested",
       title: `Revision #${revision.revisionNumber} on ${job.jobNumber} is assigned to you`,
@@ -152,22 +153,22 @@ export function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): Update
 }
 
 /** `POST /api/revisions/:id/resolve` — the editor resubmits (revision → resubmitted). */
-export function resolveRevision(tx: Tx, ctx: AuthContext, input: unknown): RevisionTransitionResult {
+export async function resolveRevision(tx: Tx, ctx: AuthContext, input: unknown): Promise<RevisionTransitionResult> {
   const p = parseInput(ResolveRevisionInput, input);
-  const revision = loadRevisionInOrg(tx, ctx, p.revisionId);
-  const { job } = loadVisibleJob(tx, ctx, revision.jobId);
+  const revision = await loadRevisionInOrg(tx, ctx, p.revisionId);
+  const { job } = await loadVisibleJob(tx, ctx, revision.jobId);
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is already resolved");
   if (job.statusCategory !== "revision") {
     throw new InvalidTransitionError(job.statusCategory, "resubmitted", "The job is not waiting on this revision");
   }
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
-  const target = resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: "resubmitted" });
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: "resubmitted" });
   if (target.category !== "resubmitted") {
     throw new ValidationError("That status is not a resubmitted status", { formErrors: [], fieldErrors: { toStatusId: ["Wrong category"] } });
   }
   assertVersion(job, p.expectedVersion);
-  const result = applyMove(tx, ctx, job, target, graph, { mode: "user", resolutionNote: p.note ?? null });
-  return { ...result, revision: loadRevision(tx, revision.id) };
+  const result = await applyMove(tx, ctx, job, target, graph, { mode: "user", resolutionNote: p.note ?? null });
+  return { ...result, revision: await loadRevision(tx, revision.id) };
 }
 
 /**
@@ -176,23 +177,26 @@ export function resolveRevision(tx: Tx, ctx: AuthContext, input: unknown): Revis
  * (same category's lowest status if that one is archived) and the revision is
  * resolved "withdrawn". Its number is never reused.
  */
-export function withdrawRevision(tx: Tx, ctx: AuthContext, input: unknown): RevisionTransitionResult | { revision: JobRevision; transitionId: null } {
+export async function withdrawRevision(
+  tx: Tx,
+  ctx: AuthContext,
+  input: unknown,
+): Promise<RevisionTransitionResult | { revision: JobRevision; transitionId: null }> {
   const p = parseInput(WithdrawRevisionInput, input);
-  const revision = loadRevisionInOrg(tx, ctx, p.revisionId);
-  const { job, ref } = loadVisibleJob(tx, ctx, revision.jobId);
+  const revision = await loadRevisionInOrg(tx, ctx, p.revisionId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, revision.jobId);
   assertCan(ctx, "revision.withdraw", ref);
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is already resolved");
   assertVersion(job, p.expectedVersion);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
 
   if (job.statusCategory !== "revision") {
     // The job already left the revision stage (e.g. an override): resolve the row only.
     const now = ctx.now();
-    tx.update(jobRevisions)
+    await tx.update(jobRevisions)
       .set({ resolvedAt: now, resolvedByUserId: ctx.userId, resolution: "withdrawn", resolutionNote: p.note ?? null })
-      .where(and(eq(jobRevisions.id, revision.id), isNull(jobRevisions.resolvedAt)))
-      .run();
-    recordEvent(tx, ctx, {
+      .where(and(eq(jobRevisions.id, revision.id), isNull(jobRevisions.resolvedAt)));
+    await recordEvent(tx, ctx, {
       entityType: "revision",
       entityId: revision.id,
       jobId: job.id,
@@ -202,11 +206,11 @@ export function withdrawRevision(tx: Tx, ctx: AuthContext, input: unknown): Revi
       newValue: { resolvedAt: now, resolvedByUserId: ctx.userId, resolution: "withdrawn", resolutionNote: p.note ?? null },
       metadata: jobEventMeta(job, { revisionId: revision.id, revisionNumber: revision.revisionNumber, transitionId: null }),
     });
-    return { revision: loadRevision(tx, revision.id), transitionId: null };
+    return { revision: await loadRevision(tx, revision.id), transitionId: null };
   }
 
   const request = revision.requestTransitionId
-    ? tx.select().from(jobStatusTransitions).where(eq(jobStatusTransitions.id, revision.requestTransitionId)).get()
+    ? await first(tx.select().from(jobStatusTransitions).where(eq(jobStatusTransitions.id, revision.requestTransitionId)))
     : undefined;
   const fromId = request?.fromStatusId ?? job.previousStatusId;
   const fromCategory = request?.fromCategory ?? null;
@@ -219,6 +223,6 @@ export function withdrawRevision(tx: Tx, ctx: AuthContext, input: unknown): Revi
   if (!target || target.category === "revision") {
     throw new InvalidTransitionError(job.statusCategory, "withdraw", "Cannot work out the status to return to; use a status change instead");
   }
-  const result = applyMove(tx, ctx, job, target, graph, { mode: "withdraw", resolutionNote: p.note ?? null, reason: p.note ?? "Revision withdrawn" });
-  return { ...result, revision: loadRevision(tx, revision.id) };
+  const result = await applyMove(tx, ctx, job, target, graph, { mode: "withdraw", resolutionNote: p.note ?? null, reason: p.note ?? "Revision withdrawn" });
+  return { ...result, revision: await loadRevision(tx, revision.id) };
 }

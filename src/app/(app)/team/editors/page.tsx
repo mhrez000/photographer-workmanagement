@@ -13,7 +13,7 @@ export const metadata: Metadata = { title: "Editors" };
 export default async function EditorsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "team.view_members");
-  const { people, showStats } = load(() => loadDirectory(db, ctx, "editor"));
+  const { people, showStats } = await load(() => loadDirectory(db, ctx, "editor"));
 
   return (
     <PageContainer>

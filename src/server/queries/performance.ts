@@ -34,6 +34,7 @@ import { isDeadlineBound } from "@/lib/workflow";
 import { assertCan } from "@/server/auth/permissions";
 import {
   approvedJobsInRange,
+  binaryAsc,
   completedJobsInRange,
   groupBy,
   loadActiveMetricJobs,
@@ -53,7 +54,13 @@ export interface PerformanceOptions {
   now?: string;
 }
 
-function usersByRole(db: DbLike, ctx: AuthContext, role: "editor" | "photographer", extraIds: readonly string[], restrict?: readonly string[]): UserRef[] {
+async function usersByRole(
+  db: DbLike,
+  ctx: AuthContext,
+  role: "editor" | "photographer",
+  extraIds: readonly string[],
+  restrict?: readonly string[],
+): Promise<UserRef[]> {
   const extra = [...new Set(extraIds)];
   return db
     .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
@@ -65,17 +72,16 @@ function usersByRole(db: DbLike, ctx: AuthContext, role: "editor" | "photographe
         restrict ? inArray(users.id, [...restrict]) : undefined,
       ),
     )
-    .orderBy(asc(users.name))
-    .all();
+    .orderBy(binaryAsc(users.name), asc(users.id));
 }
 
 /** Per-editor performance (no permission check). */
-export function computeEditorPerformance(db: DbLike, ctx: AuthContext, range: Range, opts: PerformanceOptions = {}): PerformanceRow[] {
+export async function computeEditorPerformance(db: DbLike, ctx: AuthContext, range: Range, opts: PerformanceOptions = {}): Promise<PerformanceRow[]> {
   const now = opts.now ?? ctx.now();
-  const approved = approvedJobsInRange(db, ctx, range, { scope: "org" });
-  const completed = completedJobsInRange(db, ctx, range, { scope: "org", where: isNotNull(jobs.editorId) });
-  const workloads = computeWorkloads(db, ctx, { now, editorIds: opts.userIds });
-  const transitions = loadTransitionsByJob(
+  const approved = await approvedJobsInRange(db, ctx, range, { scope: "org" });
+  const completed = await completedJobsInRange(db, ctx, range, { scope: "org", where: isNotNull(jobs.editorId) });
+  const workloads = await computeWorkloads(db, ctx, { now, editorIds: opts.userIds });
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approved.map((j) => j.id),
@@ -84,7 +90,7 @@ export function computeEditorPerformance(db: DbLike, ctx: AuthContext, range: Ra
   const completedBy = groupBy(completed, (j) => j.editorId);
   const workloadBy = new Map(workloads.rows.map((r) => [r.editor.id, r]));
 
-  const people = usersByRole(
+  const people = await usersByRole(
     db,
     ctx,
     "editor",
@@ -122,29 +128,34 @@ function editorRow(
 }
 
 /** Per-photographer performance (no permission check). */
-export function computePhotographerPerformance(db: DbLike, ctx: AuthContext, range: Range, opts: PerformanceOptions = {}): PhotographerPerformanceRow[] {
+export async function computePhotographerPerformance(
+  db: DbLike,
+  ctx: AuthContext,
+  range: Range,
+  opts: PerformanceOptions = {},
+): Promise<PhotographerPerformanceRow[]> {
   const now = opts.now ?? ctx.now();
   const tz = ctx.settings.timezone;
   const hasPhotographer = isNotNull(jobs.photographerId);
   const created = groupBy(
-    loadMetricJobs(db, ctx, { scope: "org", where: and(hasPhotographer, gte(jobs.createdAt, range.from), lt(jobs.createdAt, range.to)) }),
+    await loadMetricJobs(db, ctx, { scope: "org", where: and(hasPhotographer, gte(jobs.createdAt, range.from), lt(jobs.createdAt, range.to)) }),
     (j) => j.photographerId,
   );
   const submitted = groupBy(
-    loadMetricJobs(db, ctx, { scope: "org", where: and(hasPhotographer, gte(jobs.firstSubmittedAt, range.from), lt(jobs.firstSubmittedAt, range.to)) }),
+    await loadMetricJobs(db, ctx, { scope: "org", where: and(hasPhotographer, gte(jobs.firstSubmittedAt, range.from), lt(jobs.firstSubmittedAt, range.to)) }),
     (j) => j.photographerId,
   );
-  const completed = groupBy(completedJobsInRange(db, ctx, range, { scope: "org", where: hasPhotographer }), (j) => j.photographerId);
-  const approvedList = approvedJobsInRange(db, ctx, range, { scope: "org", where: hasPhotographer });
+  const completed = groupBy(await completedJobsInRange(db, ctx, range, { scope: "org", where: hasPhotographer }), (j) => j.photographerId);
+  const approvedList = await approvedJobsInRange(db, ctx, range, { scope: "org", where: hasPhotographer });
   const approved = groupBy(approvedList, (j) => j.photographerId);
-  const active = groupBy(loadActiveMetricJobs(db, ctx, { scope: "org", where: hasPhotographer }), (j) => j.photographerId);
-  const transitions = loadTransitionsByJob(
+  const active = groupBy(await loadActiveMetricJobs(db, ctx, { scope: "org", where: hasPhotographer }), (j) => j.photographerId);
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approvedList.map((j) => j.id),
   );
 
-  const people = usersByRole(
+  const people = await usersByRole(
     db,
     ctx,
     "photographer",
@@ -168,12 +179,12 @@ export function computePhotographerPerformance(db: DbLike, ctx: AuthContext, ran
 }
 
 /** `/team/performance` (performance.view = O/M). `rawRange` = query params or a ResolvedRange. */
-export function getPerformance(db: DbLike, ctx: AuthContext, rawRange?: unknown): PerformanceReport {
+export async function getPerformance(db: DbLike, ctx: AuthContext, rawRange?: unknown): Promise<PerformanceReport> {
   assertCan(ctx, "performance.view");
-  const range: ResolvedRange = resolveRangeInput(ctx, rawRange, undefined, { db });
+  const range: ResolvedRange = await resolveRangeInput(ctx, rawRange, undefined, { db });
   return {
     range,
-    editors: computeEditorPerformance(db, ctx, range),
-    photographers: computePhotographerPerformance(db, ctx, range),
+    editors: await computeEditorPerformance(db, ctx, range),
+    photographers: await computePhotographerPerformance(db, ctx, range),
   };
 }

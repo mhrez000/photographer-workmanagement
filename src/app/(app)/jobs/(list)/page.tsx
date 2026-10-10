@@ -34,20 +34,25 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
 
   const requested = toJobListInput(sp, { quick: activeTab === "all" ? undefined : activeTab });
   if (!requested.sort && !requested.viewId) requested.sort = DEFAULT_WORK_SORT;
-  const { result, input, notice } = safeListJobs(db, ctx, requested);
+  const { result, input, notice } = await safeListJobs(db, ctx, requested);
 
   // Counts per tab share every other filter (search, facets).
   const base: Record<string, string> = { ...input };
   delete base.quick;
   delete base.sort;
   delete base.groupBy;
-  const tabs: QuickTab[] = TABS.map((tab) => {
-    let count: number | null = null;
-    try {
-      count = listJobs(db, ctx, { ...base, ...(tab === "all" ? {} : { quick: tab }), limit: "1" }).total;
-    } catch {
-      count = null;
-    }
+  // Independent reads on the root db (no transaction), so they can run concurrently.
+  const counts = await Promise.all(
+    TABS.map(async (tab): Promise<number | null> => {
+      try {
+        return (await listJobs(db, ctx, { ...base, ...(tab === "all" ? {} : { quick: tab }), limit: "1" })).total;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const tabs: QuickTab[] = TABS.map((tab, i) => {
+    const count = counts[i];
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(sp)) {
       if (k === "quick" || k === "cursor" || v === undefined) continue;

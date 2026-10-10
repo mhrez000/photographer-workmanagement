@@ -25,7 +25,7 @@ export default async function PerformancePage({ searchParams }: PageProps<"/team
   const { ctx, db } = await pageContext();
   guard(ctx, "performance.view");
   const rangeInput = rangeFromParams(sp, DEFAULT_PRESET);
-  const report = load(() => getPerformance(db, ctx, rangeInput));
+  const report = await load(() => getPerformance(db, ctx, rangeInput));
   const { flags, highlights, averages } = editorInsights(report.editors);
   const pFlags = photographerFlags(report.photographers);
 

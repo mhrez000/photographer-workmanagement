@@ -204,64 +204,60 @@ export function toWorkSessionView(s: WorkSession, user: UserLookup, statusName: 
 /* ------------------------------------------------------------------ */
 
 /** Full detail bundle for a visible job; 404 for missing, foreign or not-visible ids. */
-export function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string): JobDetail {
-  const { job, ref } = loadVisibleJob(db, ctx, jobId, "job.view");
+export async function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobDetail> {
+  const { job, ref } = await loadVisibleJob(db, ctx, jobId, "job.view");
   const now = ctx.now();
   const org = ctx.organisationId;
 
-  const raw = selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 })[0];
+  const raw = (await selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 }))[0];
   if (!raw) throw new NotFoundError("Job");
-  const row = mapJobRows(db, ctx, [raw], now)[0];
+  const row = (await mapJobRows(db, ctx, [raw], now))[0];
 
   // Ledgers (all org-scoped).
-  const linkRows = db
+  const linkRows = await db
     .select()
     .from(jobLinks)
     .where(and(eq(jobLinks.organisationId, org), eq(jobLinks.jobId, job.id)))
-    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id))
-    .all();
-  const noteRows = db
-    .select()
-    .from(jobNotes)
-    .where(and(eq(jobNotes.organisationId, org), eq(jobNotes.jobId, job.id)))
-    .orderBy(asc(jobNotes.createdAt))
-    .all()
-    .filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }));
-  const commentRows = db
+    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
+  const noteRows = (
+    await db
+      .select()
+      .from(jobNotes)
+      .where(and(eq(jobNotes.organisationId, org), eq(jobNotes.jobId, job.id)))
+      .orderBy(asc(jobNotes.createdAt), asc(jobNotes.id))
+  ).filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }));
+  const commentRows = await db
     .select()
     .from(jobComments)
     .where(and(eq(jobComments.organisationId, org), eq(jobComments.jobId, job.id)))
-    .orderBy(asc(jobComments.createdAt), asc(jobComments.id))
-    .all();
+    .orderBy(asc(jobComments.createdAt), asc(jobComments.id));
   const mentionRows =
     commentRows.length === 0
       ? []
-      : db
+      : await db
           .select({ commentId: commentMentions.commentId, userId: commentMentions.mentionedUserId })
           .from(commentMentions)
           .where(and(eq(commentMentions.organisationId, org), inArray(commentMentions.commentId, commentRows.map((c) => c.id))))
-          .all();
-  const revisionRows = db
+          .orderBy(asc(commentMentions.createdAt), asc(commentMentions.id));
+  const revisionRows = await db
     .select()
     .from(jobRevisions)
     .where(and(eq(jobRevisions.organisationId, org), eq(jobRevisions.jobId, job.id)))
-    .orderBy(asc(jobRevisions.revisionNumber))
-    .all();
-  const assignmentRows = db
+    .orderBy(asc(jobRevisions.revisionNumber));
+  const assignmentRows = await db
     .select()
     .from(jobAssignments)
     .where(and(eq(jobAssignments.organisationId, org), eq(jobAssignments.jobId, job.id)))
-    .orderBy(asc(jobAssignments.assignedAt), asc(jobAssignments.id))
-    .all();
+    .orderBy(asc(jobAssignments.assignedAt), asc(jobAssignments.rowid));
   const mayViewOthersTime = can(ctx, "timer.view_others", ref);
-  const sessionRows = db
-    .select()
-    .from(workSessions)
-    .where(and(eq(workSessions.organisationId, org), eq(workSessions.jobId, job.id)))
-    .orderBy(asc(workSessions.startedAt))
-    .all()
-    .filter((s) => mayViewOthersTime || s.userId === ctx.userId);
-  const transitions = loadTransitions(db, ctx, job.id);
+  const sessionRows = (
+    await db
+      .select()
+      .from(workSessions)
+      .where(and(eq(workSessions.organisationId, org), eq(workSessions.jobId, job.id)))
+      .orderBy(asc(workSessions.startedAt), asc(workSessions.id))
+  ).filter((s) => mayViewOthersTime || s.userId === ctx.userId);
+  const transitions = await loadTransitions(db, ctx, job.id);
 
   // People + statuses in two queries.
   const userIds = new Set<string | null>([job.previousEditorId, job.createdByUserId, job.approvedByUserId, job.editorId, job.photographerId]);
@@ -272,11 +268,11 @@ export function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string): JobDe
   for (const r of revisionRows) userIds.add(r.requestedByUserId).add(r.assigneeUserId).add(r.resolvedByUserId);
   for (const a of assignmentRows) userIds.add(a.userId).add(a.assignedByUserId).add(a.unassignedByUserId);
   for (const s of sessionRows) userIds.add(s.userId);
-  const users = loadUserRefs(db, ctx, userIds);
+  const users = await loadUserRefs(db, ctx, userIds);
   const user: UserLookup = (id) => (id ? (users.get(id) ?? null) : null);
-  const statusRefs = loadStatusRefs(db, ctx, [job.previousStatusId, ...sessionRows.map((s) => s.statusIdAtStart)]);
+  const statusRefs = await loadStatusRefs(db, ctx, [job.previousStatusId, ...sessionRows.map((s) => s.statusIdAtStart)]);
 
-  const graph = loadWorkflowGraphs(db, ctx, [job.workflowId]).get(job.workflowId) ?? { statuses: [], edges: [] };
+  const graph = (await loadWorkflowGraphs(db, ctx, [job.workflowId])).get(job.workflowId) ?? { statuses: [], edges: [] };
 
   // Links.
   const links = buildLinkSlots(linkRows, user);
@@ -299,7 +295,8 @@ export function getJobDetail(db: DbLike, ctx: AuthContext, jobId: string): JobDe
   const revisions = revisionRows.map((r) => toRevisionView(r, user));
   const openRevision = revisions.find((r) => r.isOpen) ?? null;
   const assignments = assignmentRows.map((a) => toAssignmentView(a, user));
-  const stages = toStageViews(db, ctx, transitions, now);
+  const stages = await toStageViews(db, ctx, transitions, now);
+
   const sessions = sessionRows.map((s) => toWorkSessionView(s, user, statusRefs.get(s.statusIdAtStart)?.name ?? s.categoryAtStart, now));
   const ownRunning = sessions.find((s) => s.isRunning && s.user.id === ctx.userId) ?? null;
   const runningSession = ownRunning ?? sessions.find((s) => s.isRunning) ?? null;

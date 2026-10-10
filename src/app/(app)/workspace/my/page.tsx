@@ -33,14 +33,14 @@ export default async function MyWorkPage() {
   const { ctx, db } = await pageContext();
   const viewer = await getViewer();
   const tz = ctx.settings.timezone;
-  const queue = load(() => getMyWorkQueue(db, ctx));
-  const running = load(() => runningSessionFor(db, ctx));
+  const queue = await load(() => getMyWorkQueue(db, ctx));
+  const running = await load(() => runningSessionFor(db, ctx));
 
   const perspective = perspectiveOf(ctx.role);
   const sections = sectionsFor(perspective);
   const counts = Object.fromEntries(sections.map((s) => [s.key, queue[s.key].length])) as Record<MyWorkSectionKey, number>;
   const allJobs = sections.flatMap((s) => queue[s.key]);
-  const notes = load(() => getMyWorkNotePreviews(db, ctx, allJobs.map((j) => j.id)));
+  const notes = await load(() => getMyWorkNotePreviews(db, ctx, allJobs.map((j) => j.id)));
   const total = allJobs.length;
   const canCreate = allowed(ctx, "job.create");
   const viewerRef = { id: ctx.userId ?? "", role: ctx.role };

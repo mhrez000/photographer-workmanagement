@@ -11,8 +11,8 @@
  *   Due Today → Due Tomorrow → Upcoming (later or no due date).
  * Deadlines are judged in the organisation timezone.
  */
-import { and, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
-import type { DbLike } from "@/db/index";
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { first, type DbLike } from "@/db/index";
 import { jobNotes, jobs, workSessions } from "@/db/schema";
 import { CATEGORY_GROUPS, MANAGEMENT_ROLES, type NoteKind } from "@/lib/constants";
 import type { AuthContext, JobRow, MyWorkQueue, WorkSessionView } from "@/lib/types";
@@ -52,24 +52,26 @@ export function myWorkSectionOf(row: JobRow, bounds: OrgDayBounds): MyWorkSectio
 }
 
 /** The actor's running timer (any job), or null. */
-export function getRunningSession(db: DbLike, ctx: AuthContext): WorkSessionView | null {
+export async function getRunningSession(db: DbLike, ctx: AuthContext): Promise<WorkSessionView | null> {
   if (!ctx.userId) return null;
-  const s = db
-    .select()
-    .from(workSessions)
-    .where(and(eq(workSessions.organisationId, ctx.organisationId), eq(workSessions.userId, ctx.userId), isNull(workSessions.endedAt)))
-    .orderBy(desc(workSessions.startedAt))
-    .get();
+  const s = await first(
+    db
+      .select()
+      .from(workSessions)
+      .where(and(eq(workSessions.organisationId, ctx.organisationId), eq(workSessions.userId, ctx.userId), isNull(workSessions.endedAt)))
+      .orderBy(desc(workSessions.startedAt), asc(workSessions.id))
+      .limit(1),
+  );
   if (!s) return null;
-  const users = loadUserRefs(db, ctx, [s.userId]);
-  const status = loadStatusRefs(db, ctx, [s.statusIdAtStart]).get(s.statusIdAtStart);
+  const users = await loadUserRefs(db, ctx, [s.userId]);
+  const status = (await loadStatusRefs(db, ctx, [s.statusIdAtStart])).get(s.statusIdAtStart);
   return toWorkSessionView(s, (id) => (id ? (users.get(id) ?? null) : null), status?.name ?? s.categoryAtStart, ctx.now());
 }
 
-export function getMyWorkQueue(db: DbLike, ctx: AuthContext): MyWorkQueue {
+export async function getMyWorkQueue(db: DbLike, ctx: AuthContext): Promise<MyWorkQueue> {
   const now = ctx.now();
-  const bounds = orgDayBounds(ctx, now, loadOrgSettingsRow(db, ctx)?.weekStartsOn ?? 1);
-  const rows = selectJobRows(db, ctx, {
+  const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
+  const rows = await selectJobRows(db, ctx, {
     where: myJobsWhere(ctx),
     orderBy: [sql`${jobs.dueDate} asc nulls last`, sql`${priorityOrderSql()} desc`, sql`${jobs.statusEnteredAt} asc`, sql`${jobs.id} asc`],
     limit: MY_WORK_MAX_JOBS,
@@ -82,7 +84,7 @@ export function getMyWorkQueue(db: DbLike, ctx: AuthContext): MyWorkQueue {
     waitingForReview: [],
     revisionRequired: [],
     paused: [],
-    runningSession: getRunningSession(db, ctx),
+    runningSession: await getRunningSession(db, ctx),
   };
   for (const row of rows) queue[myWorkSectionOf(row, bounds)].push(row);
   return queue;
@@ -102,11 +104,11 @@ export interface MyWorkNotePreview {
  * same rule as `note.read` for non-management roles. Callers pass job ids they
  * already loaded through `getMyWorkQueue` (so visibility is already scoped).
  */
-export function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Record<string, MyWorkNotePreview> {
+export async function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Promise<Record<string, MyWorkNotePreview>> {
   const out: Record<string, MyWorkNotePreview> = {};
   const ids = [...new Set(jobIds)].slice(0, MY_WORK_MAX_JOBS);
   if (ids.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ jobId: jobNotes.jobId, kind: jobNotes.kind, body: jobNotes.body, isPinned: jobNotes.isPinned, updatedAt: jobNotes.updatedAt })
     .from(jobNotes)
     .where(
@@ -117,8 +119,8 @@ export function getMyWorkNotePreviews(db: DbLike, ctx: AuthContext, jobIds: read
         MANAGEMENT_ROLES.includes(ctx.role) ? undefined : ne(jobNotes.kind, "internal"),
       ),
     )
-    .orderBy(desc(jobNotes.isPinned), desc(jobNotes.updatedAt))
-    .all();
+    .orderBy(desc(jobNotes.isPinned), desc(jobNotes.updatedAt), asc(jobNotes.id));
+
   for (const r of rows) {
     if (out[r.jobId]) continue;
     out[r.jobId] = { kind: r.kind, body: r.body, isPinned: r.isPinned, updatedAt: r.updatedAt };

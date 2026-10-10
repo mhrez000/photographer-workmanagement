@@ -11,11 +11,11 @@ import type { AuthContext, Team, TeamMembership, User } from "@/lib/types";
 import { ArchiveTeamInput, CreateTeamInput, TeamMemberInput, UpdateTeamInput } from "@/lib/validation/teams";
 import { recordEvent } from "@/server/audit";
 import { assertCan } from "@/server/auth/permissions";
-import { loadTeamInOrg, loadUserInOrg, loadUsersInOrg, parseInput, type DbLike, type Tx } from "./_shared";
+import { first, loadTeamInOrg, one, loadUserInOrg, loadUsersInOrg, parseInput, type DbLike, type Tx } from "./_shared";
 import { checkVersion, diffFields, ruleViolation } from "./_admin";
 
-function assertNameFree(db: DbLike, ctx: AuthContext, name: string, exceptTeamId?: string): void {
-  const rows = db.select({ id: teams.id, name: teams.name }).from(teams).where(eq(teams.organisationId, ctx.organisationId)).all();
+async function assertNameFree(db: DbLike, ctx: AuthContext, name: string, exceptTeamId?: string): Promise<void> {
+  const rows = await db.select({ id: teams.id, name: teams.name }).from(teams).where(eq(teams.organisationId, ctx.organisationId));
   const clash = rows.find((r) => r.name.trim().toLowerCase() === name.trim().toLowerCase() && r.id !== exceptTeamId);
   if (clash) throw ruleViolation("A team with this name already exists", {}, "name");
 }
@@ -24,22 +24,25 @@ function assertActiveUser(user: User, field: string): void {
   if (!user.isActive) throw ruleViolation(`${user.name} is deactivated`, {}, field);
 }
 
-function openMembership(db: DbLike, teamId: string, userId: string): TeamMembership | undefined {
-  return db
-    .select()
-    .from(teamMemberships)
-    .where(and(eq(teamMemberships.teamId, teamId), eq(teamMemberships.userId, userId), isNull(teamMemberships.leftAt)))
-    .get();
+async function openMembership(db: DbLike, teamId: string, userId: string): Promise<TeamMembership | undefined> {
+  return first(
+    db
+      .select()
+      .from(teamMemberships)
+      .where(and(eq(teamMemberships.teamId, teamId), eq(teamMemberships.userId, userId), isNull(teamMemberships.leftAt)))
+      .limit(1),
+  );
 }
 
-function insertMembership(tx: Tx, ctx: AuthContext, team: Team, user: User): TeamMembership {
+async function insertMembership(tx: Tx, ctx: AuthContext, team: Team, user: User): Promise<TeamMembership> {
   const now = ctx.now();
-  const row = tx
-    .insert(teamMemberships)
-    .values({ organisationId: ctx.organisationId, teamId: team.id, userId: user.id, addedByUserId: ctx.userId, joinedAt: now })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .insert(teamMemberships)
+      .values({ organisationId: ctx.organisationId, teamId: team.id, userId: user.id, addedByUserId: ctx.userId, joinedAt: now })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "team",
     entityId: team.id,
     eventType: "team.member_added",
@@ -52,13 +55,13 @@ function insertMembership(tx: Tx, ctx: AuthContext, team: Team, user: User): Tea
 }
 
 /** Active members (left_at IS NULL) of a team. */
-export function teamMemberIds(db: DbLike, teamId: string): string[] {
-  return db
+export async function teamMemberIds(db: DbLike, teamId: string): Promise<string[]> {
+  const rows = await db
     .select({ userId: teamMemberships.userId })
     .from(teamMemberships)
     .where(and(eq(teamMemberships.teamId, teamId), isNull(teamMemberships.leftAt)))
-    .all()
-    .map((r) => r.userId);
+    .orderBy(teamMemberships.joinedAt, teamMemberships.id);
+  return rows.map((r) => r.userId);
 }
 
 export interface TeamWithMembers {
@@ -67,30 +70,31 @@ export interface TeamWithMembers {
 }
 
 /** Creates a team; the lead (if any) is added as a member too. */
-export function createTeam(tx: Tx, ctx: AuthContext, input: unknown): TeamWithMembers {
+export async function createTeam(tx: Tx, ctx: AuthContext, input: unknown): Promise<TeamWithMembers> {
   assertCan(ctx, "team.manage");
   const data = parseInput(CreateTeamInput, input);
-  assertNameFree(tx, ctx, data.name);
-  const lead = data.leadUserId ? loadUserInOrg(tx, ctx, data.leadUserId) : null;
+  await assertNameFree(tx, ctx, data.name);
+  const lead = data.leadUserId ? await loadUserInOrg(tx, ctx, data.leadUserId) : null;
   if (lead) assertActiveUser(lead, "leadUserId");
   const memberIds = Array.from(new Set([...(data.memberIds ?? []), ...(lead ? [lead.id] : [])]));
-  const members = loadUsersInOrg(tx, ctx, memberIds);
+  const members = await loadUsersInOrg(tx, ctx, memberIds);
   for (const m of members) assertActiveUser(m, "memberIds");
 
   const now = ctx.now();
-  const team = tx
-    .insert(teams)
-    .values({
-      organisationId: ctx.organisationId,
-      name: data.name,
-      description: data.description ?? null,
-      leadUserId: lead?.id ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const team = await one(
+    tx
+      .insert(teams)
+      .values({
+        organisationId: ctx.organisationId,
+        name: data.name,
+        description: data.description ?? null,
+        leadUserId: lead?.id ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "team",
     entityId: team.id,
     eventType: "team.created",
@@ -100,32 +104,33 @@ export function createTeam(tx: Tx, ctx: AuthContext, input: unknown): TeamWithMe
     metadata: { teamId: team.id },
   });
   const byId = new Map(members.map((m) => [m.id, m]));
-  for (const id of memberIds) insertMembership(tx, ctx, team, byId.get(id) as User);
+  for (const id of memberIds) await insertMembership(tx, ctx, team, byId.get(id) as User);
   return { team, memberIds };
 }
 
-export function updateTeam(tx: Tx, ctx: AuthContext, input: unknown): Team {
+export async function updateTeam(tx: Tx, ctx: AuthContext, input: unknown): Promise<Team> {
   assertCan(ctx, "team.manage");
   const data = parseInput(UpdateTeamInput, input);
-  const team = loadTeamInOrg(tx, ctx, data.teamId);
+  const team = await loadTeamInOrg(tx, ctx, data.teamId);
   checkVersion(team, data.expectedVersion, team);
   if (team.archivedAt) throw ruleViolation("This team is archived");
-  if (data.name !== undefined) assertNameFree(tx, ctx, data.name, team.id);
+  if (data.name !== undefined) await assertNameFree(tx, ctx, data.name, team.id);
   const diff = diffFields(team, data, ["name", "description", "leadUserId"] as const);
   if (diff.changed.length === 0) return team;
   const meta: Record<string, unknown> = { teamId: team.id };
   if (diff.changed.includes("leadUserId") && diff.set.leadUserId) {
-    const lead = loadUserInOrg(tx, ctx, diff.set.leadUserId);
+    const lead = await loadUserInOrg(tx, ctx, diff.set.leadUserId);
     assertActiveUser(lead, "leadUserId");
     meta.leadName = lead.name;
   }
-  const row = tx
-    .update(teams)
-    .set({ ...diff.set, updatedAt: ctx.now(), version: team.version + 1 })
-    .where(eq(teams.id, team.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(teams)
+      .set({ ...diff.set, updatedAt: ctx.now(), version: team.version + 1 })
+      .where(eq(teams.id, team.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "team",
     entityId: team.id,
     eventType: "team.updated",
@@ -135,68 +140,67 @@ export function updateTeam(tx: Tx, ctx: AuthContext, input: unknown): Team {
     metadata: { ...meta, name: row.name },
   });
   // A new lead joins the team if they are not a member yet.
-  if (diff.set.leadUserId && !openMembership(tx, team.id, diff.set.leadUserId)) {
-    insertMembership(tx, ctx, row, loadUserInOrg(tx, ctx, diff.set.leadUserId));
+  if (diff.set.leadUserId && !(await openMembership(tx, team.id, diff.set.leadUserId))) {
+    await insertMembership(tx, ctx, row, await loadUserInOrg(tx, ctx, diff.set.leadUserId));
   }
   return row;
 }
 
-export function archiveTeam(tx: Tx, ctx: AuthContext, input: unknown): Team {
+export async function archiveTeam(tx: Tx, ctx: AuthContext, input: unknown): Promise<Team> {
   assertCan(ctx, "team.manage");
   const data = parseInput(ArchiveTeamInput, input);
-  const team = loadTeamInOrg(tx, ctx, data.teamId);
+  const team = await loadTeamInOrg(tx, ctx, data.teamId);
   checkVersion(team, data.expectedVersion, team);
   if (team.archivedAt) throw ruleViolation("This team is already archived");
   const now = ctx.now();
-  const row = tx
-    .update(teams)
-    .set({ archivedAt: now, updatedAt: now, version: team.version + 1 })
-    .where(eq(teams.id, team.id))
-    .returning()
-    .get();
-  recordEvent(tx, ctx, {
+  const row = await one(
+    tx
+      .update(teams)
+      .set({ archivedAt: now, updatedAt: now, version: team.version + 1 })
+      .where(eq(teams.id, team.id))
+      .returning(),
+  );
+  await recordEvent(tx, ctx, {
     entityType: "team",
     entityId: team.id,
     eventType: "team.archived",
     action: "archived",
     previousValue: { archivedAt: null, name: team.name },
     newValue: { archivedAt: now, name: team.name },
-    metadata: { teamId: team.id, memberIds: teamMemberIds(tx, team.id) },
+    metadata: { teamId: team.id, memberIds: await teamMemberIds(tx, team.id) },
   });
   return row;
 }
 
-export function addMember(tx: Tx, ctx: AuthContext, input: unknown): TeamMembership {
+export async function addMember(tx: Tx, ctx: AuthContext, input: unknown): Promise<TeamMembership> {
   assertCan(ctx, "team.manage");
   const data = parseInput(TeamMemberInput, input);
-  const team = loadTeamInOrg(tx, ctx, data.teamId);
+  const team = await loadTeamInOrg(tx, ctx, data.teamId);
   if (team.archivedAt) throw ruleViolation("This team is archived");
-  const user = loadUserInOrg(tx, ctx, data.userId);
+  const user = await loadUserInOrg(tx, ctx, data.userId);
   assertActiveUser(user, "userId");
-  if (openMembership(tx, team.id, user.id)) throw ruleViolation(`${user.name} is already in this team`, {}, "userId");
+  if (await openMembership(tx, team.id, user.id)) throw ruleViolation(`${user.name} is already in this team`, {}, "userId");
   return insertMembership(tx, ctx, team, user);
 }
 
 /** Ends the membership (fill-once `left_at`); clears the lead if they were the lead. */
-export function removeMember(tx: Tx, ctx: AuthContext, input: unknown): TeamMembership {
+export async function removeMember(tx: Tx, ctx: AuthContext, input: unknown): Promise<TeamMembership> {
   assertCan(ctx, "team.manage");
   const data = parseInput(TeamMemberInput, input);
-  const team = loadTeamInOrg(tx, ctx, data.teamId);
-  const user = loadUserInOrg(tx, ctx, data.userId);
-  const membership = openMembership(tx, team.id, user.id);
+  const team = await loadTeamInOrg(tx, ctx, data.teamId);
+  const user = await loadUserInOrg(tx, ctx, data.userId);
+  const membership = await openMembership(tx, team.id, user.id);
   if (!membership) throw ruleViolation(`${user.name} is not a member of this team`, {}, "userId");
   const now = ctx.now();
-  const row = tx
-    .update(teamMemberships)
-    .set({ leftAt: now, removedByUserId: ctx.userId })
-    .where(eq(teamMemberships.id, membership.id))
-    .returning()
-    .get();
+  const row = await one(tx.update(teamMemberships).set({ leftAt: now, removedByUserId: ctx.userId }).where(eq(teamMemberships.id, membership.id)).returning());
   const leadCleared = team.leadUserId === user.id;
   if (leadCleared) {
-    tx.update(teams).set({ leadUserId: null, updatedAt: now, version: team.version + 1 }).where(eq(teams.id, team.id)).run();
+    await tx
+      .update(teams)
+      .set({ leadUserId: null, updatedAt: now, version: team.version + 1 })
+      .where(eq(teams.id, team.id));
   }
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "team",
     entityId: team.id,
     eventType: "team.member_removed",

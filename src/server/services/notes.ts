@@ -12,8 +12,8 @@
  * only. `note.read` — editors never see internal notes; photographers see
  * internal notes on their own jobs only. Restore uses `note.archive`.
  */
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
-import type { DbLike, Tx } from "@/db/index";
+import { and, asc, eq, isNull } from "drizzle-orm";
+import { first, one, type DbLike, type Tx } from "@/db/index";
 import { activityEvents, jobNotes, type Json } from "@/db/schema";
 import { NOTE_KINDS, type NoteKind } from "@/lib/constants";
 import type { AuthContext, JobNote, JobPermissionRef, NoteHistoryEntry, NoteView } from "@/lib/types";
@@ -29,14 +29,15 @@ function noteRef(ref: JobPermissionRef, note: Pick<JobNote, "kind" | "authorUser
 }
 
 /** Optimistic-concurrency update: `version + 1` where the version still matches, else 409. */
-function updateNote(tx: Tx, ctx: AuthContext, note: JobNote, set: Partial<typeof jobNotes.$inferInsert>): JobNote {
-  const updated = tx
-    .update(jobNotes)
-    .set({ ...set, updatedAt: ctx.now(), version: note.version + 1 })
-    .where(and(eq(jobNotes.id, note.id), eq(jobNotes.organisationId, ctx.organisationId), eq(jobNotes.version, note.version)))
-    .returning()
-    .get();
-  if (!updated) throw new ConflictError(undefined, loadNoteInOrg(tx, ctx, note.id));
+async function updateNote(tx: Tx, ctx: AuthContext, note: JobNote, set: Partial<typeof jobNotes.$inferInsert>): Promise<JobNote> {
+  const updated = await first(
+    tx
+      .update(jobNotes)
+      .set({ ...set, updatedAt: ctx.now(), version: note.version + 1 })
+      .where(and(eq(jobNotes.id, note.id), eq(jobNotes.organisationId, ctx.organisationId), eq(jobNotes.version, note.version)))
+      .returning(),
+  );
+  if (!updated) throw new ConflictError(undefined, await loadNoteInOrg(tx, ctx, note.id));
   return updated;
 }
 
@@ -49,16 +50,16 @@ function updateNote(tx: Tx, ctx: AuthContext, note: JobNote, set: Partial<typeof
  * the job's open revision). The system context (automation `add_note`) may
  * name an author via `authorUserId` (default: the job's creator).
  */
-export function addNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
+export async function addNote(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobNote> {
   const data = parseInput(AddNoteInput, input);
-  const { job, ref } = loadJobWithRef(tx, ctx, data.jobId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, data.jobId);
   assertCan(ctx, "note.add", { job: ref, kind: data.kind });
 
   let authorUserId: string;
   if (ctx.userId) {
     authorUserId = ctx.userId;
   } else {
-    const author = loadUserInOrg(tx, ctx, data.authorUserId ?? job.createdByUserId);
+    const author = await loadUserInOrg(tx, ctx, data.authorUserId ?? job.createdByUserId);
     authorUserId = author.id;
   }
 
@@ -66,30 +67,32 @@ export function addNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
   if (data.kind === "revision") {
     const wanted = data.revisionId ?? job.openRevisionId;
     if (wanted) {
-      const revision = loadRevisionInOrg(tx, ctx, wanted);
+      const revision = await loadRevisionInOrg(tx, ctx, wanted);
       if (revision.jobId !== job.id) throw new NotFoundError("Revision");
       revisionId = revision.id;
     }
   }
 
   const at = ctx.now();
-  const note = tx
-    .insert(jobNotes)
-    .values({
-      organisationId: ctx.organisationId,
-      jobId: job.id,
-      kind: data.kind,
-      body: data.body,
-      authorUserId,
-      revisionId,
-      isPinned: data.isPinned,
-      createdAt: at,
-      updatedAt: at,
-    })
-    .returning()
-    .get();
+  const note = await one(
+    tx
+      .insert(jobNotes)
+      .values({
+        organisationId: ctx.organisationId,
+        jobId: job.id,
+        kind: data.kind,
+        body: data.body,
+        authorUserId,
+        revisionId,
+        isPinned: data.isPinned,
+        createdAt: at,
+        updatedAt: at,
+      })
+      .returning(),
+    "note",
+  );
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "note",
     entityId: note.id,
     jobId: job.id,
@@ -111,10 +114,10 @@ export function addNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
  * `last_edited_by_user_id`; every change writes `note.edited` with before/after.
  * Archived notes must be restored first. Unchanged input is a no-op.
  */
-export function editNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
+export async function editNote(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobNote> {
   const data = parseInput(EditNoteInput, input);
-  const note = loadNoteInOrg(tx, ctx, data.noteId);
-  const { job, ref } = loadJobWithRef(tx, ctx, note.jobId);
+  const note = await loadNoteInOrg(tx, ctx, data.noteId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, note.jobId);
   assertCan(ctx, "note.edit", noteRef(ref, note));
   assertVersion(note, data.expectedVersion);
   if (note.archivedAt) throw new ValidationError("Restore the note before editing it");
@@ -123,12 +126,12 @@ export function editNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
   const pinChanged = data.isPinned !== undefined && data.isPinned !== note.isPinned;
   if (!bodyChanged && !pinChanged) return note;
 
-  const updated = updateNote(tx, ctx, note, {
+  const updated = await updateNote(tx, ctx, note, {
     ...(bodyChanged ? { body: data.body, lastEditedByUserId: ctx.userId, editCount: note.editCount + 1 } : {}),
     ...(pinChanged ? { isPinned: data.isPinned } : {}),
   });
 
-  recordEvent(tx, ctx, {
+  await recordEvent(tx, ctx, {
     entityType: "note",
     entityId: note.id,
     jobId: job.id,
@@ -142,17 +145,17 @@ export function editNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
 }
 
 /** Archives a note (hidden from the Notes tab by default). Already archived → no-op. */
-export function archiveNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
+export async function archiveNote(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobNote> {
   const data = parseInput(ArchiveNoteInput, input);
-  const note = loadNoteInOrg(tx, ctx, data.noteId);
-  const { job, ref } = loadJobWithRef(tx, ctx, note.jobId);
+  const note = await loadNoteInOrg(tx, ctx, data.noteId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, note.jobId);
   assertCan(ctx, "note.archive", noteRef(ref, note));
   if (data.expectedVersion !== undefined) assertVersion(note, data.expectedVersion);
   if (note.archivedAt) return note;
 
   const archivedAt = ctx.now();
-  const updated = updateNote(tx, ctx, note, { archivedAt, archivedByUserId: ctx.userId });
-  recordEvent(tx, ctx, {
+  const updated = await updateNote(tx, ctx, note, { archivedAt, archivedByUserId: ctx.userId });
+  await recordEvent(tx, ctx, {
     entityType: "note",
     entityId: note.id,
     jobId: job.id,
@@ -166,16 +169,16 @@ export function archiveNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
 }
 
 /** Restores an archived note (permission `note.archive`). Not archived → no-op. */
-export function restoreNote(tx: Tx, ctx: AuthContext, input: unknown): JobNote {
+export async function restoreNote(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobNote> {
   const data = parseInput(RestoreNoteInput, input);
-  const note = loadNoteInOrg(tx, ctx, data.noteId);
-  const { job, ref } = loadJobWithRef(tx, ctx, note.jobId);
+  const note = await loadNoteInOrg(tx, ctx, data.noteId);
+  const { job, ref } = await loadJobWithRef(tx, ctx, note.jobId);
   assertCan(ctx, "note.archive", noteRef(ref, note));
   if (data.expectedVersion !== undefined) assertVersion(note, data.expectedVersion);
   if (!note.archivedAt) return note;
 
-  const updated = updateNote(tx, ctx, note, { archivedAt: null, archivedByUserId: null });
-  recordEvent(tx, ctx, {
+  const updated = await updateNote(tx, ctx, note, { archivedAt: null, archivedByUserId: null });
+  await recordEvent(tx, ctx, {
     entityType: "note",
     entityId: note.id,
     jobId: job.id,
@@ -199,24 +202,29 @@ const KIND_ORDER = new Map<NoteKind, number>(NOTE_KINDS.map((k, i) => [k, i]));
  * then by kind order, then oldest first. Archived notes only with
  * `includeArchived`.
  */
-export function listNotes(db: DbLike, ctx: AuthContext, jobId: string, opts: { includeArchived?: boolean } = {}): NoteView[] {
-  const { job, ref } = loadJobWithRef(db, ctx, jobId);
+export async function listNotes(
+  db: DbLike,
+  ctx: AuthContext,
+  jobId: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<NoteView[]> {
+  const { job, ref } = await loadJobWithRef(db, ctx, jobId);
   assertCan(ctx, "job.view", ref);
-  const rows = db
-    .select()
-    .from(jobNotes)
-    .where(
-      and(
-        eq(jobNotes.jobId, job.id),
-        eq(jobNotes.organisationId, ctx.organisationId),
-        opts.includeArchived ? undefined : isNull(jobNotes.archivedAt),
-      ),
-    )
-    .orderBy(asc(jobNotes.createdAt), asc(jobNotes.id))
-    .all()
-    .filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }));
+  const rows = (
+    await db
+      .select()
+      .from(jobNotes)
+      .where(
+        and(
+          eq(jobNotes.jobId, job.id),
+          eq(jobNotes.organisationId, ctx.organisationId),
+          opts.includeArchived ? undefined : isNull(jobNotes.archivedAt),
+        ),
+      )
+      .orderBy(asc(jobNotes.createdAt), asc(jobNotes.id))
+  ).filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }));
 
-  const people = loadUserRefMap(db, ctx, rows.flatMap((n) => [n.authorUserId, n.lastEditedByUserId]));
+  const people = await loadUserRefMap(db, ctx, rows.flatMap((n) => [n.authorUserId, n.lastEditedByUserId]));
   const views = rows.map<NoteView>((n) => ({
     id: n.id,
     kind: n.kind,
@@ -261,26 +269,27 @@ const HISTORY_TYPES = new Set<string>(["note.added", "note.edited", "note.archiv
  * A note's history drawer, oldest first, read from its `note.*` activity
  * events (the only record of prior bodies). Permission: `note.read`.
  */
-export function noteHistory(db: DbLike, ctx: AuthContext, noteId: string): NoteHistoryEntry[] {
-  const note = loadNoteInOrg(db, ctx, noteId);
-  const { ref } = loadJobWithRef(db, ctx, note.jobId);
+export async function noteHistory(db: DbLike, ctx: AuthContext, noteId: string): Promise<NoteHistoryEntry[]> {
+  const note = await loadNoteInOrg(db, ctx, noteId);
+  const { ref } = await loadJobWithRef(db, ctx, note.jobId);
   assertCan(ctx, "note.read", noteRef(ref, note));
 
-  const events = db
-    .select()
-    .from(activityEvents)
-    .where(
-      and(
-        eq(activityEvents.organisationId, ctx.organisationId),
-        eq(activityEvents.entityType, "note"),
-        eq(activityEvents.entityId, note.id),
-      ),
-    )
-    .orderBy(asc(activityEvents.createdAt), sql`rowid`)
-    .all()
-    .filter((e) => HISTORY_TYPES.has(e.eventType));
+  const events = (
+    await db
+      .select()
+      .from(activityEvents)
+      .where(
+        and(
+          eq(activityEvents.organisationId, ctx.organisationId),
+          eq(activityEvents.entityType, "note"),
+          eq(activityEvents.entityId, note.id),
+        ),
+      )
+      .orderBy(asc(activityEvents.createdAt), asc(activityEvents.rowid))
+  ).filter((e) => HISTORY_TYPES.has(e.eventType));
 
-  const people = loadUserRefMap(db, ctx, events.map((e) => e.actorUserId));
+  const people = await loadUserRefMap(db, ctx, events.map((e) => e.actorUserId));
+
   return events.map<NoteHistoryEntry>((e) => ({
     eventId: e.id,
     eventType: e.eventType as NoteHistoryEntry["eventType"],

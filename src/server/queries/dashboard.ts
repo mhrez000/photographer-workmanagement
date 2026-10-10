@@ -41,12 +41,12 @@ export const QUEUE_PREVIEW_LIMIT = 8;
  * the role default, filtered to the widgets this viewer may see). A context
  * without a user (system) gets the filtered role default.
  */
-export function dashboardLayoutFor(db: DbLike, ctx: AuthContext): DashboardLayout {
+export async function dashboardLayoutFor(db: DbLike, ctx: AuthContext): Promise<DashboardLayout> {
   if (ctx.userId === null || ctx.isSystem) {
     const allowed = allowedWidgetTypes(ctx);
     return { widgets: defaultLayoutFor(ctx.role).widgets.filter((w) => allowed.has(w.type)) };
   }
-  return getDashboardLayout(db, ctx).layout;
+  return (await getDashboardLayout(db, ctx)).layout;
 }
 
 /* ------------------------------------------------------------------ */
@@ -56,7 +56,7 @@ export function dashboardLayoutFor(db: DbLike, ctx: AuthContext): DashboardLayou
 const bound = () => categoryIn(CATEGORY_GROUPS.DEADLINE_BOUND);
 
 /** Visible DEADLINE_BOUND jobs due later today (not yet overdue). */
-export function dueTodayJobs(db: DbLike, ctx: AuthContext, now: string, limit = DASHBOARD_LIST_LIMIT): JobRow[] {
+export async function dueTodayJobs(db: DbLike, ctx: AuthContext, now: string, limit = DASHBOARD_LIST_LIMIT): Promise<JobRow[]> {
   const b = orgDayBounds(ctx, now);
   return selectJobRows(db, ctx, {
     where: and(bound(), gte(jobs.dueDate, now), lte(jobs.dueDate, b.endOfToday)),
@@ -66,7 +66,7 @@ export function dueTodayJobs(db: DbLike, ctx: AuthContext, now: string, limit = 
 }
 
 /** Visible DEADLINE_BOUND jobs past their editing deadline, most overdue first. */
-export function overdueJobs(db: DbLike, ctx: AuthContext, now: string, limit = DASHBOARD_LIST_LIMIT): JobRow[] {
+export async function overdueJobs(db: DbLike, ctx: AuthContext, now: string, limit = DASHBOARD_LIST_LIMIT): Promise<JobRow[]> {
   return selectJobRows(db, ctx, {
     where: and(bound(), lt(jobs.dueDate, now)),
     orderBy: [asc(jobs.dueDate), asc(jobs.jobNumber)],
@@ -75,16 +75,17 @@ export function overdueJobs(db: DbLike, ctx: AuthContext, now: string, limit = D
 }
 
 /** Visible jobs whose open stage is completed, latest completion first. */
-export function recentCompletedJobs(db: DbLike, ctx: AuthContext, limit = RECENT_COMPLETED_LIMIT): JobRow[] {
+export async function recentCompletedJobs(db: DbLike, ctx: AuthContext, limit = RECENT_COMPLETED_LIMIT): Promise<JobRow[]> {
   return selectJobRows(db, ctx, {
     where: eq(jobs.statusCategory, "completed"),
-    orderBy: [desc(jobs.completedAt), desc(jobs.id)],
+    // SQLite sorted NULLs last in DESC; Postgres sorts them first unless told otherwise.
+    orderBy: [sql`${jobs.completedAt} desc nulls last`, desc(jobs.id)],
     limit,
   });
 }
 
 /** The actor's next jobs: editors = held jobs (WORKLOAD); photographers = own active jobs, reviewer-held first. */
-export function queuePreview(db: DbLike, ctx: AuthContext, limit = QUEUE_PREVIEW_LIMIT): JobRow[] {
+export async function queuePreview(db: DbLike, ctx: AuthContext, limit = QUEUE_PREVIEW_LIMIT): Promise<JobRow[]> {
   if (ctx.userId === null) return [];
   if (ctx.role === "editor") {
     return selectJobRows(db, ctx, {
@@ -106,27 +107,27 @@ export function queuePreview(db: DbLike, ctx: AuthContext, limit = QUEUE_PREVIEW
 /* ------------------------------------------------------------------ */
 
 /** KPI cards for the viewer: org-wide for management, visible jobs otherwise. */
-export function getKpis(db: DbLike, ctx: AuthContext): KpiSummary {
+export async function getKpis(db: DbLike, ctx: AuthContext): Promise<KpiSummary> {
   return kpisFor(db, ctx, { scope: isManagement(ctx) || ctx.isSystem ? "org" : "visible" });
 }
 
 /** `GET /api/dashboard` → DashboardData (every authenticated user; content scoped by role/flags). */
-export function getDashboard(db: DbLike, ctx: AuthContext): DashboardData {
+export async function getDashboard(db: DbLike, ctx: AuthContext): Promise<DashboardData> {
   const now = ctx.now();
   const management = isManagement(ctx);
   const scope: MetricScope = management ? "org" : "visible";
-  const settings = loadOrgSettings(db, ctx);
-  const kpis = kpisFor(db, ctx, { scope, now, weekStartsOn: settings.weekStartsOn });
+  const settings = await loadOrgSettings(db, ctx);
+  const kpis = await kpisFor(db, ctx, { scope, now, weekStartsOn: settings.weekStartsOn });
 
-  const workloadComputation = computeWorkloads(db, ctx, { now });
+  const workloadComputation = await computeWorkloads(db, ctx, { now });
   const seeTeam = management || can(ctx, "workloads.view_team");
   const workloads = seeTeam ? workloadComputation.rows : null;
-  const bottlenecks = can(ctx, "bottlenecks.view") ? computeBottlenecksForViewer(db, ctx, { now, workloads: workloadComputation }) : [];
+  const bottlenecks = can(ctx, "bottlenecks.view") ? await computeBottlenecksForViewer(db, ctx, { now, workloads: workloadComputation }) : [];
 
   const month = monthRangeAt(ctx, now);
-  const approvedMonth = approvedJobsInRange(db, ctx, month, { scope });
+  const approvedMonth = await approvedJobsInRange(db, ctx, month, { scope });
   const rates = {
-    completedThisMonth: completedJobsInRange(db, ctx, month, { scope }).length,
+    completedThisMonth: (await completedJobsInRange(db, ctx, month, { scope })).length,
     revisionRate: revisionRate(approvedMonth).rate,
     onTimePercent: toPercent(onTimeRate(approvedMonth).rate),
   };
@@ -137,25 +138,33 @@ export function getDashboard(db: DbLike, ctx: AuthContext): DashboardData {
     const last30 = lastDaysRange(ctx, now, 30);
     personal = {
       myWorkload: workloadComputation.rows.find((r) => r.editor.id === me) ?? null,
-      myPerformance: ctx.role === "editor" ? (computeEditorPerformance(db, ctx, last30, { userIds: [me], now })[0] ?? null) : null,
-      myPhotographerPerformance: ctx.role === "photographer" ? (computePhotographerPerformance(db, ctx, last30, { userIds: [me], now })[0] ?? null) : null,
-      queuePreview: queuePreview(db, ctx),
+      myPerformance: ctx.role === "editor" ? ((await computeEditorPerformance(db, ctx, last30, { userIds: [me], now }))[0] ?? null) : null,
+      myPhotographerPerformance:
+        ctx.role === "photographer" ? ((await computePhotographerPerformance(db, ctx, last30, { userIds: [me], now }))[0] ?? null) : null,
+      queuePreview: await queuePreview(db, ctx),
     };
   }
+
+  const recentActivity = (await listActivity(db, ctx, { limit: RECENT_ACTIVITY_LIMIT })).items;
+  const dueToday = await dueTodayJobs(db, ctx, now);
+  const overdue = await overdueJobs(db, ctx, now);
+  const recentCompleted = await recentCompletedJobs(db, ctx);
+  const editorPerformance = can(ctx, "performance.view") ? await computeEditorPerformance(db, ctx, month, { now }) : null;
+  const layout = await dashboardLayoutFor(db, ctx);
 
   return {
     variant: management ? "management" : "personal",
     kpis,
     workloads,
     bottlenecks,
-    recentActivity: listActivity(db, ctx, { limit: RECENT_ACTIVITY_LIMIT }).items,
-    dueToday: dueTodayJobs(db, ctx, now),
-    overdue: overdueJobs(db, ctx, now),
-    recentCompleted: recentCompletedJobs(db, ctx),
+    recentActivity,
+    dueToday,
+    overdue,
+    recentCompleted,
     rates,
-    editorPerformance: can(ctx, "performance.view") ? computeEditorPerformance(db, ctx, month, { now }) : null,
+    editorPerformance,
     personal,
-    layout: dashboardLayoutFor(db, ctx),
+    layout,
     asOf: now,
   };
 }

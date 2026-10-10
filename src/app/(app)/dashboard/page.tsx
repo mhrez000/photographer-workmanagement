@@ -57,8 +57,8 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
   const viewer = await getViewer();
   const tz = ctx.settings.timezone;
 
-  const data = load(() => getDashboard(db, ctx));
-  const layoutView = load(() => getDashboardLayout(db, ctx));
+  const data = await load(() => getDashboard(db, ctx));
+  const layoutView = await load(() => getDashboardLayout(db, ctx));
   const available = Array.from(allowedWidgetTypes(ctx));
   const types = new Set<DashboardWidgetType>(layoutView.layout.widgets.map((w) => w.type));
   const now = new Date(data.asOf);
@@ -109,7 +109,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
           );
           break;
         case "recent_activity": {
-          const feed = listActivity(db, ctx, { eventType: [...DASHBOARD_ACTIVITY_EVENT_TYPES], limit: 8 }).items;
+          const feed = (await listActivity(db, ctx, { eventType: [...DASHBOARD_ACTIVITY_EVENT_TYPES], limit: 8 })).items;
           content.recent_activity = <ActivityWidget items={feed} timeZone={tz} />;
           break;
         }
@@ -143,7 +143,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
             <MyWorkloadWidget
               workload={data.personal?.myWorkload ?? null}
               kpis={kpis}
-              queue={data.personal?.queuePreview ?? queuePreview(db, ctx)}
+              queue={data.personal?.queuePreview ?? (await queuePreview(db, ctx))}
               timeZone={tz}
               role={ctx.role}
             />
@@ -160,7 +160,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
           break;
         case "calendar": {
           const today = todayCivil(tz, now);
-          const events = getCalendarEvents(db, ctx, { from: today, to: addCivilDays(today, 6), kinds: ["shoot", "due"] });
+          const events = await getCalendarEvents(db, ctx, { from: today, to: addCivilDays(today, 6), kinds: ["shoot", "due"] });
           content.calendar = <CalendarMini days={bucketCalendar(events, tz, now)} />;
           break;
         }

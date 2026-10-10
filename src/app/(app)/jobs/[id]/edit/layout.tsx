@@ -10,7 +10,7 @@ import { getJobDetail } from "@/server/queries/jobDetail";
 export default async function EditJobLayout({ children, params }: LayoutProps<"/jobs/[id]/edit">) {
   const { id } = await params;
   const { ctx, db } = await pageContext();
-  const { job, actions } = load(() => getJobDetail(db, ctx, decodeURIComponent(id)));
+  const { job, actions } = await load(() => getJobDetail(db, ctx, decodeURIComponent(id)));
   const ref: JobPermissionRef = {
     id: job.id,
     organisationId: ctx.organisationId,

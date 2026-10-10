@@ -45,51 +45,51 @@ let reopenedRecompletedId = "";
 let reopenedOpenId = "";
 let completedLastWeekId = "";
 
-beforeEach(() => {
+beforeEach(async () => {
   fakeClock.set(NOW);
-  db = makeTestDb();
-  ids = seedMinimalOrg(db, { at: "2026-09-01T00:00:00.000Z" });
+  db = await makeTestDb();
+  ids = await seedMinimalOrg(db, { at: "2026-09-01T00:00:00.000Z" });
   const at = "2026-10-01T00:00:00.000Z";
-  const f = (o: Parameters<typeof insertJobFixture>[2]) => insertJobFixture(db, ids, { at, ...o }).job;
-  f({ statusKey: "new" });
-  f({ statusKey: "ready", dueDate: END_TODAY });
-  f({ statusKey: "assigned", dueDate: END_YESTERDAY });
-  f({ statusKey: "accepted", dueDate: END_TOMORROW });
-  f({ statusKey: "in_progress", dueDate: END_YESTERDAY, isPaused: true });
-  f({ statusKey: "in_progress", dueDate: END_TODAY });
-  f({ statusKey: "in_progress", dueDate: END_TODAY, editorId: ids.users.editor2 });
-  f({ statusKey: "submitted", reviewDueDate: "2026-10-07T00:00:00.000Z" });
-  f({ statusKey: "review", dueDate: END_TOMORROW });
-  f({ statusKey: "revision", dueDate: END_YESTERDAY });
-  f({ statusKey: "resubmitted" });
-  f({ statusKey: "approved", dueDate: END_YESTERDAY }); // done → never overdue
-  f({ statusKey: "delivered" });
-  f({ statusKey: "completed", at: "2026-10-06T01:00:00.000Z" }); // this week
-  completedLastWeekId = f({ statusKey: "completed", at: "2026-09-30T01:00:00.000Z" }).id;
-  f({ statusKey: "cancelled" });
+  const f = async (o: Parameters<typeof insertJobFixture>[2]) => (await insertJobFixture(db, ids, { at, ...o })).job;
+  await f({ statusKey: "new" });
+  await f({ statusKey: "ready", dueDate: END_TODAY });
+  await f({ statusKey: "assigned", dueDate: END_YESTERDAY });
+  await f({ statusKey: "accepted", dueDate: END_TOMORROW });
+  await f({ statusKey: "in_progress", dueDate: END_YESTERDAY, isPaused: true });
+  await f({ statusKey: "in_progress", dueDate: END_TODAY });
+  await f({ statusKey: "in_progress", dueDate: END_TODAY, editorId: ids.users.editor2 });
+  await f({ statusKey: "submitted", reviewDueDate: "2026-10-07T00:00:00.000Z" });
+  await f({ statusKey: "review", dueDate: END_TOMORROW });
+  await f({ statusKey: "revision", dueDate: END_YESTERDAY });
+  await f({ statusKey: "resubmitted" });
+  await f({ statusKey: "approved", dueDate: END_YESTERDAY }); // done → never overdue
+  await f({ statusKey: "delivered" });
+  await f({ statusKey: "completed", at: "2026-10-06T01:00:00.000Z" }); // this week
+  completedLastWeekId = (await f({ statusKey: "completed", at: "2026-09-30T01:00:00.000Z" })).id;
+  await f({ statusKey: "cancelled" });
 
   // completed last week → reopened → re-completed this week: counts once, this week
-  const a = f({ statusKey: "completed", at: "2026-09-29T01:00:00.000Z" });
-  moveJob(db, ids, a.id, "in_progress", "2026-10-02T00:00:00.000Z", { isReopen: true });
-  moveJob(db, ids, a.id, "submitted", "2026-10-03T00:00:00.000Z");
-  moveJob(db, ids, a.id, "approved", "2026-10-05T00:00:00.000Z");
-  moveJob(db, ids, a.id, "completed", "2026-10-06T02:00:00.000Z");
+  const a = await f({ statusKey: "completed", at: "2026-09-29T01:00:00.000Z" });
+  await moveJob(db, ids, a.id, "in_progress", "2026-10-02T00:00:00.000Z", { isReopen: true });
+  await moveJob(db, ids, a.id, "submitted", "2026-10-03T00:00:00.000Z");
+  await moveJob(db, ids, a.id, "approved", "2026-10-05T00:00:00.000Z");
+  await moveJob(db, ids, a.id, "completed", "2026-10-06T02:00:00.000Z");
   reopenedRecompletedId = a.id;
 
   // completed last week → reopened, still in revision: not completed this week
-  const b = f({ statusKey: "completed", at: "2026-09-29T02:00:00.000Z" });
-  moveJob(db, ids, b.id, "revision", "2026-10-07T00:00:00.000Z", { isReopen: true });
+  const b = await f({ statusKey: "completed", at: "2026-09-29T02:00:00.000Z" });
+  await moveJob(db, ids, b.id, "revision", "2026-10-07T00:00:00.000Z", { isReopen: true });
   reopenedOpenId = b.id;
 });
 
 afterEach(() => fakeClock.reset());
 
 describe("getDashboard / KPIs", () => {
-  it("management KPIs equal brute-force counts over every job", () => {
-    const ctx = contextFor(db, ids.users.manager);
-    const all = db.select().from(jobs).all();
+  it("management KPIs equal brute-force counts over every job", async () => {
+    const ctx = await contextFor(db, ids.users.manager);
+    const all = await db.select().from(jobs);
     const expected = bruteForce(all);
-    const kpis = getKpis(db, ctx);
+    const kpis = await getKpis(db, ctx);
     expect({ ...kpis, asOf: undefined, completedWeek: undefined }).toEqual({ ...expected, asOf: undefined });
     expect(kpis.asOf).toBe(NOW);
     expect(kpis.completedWeek).toEqual({ from: WEEK_START, to: WEEK_END });
@@ -99,9 +99,9 @@ describe("getDashboard / KPIs", () => {
     expect(expected.dueToday).toBe(3);
   });
 
-  it("a job completed last week, reopened and re-completed this week counts this week only, once", () => {
-    const ctx = contextFor(db, ids.users.owner);
-    const d = getDashboard(db, ctx);
+  it("a job completed last week, reopened and re-completed this week counts this week only, once", async () => {
+    const ctx = await contextFor(db, ids.users.owner);
+    const d = await getDashboard(db, ctx);
     expect(d.kpis.completedThisWeek).toBe(2);
     const completedIds = d.recentCompleted.map((j) => j.id);
     expect(completedIds.filter((id) => id === reopenedRecompletedId)).toHaveLength(1);
@@ -110,32 +110,32 @@ describe("getDashboard / KPIs", () => {
     expect(d.kpis.revisionRequired).toBe(2);
   });
 
-  it("the Completed-this-week drill-down (completedFrom/completedTo) lists exactly the KPI's jobs", () => {
+  it("the Completed-this-week drill-down (completedFrom/completedTo) lists exactly the KPI's jobs", async () => {
     for (const key of ["owner", "editor1"] as const) {
-      const ctx = contextFor(db, ids.users[key]);
-      const kpis = getKpis(db, ctx);
+      const ctx = await contextFor(db, ids.users[key]);
+      const kpis = await getKpis(db, ctx);
       const week = kpis.completedWeek;
       expect(week).toBeDefined();
-      const list = listJobs(db, ctx, { quick: "completed", completedFrom: week?.from, completedTo: week?.to, limit: "200" });
+      const list = await listJobs(db, ctx, { quick: "completed", completedFrom: week?.from, completedTo: week?.to, limit: "200" });
       expect(list.total).toBe(kpis.completedThisWeek);
     }
-    const owner = contextFor(db, ids.users.owner);
-    const list = listJobs(db, owner, { quick: "completed", completedFrom: WEEK_START, completedTo: WEEK_END });
+    const owner = await contextFor(db, ids.users.owner);
+    const list = await listJobs(db, owner, { quick: "completed", completedFrom: WEEK_START, completedTo: WEEK_END });
     expect(list.total).toBe(2);
     expect(list.rows.map((r) => r.id)).toContain(reopenedRecompletedId);
     expect(list.rows.map((r) => r.id)).not.toContain(completedLastWeekId);
     // civil bounds: completedTo is an inclusive day (Mon 5 – Sun 11 Oct)
-    expect(listJobs(db, owner, { completedFrom: "2026-10-05", completedTo: "2026-10-11" }).total).toBe(2);
+    expect((await listJobs(db, owner, { completedFrom: "2026-10-05", completedTo: "2026-10-11" })).total).toBe(2);
     // the KPI link carries the same bounds
     const href = KPI_DEFS.find((d) => d.key === "completedThisWeek")?.href;
-    const k = getKpis(db, owner);
+    const k = await getKpis(db, owner);
     const url = new URL(typeof href === "function" ? href(k) : String(href), "http://x");
-    expect(listJobs(db, owner, Object.fromEntries(url.searchParams)).total).toBe(k.completedThisWeek);
+    expect((await listJobs(db, owner, Object.fromEntries(url.searchParams))).total).toBe(k.completedThisWeek);
   });
 
-  it("due-today and overdue lists agree with the KPI counts and flags", () => {
-    const ctx = contextFor(db, ids.users.manager);
-    const d = getDashboard(db, ctx);
+  it("due-today and overdue lists agree with the KPI counts and flags", async () => {
+    const ctx = await contextFor(db, ids.users.manager);
+    const d = await getDashboard(db, ctx);
     expect(d.variant).toBe("management");
     expect(d.dueToday).toHaveLength(d.kpis.dueToday);
     expect(d.overdue).toHaveLength(d.kpis.overdue);
@@ -147,10 +147,10 @@ describe("getDashboard / KPIs", () => {
     expect(d.layout.widgets.map((w) => w.type)).toContain("team_workload");
   });
 
-  it("editor dashboard is personal and only counts the editor's visible jobs", () => {
-    const ctx = contextFor(db, ids.users.editor2);
-    const mine = db.select().from(jobs).where(eq(jobs.editorId, ids.users.editor2)).all();
-    const d = getDashboard(db, ctx);
+  it("editor dashboard is personal and only counts the editor's visible jobs", async () => {
+    const ctx = await contextFor(db, ids.users.editor2);
+    const mine = await db.select().from(jobs).where(eq(jobs.editorId, ids.users.editor2));
+    const d = await getDashboard(db, ctx);
     expect(d.variant).toBe("personal");
     expect({ ...d.kpis, asOf: undefined, completedWeek: undefined }).toEqual({ ...bruteForce(mine), asOf: undefined });
     expect(d.kpis.active).toBe(1);
@@ -162,24 +162,24 @@ describe("getDashboard / KPIs", () => {
     expect(d.layout.widgets.map((w) => w.type)).toContain("my_workload");
   });
 
-  it("photographer with no jobs sees zero KPIs; flags open team workloads", () => {
-    const ctx = contextFor(db, ids.users.photographer2);
-    const d = getDashboard(db, ctx);
+  it("photographer with no jobs sees zero KPIs; flags open team workloads", async () => {
+    const ctx = await contextFor(db, ids.users.photographer2);
+    const d = await getDashboard(db, ctx);
     expect(d.kpis.active).toBe(0);
     expect(d.dueToday).toEqual([]);
     expect(d.workloads).toBeNull();
-    db.update(users).set({ canViewTeamWorkloads: true, canViewAnalytics: true }).where(eq(users.id, ids.users.photographer2)).run();
-    const d2 = getDashboard(db, contextFor(db, ids.users.photographer2));
+    await db.update(users).set({ canViewTeamWorkloads: true, canViewAnalytics: true }).where(eq(users.id, ids.users.photographer2));
+    const d2 = await getDashboard(db, await contextFor(db, ids.users.photographer2));
     expect(d2.workloads?.length).toBeGreaterThan(0);
     expect(Array.isArray(d2.bottlenecks)).toBe(true);
   });
 
-  it("returns the same layout as the dashboard layout service (role default, allowed widgets only)", () => {
+  it("returns the same layout as the dashboard layout service (role default, allowed widgets only)", async () => {
     for (const key of ["editor1", "photographer1", "manager", "owner"] as const) {
-      const ctx = contextFor(db, ids.users[key]);
-      expect(getDashboard(db, ctx).layout).toEqual(getDashboardLayout(db, ctx).layout);
+      const ctx = await contextFor(db, ids.users[key]);
+      expect((await getDashboard(db, ctx)).layout).toEqual((await getDashboardLayout(db, ctx)).layout);
     }
-    const editorLayout = getDashboard(db, contextFor(db, ids.users.editor1)).layout;
+    const editorLayout = (await getDashboard(db, await contextFor(db, ids.users.editor1))).layout;
     expect(editorLayout.widgets[0].type).toBe("kpis");
     // an editor never gets widgets they may not load
     expect(editorLayout.widgets.some((w) => ["team_workload", "editor_performance", "bottlenecks", "revision_rate"].includes(w.type))).toBe(false);

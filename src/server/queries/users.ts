@@ -18,7 +18,7 @@ import { revisionRate } from "@/lib/metrics";
 import type { AuthContext, DirectoryEntry, DirectoryStats, User, UserDetailView, UserProfile, UserRef } from "@/lib/types";
 import { assertCan, can, isManagement } from "@/server/auth/permissions";
 import { loadUserInOrg, parseInput, safeUser, userRef } from "@/server/services/_shared";
-import { approvedJobsInRange, groupBy, jobCountsBy, lastDaysRange, loadOrgSettings } from "./metrics";
+import { approvedJobsInRange, binaryAsc, groupBy, jobCountsBy, lastDaysRange, loadOrgSettings } from "./metrics";
 import { likeSql } from "./scope";
 import { teamsByUser } from "./teams";
 import { canViewTeamWorkloads, computeWorkloads, getWorkloadDetail, openJobCountFor } from "./workloads";
@@ -39,7 +39,7 @@ export function projectUser(row: User, ctx: AuthContext): UserProfile | UserRef 
 }
 
 /** `GET /api/users?role&active&q` (user.view; reduced projection for P/E). */
-export function listUsers(db: DbLike, ctx: AuthContext, input: unknown = {}): (UserProfile | UserRef)[] {
+export async function listUsers(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<(UserProfile | UserRef)[]> {
   assertCan(ctx, "user.view");
   const f = parseInput(UserListFiltersSchema, input ?? {});
   const parts: (SQL | undefined)[] = [eq(users.organisationId, ctx.organisationId)];
@@ -47,36 +47,34 @@ export function listUsers(db: DbLike, ctx: AuthContext, input: unknown = {}): (U
   if (f.active === "1" || f.active === "true") parts.push(eq(users.isActive, true));
   if (f.active === "0" || f.active === "false") parts.push(eq(users.isActive, false));
   if (f.q) parts.push(isManagement(ctx) ? or(likeSql(users.name, f.q), likeSql(users.email, f.q)) : likeSql(users.name, f.q));
-  return db
+  const rows = await db
     .select()
     .from(users)
     .where(and(...parts))
-    .orderBy(asc(users.name), asc(users.id))
-    .all()
-    .map((u) => projectUser(u, ctx));
+    .orderBy(binaryAsc(users.name), asc(users.id));
+  return rows.map((u) => projectUser(u, ctx));
 }
 
 /**
  * `/team/photographers` / `/team/editors` directory (team.view_members).
  * Inactive people are listed for management only.
  */
-export function getDirectory(db: DbLike, ctx: AuthContext, role: "photographer" | "editor"): DirectoryEntry[] {
+export async function getDirectory(db: DbLike, ctx: AuthContext, role: "photographer" | "editor"): Promise<DirectoryEntry[]> {
   assertCan(ctx, "team.view_members");
   const management = isManagement(ctx);
-  const rows = db
+  const rows = await db
     .select()
     .from(users)
     .where(and(eq(users.organisationId, ctx.organisationId), eq(users.role, role), management ? undefined : eq(users.isActive, true)))
-    .orderBy(asc(users.name))
-    .all();
+    .orderBy(binaryAsc(users.name), asc(users.id));
   const seeStats = canViewTeamWorkloads(ctx);
-  const statsFor = directoryStats(
+  const statsFor = await directoryStats(
     db,
     ctx,
     role,
     seeStats ? rows.map((r) => r.id) : rows.filter((r) => r.id === ctx.userId).map((r) => r.id),
   );
-  const teams = teamsByUser(
+  const teams = await teamsByUser(
     db,
     ctx,
     rows.map((r) => r.id),
@@ -100,15 +98,20 @@ export function getDirectory(db: DbLike, ctx: AuthContext, role: "photographer" 
  * `/team/editors`, `/team/workloads`, `/api/workloads` and `/team/users/[id]`
  * all show one "Active" figure. Photographers keep the ACTIVE job counts.
  */
-export function directoryStats(db: DbLike, ctx: AuthContext, role: "photographer" | "editor", userIds: readonly string[]): Map<string, DirectoryStats> {
+export async function directoryStats(
+  db: DbLike,
+  ctx: AuthContext,
+  role: "photographer" | "editor",
+  userIds: readonly string[],
+): Promise<Map<string, DirectoryStats>> {
   const out = new Map<string, DirectoryStats>();
   if (userIds.length === 0) return out;
   const now = ctx.now();
   const key = role === "editor" ? "editorId" : "photographerId";
   const column = role === "editor" ? jobs.editorId : jobs.photographerId;
-  const counts = jobCountsBy(db, ctx, key, { scope: "org", now, where: inArray(column, [...userIds]) });
-  const workloads = role === "editor" ? new Map(computeWorkloads(db, ctx, { now, editorIds: userIds }).rows.map((r) => [r.editor.id, r])) : null;
-  const approved = approvedJobsInRange(db, ctx, lastDaysRange(ctx, now, 30), { scope: "org", where: role === "photographer" ? isNotNull(jobs.photographerId) : undefined });
+  const counts = await jobCountsBy(db, ctx, key, { scope: "org", now, where: inArray(column, [...userIds]) });
+  const workloads = role === "editor" ? new Map((await computeWorkloads(db, ctx, { now, editorIds: userIds })).rows.map((r) => [r.editor.id, r])) : null;
+  const approved = await approvedJobsInRange(db, ctx, lastDaysRange(ctx, now, 30), { scope: "org", where: role === "photographer" ? isNotNull(jobs.photographerId) : undefined });
   const approvedBy = groupBy(approved, (j) => (role === "editor" ? j.approvingEditorId : j.photographerId));
   for (const id of userIds) {
     const c = counts.get(id);
@@ -128,11 +131,11 @@ export function directoryStats(db: DbLike, ctx: AuthContext, role: "photographer
  * `GET /api/users/:id` → UserDetailView. Foreign ids → 404. Management and
  * the user themself get the profile and WorkloadDetail; others the reduced ref.
  */
-export function getUserDetail(db: DbLike, ctx: AuthContext, userId: string): UserDetailView {
+export async function getUserDetail(db: DbLike, ctx: AuthContext, userId: string): Promise<UserDetailView> {
   assertCan(ctx, "user.view");
-  const target = loadUserInOrg(db, ctx, userId);
+  const target = await loadUserInOrg(db, ctx, userId);
   const full = isManagement(ctx) || target.id === ctx.userId;
-  const settings = full ? loadOrgSettings(db, ctx) : null;
+  const settings = full ? await loadOrgSettings(db, ctx) : null;
   /** Management controls (role, capacity, deactivate…) for another person this viewer may administer. */
   const canManage =
     isManagement(ctx) &&
@@ -141,10 +144,10 @@ export function getUserDetail(db: DbLike, ctx: AuthContext, userId: string): Use
   return {
     ref: userRef(target),
     profile: full ? safeUser(target) : null,
-    teams: teamsByUser(db, ctx, [target.id]).get(target.id) ?? [],
+    teams: (await teamsByUser(db, ctx, [target.id])).get(target.id) ?? [],
     capacityHoursPerWeek: settings ? (target.capacityHoursPerWeek ?? settings.defaultCapacityHoursPerWeek) : null,
-    openJobCount: full ? openJobCountFor(db, ctx, target.id) : null,
-    workload: full && target.role !== "owner" && target.role !== "manager" ? getWorkloadDetail(db, ctx, target.id) : null,
+    openJobCount: full ? await openJobCountFor(db, ctx, target.id) : null,
+    workload: full && target.role !== "owner" && target.role !== "manager" ? await getWorkloadDetail(db, ctx, target.id) : null,
     canManage,
   };
 }

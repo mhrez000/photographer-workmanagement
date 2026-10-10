@@ -28,20 +28,19 @@ Roles: **Owner**, **Manager**, **Photographer**, **Editor**. Every page, query a
 
 ## Stack
 
-Next.js 16 (App Router, Turbopack, `proxy.ts`), React 19, TypeScript (strict), Tailwind CSS v4 · Drizzle ORM + better-sqlite3 · Zod 4 · jose (signed session cookies) + bcryptjs · lucide-react, @dnd-kit, recharts, cmdk, date-fns · Vitest + Playwright.
+Next.js 16 (App Router, Turbopack, `proxy.ts`), React 19, TypeScript (strict), Tailwind CSS v4 · Drizzle ORM on Postgres (Supabase in production, PGlite locally) · Zod 4 · jose (signed session cookies) + bcryptjs · lucide-react, @dnd-kit, recharts, cmdk, date-fns · Vitest + Playwright.
 
 ## Getting started
 
-Requires Node.js 20+ (better-sqlite3 builds a native module on install).
+Requires Node.js 20+. No database server and no env file are needed locally: dev and tests run on PGlite (Postgres 17 in WASM, in-process, data in `./data/pglite`).
 
 ```bash
 npm install
-cp .env.example .env        # then set SESSION_SECRET to a random string of at least 32 characters
-npm run db:reset            # create data/app.db, install integrity triggers, seed demo data (~15 s)
+npm run db:reset            # fresh ./data/pglite: migrations (incl. integrity triggers), seed demo data, verify
 npm run dev                 # http://localhost:3000
 ```
 
-`.env` keys: `SESSION_SECRET` (required, ≥ 32 chars), `DATABASE_PATH` (default `./data/app.db`), `APP_URL`, and optional `CRON_SECRET` (≥ 32 chars). With `CRON_SECRET` set, a scheduler can call `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>` every few minutes so overdue alerts fire even when nobody has the app open.
+With no `SESSION_SECRET`, the dev server generates one once into `data/.session-secret` (gitignored). To configure things, `cp .env.example .env`: `SESSION_SECRET` (≥ 32 chars; **required in production**), `PGLITE_DATA_DIR` (default `./data/pglite`), `APP_URL`, and optional `CRON_SECRET` (≥ 32 chars). With `CRON_SECRET` set, a scheduler can call `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>` every few minutes so overdue alerts fire even when nobody has the app open. Never put `DATABASE_URL` in `.env`/`.env.local`: when it is set, the app talks to that Postgres instead of PGlite.
 
 ### Demo accounts
 
@@ -67,9 +66,10 @@ The full roster is in `src/db/seed/catalog.ts`. The seed runs the real services 
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint (flat config) |
 | `npm run test` | Vitest unit and integration tests (`src/**/*.test.ts`) |
-| `npm run e2e` | Playwright (`e2e/`; starts its own dev server on :3100 with `data/e2e.db`) |
-| `npm run db:reset` | Dev only: delete the DB, then push the schema, add the guards and seed |
-| `npm run db:push` · `db:guard` · `db:seed` | Individual steps (`db:seed` refuses to run if data already exists) |
+| `npm run e2e` | Playwright (`e2e/`; starts its own dev server on :3100 with `data/pglite-e2e`) |
+| `npm run db:reset` | Dev only (local PGlite; refuses when `DATABASE_URL` is set): delete `./data/pglite`, migrate (schema + guards), seed, verify |
+| `npm run db:migrate` · `db:seed` · `db:verify` | Individual steps (`db:seed` refuses to run if data already exists) |
+| `npm run db:migrate:remote` · `db:seed:remote [-- --wipe]` · `db:verify:remote` | Supabase maintenance; reads `.env.supabase` (never committed) — see [Supabase](#supabase-production-database) |
 | `npm run db:verify` | Recompute every derived job column from the ledgers; must report 0 drift |
 
 After any change to `src/db/schema.ts`, run `npx drizzle-kit generate` (the committed `drizzle/` DDL feeds the test database).
@@ -98,19 +98,36 @@ Conventions that matter when adding a page:
 - **Shared UI**: status, priority, due, person, workload and capacity display pieces and all job actions are in `@/components/jobs`. Filters are in `@/components/filters` and `SectionCard`/`StatTile`/`RouteError` are in `@/components/common`. Reuse them rather than writing local copies.
 - **Navigation**: `src/config/nav.ts` filters by role, plus `grant`s for flag-based access (for example a photographer with `can_view_analytics` sees Insights).
 
-## Deploying to Vercel (hosted demo)
+## Supabase (production database)
 
-The repo deploys to Vercel with no configuration. Import it at **vercel.com/new**, keep the detected Next.js preset and deploy. Vercel runs the `vercel-build` script, which seeds a fresh demo database (`data/demo.db`, through the real services) and then runs `next build`.
+Production data lives in Supabase Postgres 17. The connection strings live in `.env.supabase` at the project root — gitignored, **never** loaded by Next.js, never printed by any script:
 
-How the hosted demo works:
+```bash
+# .env.supabase
+DATABASE_URL=postgresql://…pooler.supabase.com:6543/postgres   # transaction pooler — runtime (prepare: false)
+DIRECT_URL=postgresql://…pooler.supabase.com:5432/postgres     # session pooler — migrations, bulk loads, verify
+```
 
-- **Database:** Vercel's filesystem is read-only, so each server instance copies the bundled demo database to `/tmp` on first request and runs on that copy (`src/db/index.ts`).
-- **Data does not persist.** Changes last only as long as that server instance. A new instance (after idle time, a redeploy, or a scale-out) starts again from the seeded demo data. The demo data is dated to the deploy, so redeploy to refresh it.
-- **Session secret:** set `SESSION_SECRET` (≥ 32 chars) in the project's environment variables. If you don't, the build generates a random one per deployment, so everyone is signed out on each deploy.
+| Command | What it does |
+|---|---|
+| `npm run db:migrate:remote` | `drizzle-kit migrate` against `DIRECT_URL`: 27 tables + the integrity triggers (`drizzle/0001_guards.sql`). Safe to re-run. |
+| `npm run db:seed:remote` | Seeds a fresh in-memory PGlite through the real services, then copies every table to Supabase in ONE transaction and verifies it. Refuses (before seeding) when the target is not migrated or already has rows. |
+| `npm run db:seed:remote -- --wipe` | Same, but first truncates every app table in that transaction — **replaces all remote data** with the demo data. |
+| `npm run db:verify:remote` | Recomputes every derived job column on Supabase from the ledgers; must report 0 drift. |
+| `node scripts/start-remote.mjs [port]` | After `npx next build`: runs `next start` (default :3160) with `DATABASE_URL` from `.env.supabase` in the child process only — a production-mode check from a workstation. |
+
+`REMOTE_ENV_FILE=<file>` points all of the above at another env file (for example a local Postgres to rehearse a cutover). See `docs/POSTGRES-MIGRATION.md`.
+
+## Deploying to Vercel
+
+Set these Vercel environment variables (Production, and Preview if previews should have a database):
+
+- `DATABASE_URL` — Supabase **transaction pooler** (port 6543); the app connects with `prepare: false`.
+- `DIRECT_URL` — Supabase **session pooler** (port 5432); `vercel-build` runs `drizzle-kit migrate` against it before `next build` (skipped when unset).
+- `SESSION_SECRET` (≥ 32 chars, required), optional `CRON_SECRET`.
+
 - **Overdue alerts on a schedule (optional):** set `CRON_SECRET` and point a scheduler at `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>`.
-- **Region:** pick the region closest to your studio in the project settings (for Australia, Sydney `syd1`).
-
-For production use with saved data, the app needs a hosted database instead of the bundled SQLite file. The closest fit is a hosted SQLite service such as Turso (libSQL). That is a larger change because the data layer is synchronous today.
+- **Region:** pick the Vercel region closest to your Supabase project (for Australia, Sydney `syd1`).
 
 ## Testing
 
@@ -120,7 +137,7 @@ npm run db:verify          # ledger ↔ derived-column integrity on the dev DB (
 npm run e2e                # Playwright, desktop + mobile projects
 ```
 
-The Vitest suite covers the permission policy, the workflow engine and side effects, services (audit in the same transaction), queries, metrics, automations, date maths (DST), the REST surface (every route answers every method with JSON) and the seed invariants. It uses an in-memory DB built from `drizzle/` via `makeTestDb()`.
+The Vitest suite covers the permission policy, the workflow engine and side effects, services (audit in the same transaction), queries, metrics, automations, date maths (DST), the REST surface (every route answers every method with JSON) and the seed invariants. Each test gets a fresh in-memory PGlite database built from `drizzle/` via `makeTestDb()`.
 
 ### End-to-end (Playwright)
 
@@ -128,7 +145,7 @@ Two ways to run it:
 
 | Mode | Command | What happens |
 |---|---|---|
-| Own server (default) | `npm run e2e` | Playwright resets `data/e2e.db` (`npm run e2e:prepare`: reset → guard → seed), starts `next dev` on **:3100** against it, runs both projects. If something already listens on :3100 it is reused **without** a reset — stop it, or run `npm run e2e:prepare` first. |
+| Own server (default) | `npm run e2e` | Playwright resets `data/pglite-e2e` (`npm run e2e:prepare`: delete → migrate → seed → verify), starts `next dev` on **:3100** against it, runs both projects. If something already listens on :3100 it is reused **without** a reset — stop it, or run `npm run e2e:prepare` first. |
 | Existing server | `E2E_BASE_URL=http://localhost:3000 npx playwright test` | No server is started and no database is reset: specs create every job, client and user they need through the API, so they also run against a shared, already-seeded dev server. |
 
 - Projects: `desktop` (1440×900, every spec except `mobile.spec.ts`) and `mobile` (390×844 touch, `mobile.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/kanban.spec.ts`.

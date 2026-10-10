@@ -23,10 +23,11 @@
  * `applyMove` (engine-internal / restore / withdraw moves),
  * `closeRunningSessions`, `updateJobRow` (version-checked jobs UPDATE).
  *
- * Every function here is synchronous: better-sqlite3 transactions cannot be async.
+ * Every DB-touching function here is async (Postgres): callers await it and,
+ * inside a transaction, pass the `tx` (never the root db).
  */
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { getDb, type Db, type DbLike, type Tx } from "@/db/index";
+import { first, getDb, type Db, type DbLike, type Tx } from "@/db/index";
 import {
   jobLinks,
   jobNotes,
@@ -123,7 +124,7 @@ export interface AutomationTriggerEvent {
   jobId: string | null;
 }
 
-export type AutomationEnqueuer = (tx: Tx, ctx: AuthContext, event: AutomationTriggerEvent) => void;
+export type AutomationEnqueuer = (tx: Tx, ctx: AuthContext, event: AutomationTriggerEvent) => void | Promise<unknown>;
 
 let automationEnqueuer: AutomationEnqueuer | null = null;
 
@@ -136,8 +137,8 @@ export function setAutomationEnqueuer(fn: AutomationEnqueuer | null): void {
   automationEnqueuer = fn;
 }
 
-export function emitAutomationEvent(tx: Tx, ctx: AuthContext, event: AutomationTriggerEvent): void {
-  if (automationEnqueuer) automationEnqueuer(tx, ctx, event);
+export async function emitAutomationEvent(tx: Tx, ctx: AuthContext, event: AutomationTriggerEvent): Promise<void> {
+  if (automationEnqueuer) await automationEnqueuer(tx, ctx, event);
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,15 +154,16 @@ export type JobPatch = Partial<
  * `UPDATE jobs SET …, version = version + 1 WHERE id = ? AND version = ?`.
  * Zero rows → 409 ConflictError carrying the current row.
  */
-export function updateJobRow(tx: Tx, ctx: AuthContext, job: Job, patch: JobPatch): Job {
-  const row = tx
-    .update(jobs)
-    .set({ ...patch, version: job.version + 1, updatedAt: ctx.now() })
-    .where(and(eq(jobs.id, job.id), eq(jobs.organisationId, job.organisationId), eq(jobs.version, job.version)))
-    .returning()
-    .get();
+export async function updateJobRow(tx: Tx, ctx: AuthContext, job: Job, patch: JobPatch): Promise<Job> {
+  const row = await first(
+    tx
+      .update(jobs)
+      .set({ ...patch, version: job.version + 1, updatedAt: ctx.now() })
+      .where(and(eq(jobs.id, job.id), eq(jobs.organisationId, job.organisationId), eq(jobs.version, job.version)))
+      .returning(),
+  );
   if (!row) {
-    const current = tx.select().from(jobs).where(eq(jobs.id, job.id)).get();
+    const current = await first(tx.select().from(jobs).where(eq(jobs.id, job.id)));
     throw new ConflictError(undefined, current);
   }
   return row;
@@ -176,7 +178,7 @@ export function jobLinkPath(jobId: string, hash?: string): string {
   return hash ? `/jobs/${jobId}#${hash}` : `/jobs/${jobId}`;
 }
 
-function sendJobNotification(
+async function sendJobNotification(
   tx: Tx,
   ctx: AuthContext,
   job: Job,
@@ -185,8 +187,8 @@ function sendJobNotification(
   title: string,
   activityEventId: string | null,
   hash?: string,
-): void {
-  notify(tx, ctx, {
+): Promise<void> {
+  await notify(tx, ctx, {
     userIds,
     type,
     title,
@@ -197,22 +199,16 @@ function sendJobNotification(
   });
 }
 
-function userNames(db: DbLike, ids: readonly (string | null | undefined)[]): Map<string, string> {
+async function userNames(db: DbLike, ids: readonly (string | null | undefined)[]): Promise<Map<string, string>> {
   const list = Array.from(new Set(ids.filter((id): id is string => typeof id === "string")));
   if (list.length === 0) return new Map();
-  return new Map(
-    db
-      .select({ id: users.id, name: users.name })
-      .from(users)
-      .where(inArray(users.id, list))
-      .all()
-      .map((u) => [u.id, u.name]),
-  );
+  const rows = await db.select({ id: users.id, name: users.name }).from(users).where(inArray(users.id, list));
+  return new Map(rows.map((u) => [u.id, u.name]));
 }
 
-export function isUserActive(db: DbLike, userId: string | null | undefined): boolean {
+export async function isUserActive(db: DbLike, userId: string | null | undefined): Promise<boolean> {
   if (!userId) return false;
-  const row = db.select({ isActive: users.isActive }).from(users).where(eq(users.id, userId)).get();
+  const row = await first(db.select({ isActive: users.isActive }).from(users).where(eq(users.id, userId)));
   return row?.isActive === true;
 }
 
@@ -230,20 +226,20 @@ export interface VisibleJob {
 }
 
 /** Job in the actor's org that the actor may view; otherwise 404 (existence never leaks). */
-export function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): VisibleJob {
-  const job = loadJobInOrg(db, ctx, jobId);
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? loadPastEditorIds(db, job.id) : undefined);
+export async function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string): Promise<VisibleJob> {
+  const job = await loadJobInOrg(db, ctx, jobId);
+  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
   if (!can(ctx, "job.view", ref)) throw new NotFoundError("Job");
   return { job, ref };
 }
 
 /** The job shape the pure workflow helpers need. */
-export function toWorkflowJob(db: DbLike, job: Job, ref?: JobPermissionRef): WorkflowJobLike {
+export async function toWorkflowJob(db: DbLike, job: Job, ref?: JobPermissionRef): Promise<WorkflowJobLike> {
   return {
     ...(ref ?? jobPermissionRef(job)),
     statusId: job.statusId,
     previousStatusId: job.previousStatusId,
-    editorIsActive: job.editorId ? isUserActive(db, job.editorId) : undefined,
+    editorIsActive: job.editorId ? await isUserActive(db, job.editorId) : undefined,
   };
 }
 
@@ -254,18 +250,17 @@ export interface WorkflowGraph {
   edges: EdgeLike[];
 }
 
-export function loadWorkflowGraph(db: DbLike, organisationId: string, workflowId: string): WorkflowGraph {
-  const statuses = db
+export async function loadWorkflowGraph(db: DbLike, organisationId: string, workflowId: string): Promise<WorkflowGraph> {
+  const statuses = await db
     .select()
     .from(workflowStatuses)
     .where(and(eq(workflowStatuses.workflowId, workflowId), eq(workflowStatuses.organisationId, organisationId)))
-    .orderBy(asc(workflowStatuses.sortOrder))
-    .all();
-  const edges: EdgeLike[] = db
+    .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.id));
+  const edges: EdgeLike[] = await db
     .select()
     .from(workflowTransitions)
     .where(and(eq(workflowTransitions.workflowId, workflowId), eq(workflowTransitions.organisationId, organisationId)))
-    .all();
+    .orderBy(asc(workflowTransitions.createdAt), asc(workflowTransitions.id));
   return { statuses, edges };
 }
 
@@ -330,22 +325,22 @@ export function movesFor(ctx: AuthContext, job: WorkflowJobLike, graph: Workflow
  * that category; several → 422 AmbiguousTarget; none → the lowest-sortOrder
  * status of the category (the move check then explains why it is not allowed).
  */
-export function resolveTransitionTarget(
+export async function resolveTransitionTarget(
   db: DbLike,
   ctx: AuthContext,
   job: Job,
   graph: WorkflowGraph,
   target: { toStatusId?: string | null; toCategory?: StatusCategory | null },
-): WorkflowStatus {
+): Promise<WorkflowStatus> {
   if (target.toStatusId) {
-    const s = loadStatusInWorkflow(db, ctx, job.workflowId, target.toStatusId);
+    const s = await loadStatusInWorkflow(db, ctx, job.workflowId, target.toStatusId);
     if (s.archivedAt !== null) throw new NotFoundError("Status");
     return s;
   }
   const category = target.toCategory;
   if (!category) throw new NotFoundError("Status");
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? loadPastEditorIds(db, job.id) : undefined);
-  const candidates = movesFor(ctx, toWorkflowJob(db, job, ref), graph).filter((m) => m.toStatus.category === category);
+  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(db, job.id) : undefined);
+  const candidates = movesFor(ctx, await toWorkflowJob(db, job, ref), graph).filter((m) => m.toStatus.category === category);
   if (candidates.length === 1) return statusIn(graph, candidates[0].toStatus.id);
   if (candidates.length > 1) {
     throw new AmbiguousTargetError(candidates.map((m) => ({ id: m.toStatus.id, name: m.toStatus.name, key: m.toStatus.key })));
@@ -374,29 +369,32 @@ export function unassignedTargetOf(graph: WorkflowGraph): WorkflowStatus {
  * this job; `{ userId }` closes the user's running session wherever it is.
  * Returns the closed session ids.
  */
-export function closeRunningSessions(
+export async function closeRunningSessions(
   tx: Tx,
   ctx: AuthContext,
   filter: { jobId?: string; userId?: string },
   endReason: SessionEndReason,
   closedBy: WorkSessionClosedBy,
   batchId?: string | null,
-): string[] {
+): Promise<string[]> {
   const opts = { closedBy, ...(batchId ? { metadata: { batchId } } : {}) };
   if (filter.userId) {
     if (filter.jobId) {
-      const running = tx
-        .select({ id: workSessions.id })
-        .from(workSessions)
-        .where(and(eq(workSessions.userId, filter.userId), eq(workSessions.jobId, filter.jobId), isNull(workSessions.endedAt)))
-        .get();
+      const running = await first(
+        tx
+          .select({ id: workSessions.id })
+          .from(workSessions)
+          .where(and(eq(workSessions.userId, filter.userId), eq(workSessions.jobId, filter.jobId), isNull(workSessions.endedAt)))
+          .limit(1),
+      );
       if (!running) return [];
     }
-    const closed = closeRunningSessionForUser(tx, ctx, filter.userId, endReason, opts);
+    const closed = await closeRunningSessionForUser(tx, ctx, filter.userId, endReason, opts);
     return closed ? [closed.id] : [];
   }
   if (!filter.jobId) return [];
-  return closeSessionsForJob(tx, ctx, filter.jobId, endReason, opts).map((r) => r.id);
+  const closed = await closeSessionsForJob(tx, ctx, filter.jobId, endReason, opts);
+  return closed.map((r) => r.id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -430,30 +428,31 @@ export interface SwapEditorResult {
  * `previous_editor_id`, audits `assignment.ended` / `assignment.created`
  * and notifies. Callers check permissions and validate the target user.
  */
-export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: string | null, opts: SwapEditorOptions = {}): SwapEditorResult {
+export async function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: string | null, opts: SwapEditorOptions = {}): Promise<SwapEditorResult> {
   let job = jobIn;
   const oldEditorId = job.editorId;
   const none: SwapEditorResult = { job, previousEditorId: oldEditorId, assignmentId: null, endedAssignmentId: null, createdEventId: null, endedEventId: null };
   if (oldEditorId === newEditorId) return none;
   const now = ctx.now();
-  const names = userNames(tx, [oldEditorId, newEditorId]);
+  const names = await userNames(tx, [oldEditorId, newEditorId]);
   const unassignReason: UnassignReason = opts.unassignReason ?? (newEditorId ? "reassigned" : "unassigned");
   const meta = (extra: Record<string, unknown>) => jobEventMeta(job, extra, opts.batchId);
 
   let endedAssignmentId: string | null = null;
   let endedEventId: string | null = null;
-  const open = tx
-    .select()
-    .from(jobAssignments)
-    .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, "editor"), isNull(jobAssignments.unassignedAt)))
-    .get();
+  const open = await first(
+    tx
+      .select()
+      .from(jobAssignments)
+      .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, "editor"), isNull(jobAssignments.unassignedAt)))
+      .limit(1),
+  );
   if (open) {
-    tx.update(jobAssignments)
+    await tx.update(jobAssignments)
       .set({ unassignedAt: now, unassignedByUserId: ctx.userId, unassignReason })
-      .where(and(eq(jobAssignments.id, open.id), isNull(jobAssignments.unassignedAt)))
-      .run();
+      .where(and(eq(jobAssignments.id, open.id), isNull(jobAssignments.unassignedAt)));
     endedAssignmentId = open.id;
-    endedEventId = recordEvent(tx, ctx, {
+    endedEventId = await recordEvent(tx, ctx, {
       entityType: "assignment",
       entityId: open.id,
       jobId: job.id,
@@ -464,14 +463,14 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
       metadata: meta({ assignmentId: open.id, unassignReason, reason: opts.reason ?? null }),
     });
     const sessionReason: SessionEndReason = unassignReason === "user_deactivated" ? "auto_deactivated" : "auto_reassigned";
-    closeRunningSessions(tx, ctx, { jobId: job.id, userId: open.userId }, sessionReason, unassignReason === "user_deactivated" ? "deactivate" : "reassign", opts.batchId);
+    await closeRunningSessions(tx, ctx, { jobId: job.id, userId: open.userId }, sessionReason, unassignReason === "user_deactivated" ? "deactivate" : "reassign", opts.batchId);
   }
 
   let assignmentId: string | null = null;
   let createdEventId: string | null = null;
   if (newEditorId) {
     assignmentId = newId();
-    tx.insert(jobAssignments)
+    await tx.insert(jobAssignments)
       .values({
         id: assignmentId,
         organisationId: ctx.organisationId,
@@ -482,9 +481,8 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
         assignedAt: now,
         reason: opts.reason ?? null,
         statusCategoryAtAssign: job.statusCategory,
-      })
-      .run();
-    createdEventId = recordEvent(tx, ctx, {
+      });
+    createdEventId = await recordEvent(tx, ctx, {
       entityType: "assignment",
       entityId: assignmentId,
       jobId: job.id,
@@ -494,19 +492,21 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
       newValue: { userId: newEditorId, role: "editor", userName: names.get(newEditorId) ?? null },
       metadata: meta({ assignmentId, reason: opts.reason ?? null, statusCategory: job.statusCategory }),
     });
-    tx.update(jobAssignments).set({ activityEventId: createdEventId }).where(eq(jobAssignments.id, assignmentId)).run();
+    await tx.update(jobAssignments).set({ activityEventId: createdEventId }).where(eq(jobAssignments.id, assignmentId));
   }
 
   // Re-point the open revision (assignee is editable while open).
-  const openRevision = tx
-    .select()
-    .from(jobRevisions)
-    .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
-    .get();
+  const openRevision = await first(
+    tx
+      .select()
+      .from(jobRevisions)
+      .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
+      .limit(1),
+  );
   let repointedEventId: string | null = null;
   if (openRevision && openRevision.assigneeUserId !== newEditorId) {
-    tx.update(jobRevisions).set({ assigneeUserId: newEditorId }).where(and(eq(jobRevisions.id, openRevision.id), isNull(jobRevisions.resolvedAt))).run();
-    repointedEventId = recordEvent(tx, ctx, {
+    await tx.update(jobRevisions).set({ assigneeUserId: newEditorId }).where(and(eq(jobRevisions.id, openRevision.id), isNull(jobRevisions.resolvedAt)));
+    repointedEventId = await recordEvent(tx, ctx, {
       entityType: "revision",
       entityId: openRevision.id,
       jobId: job.id,
@@ -518,7 +518,7 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
     });
   }
 
-  job = updateJobRow(tx, ctx, job, {
+  job = await updateJobRow(tx, ctx, job, {
     editorId: newEditorId,
     previousEditorId: oldEditorId ?? job.previousEditorId,
   });
@@ -527,7 +527,7 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
     if (openRevision && repointedEventId) {
       // The new editor inherits an open revision: tell them what to fix (mandatory
       // revision_requested, §6) instead of a generic job_assigned.
-      notify(tx, ctx, {
+      await notify(tx, ctx, {
         userIds: [newEditorId],
         type: "revision_requested",
         title: `Revision #${openRevision.revisionNumber} on ${job.jobNumber} is now assigned to you`,
@@ -537,15 +537,15 @@ export function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditorId: st
         linkPath: jobLinkPath(job.id, `revision-${openRevision.revisionNumber}`),
       });
     } else {
-      sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was assigned to you`, createdEventId);
+      await sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was assigned to you`, createdEventId);
     }
-    if (createdEventId) emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
+    if (createdEventId) await emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
   }
   if (oldEditorId && opts.notifyOld !== false) {
     if (newEditorId) {
-      sendJobNotification(tx, ctx, job, "job_reassigned", [oldEditorId], `${job.jobNumber} was reassigned`, createdEventId ?? endedEventId);
+      await sendJobNotification(tx, ctx, job, "job_reassigned", [oldEditorId], `${job.jobNumber} was reassigned`, createdEventId ?? endedEventId);
     } else {
-      sendJobNotification(tx, ctx, job, "job_unassigned", [oldEditorId], `You were unassigned from ${job.jobNumber}`, endedEventId);
+      await sendJobNotification(tx, ctx, job, "job_unassigned", [oldEditorId], `You were unassigned from ${job.jobNumber}`, endedEventId);
     }
   }
 
@@ -569,21 +569,20 @@ export interface ReattributeResult {
  * job's (new) editor and `reason = "reassigned"`. Status unchanged;
  * `status_entered_at` follows the open row (db:verify invariant).
  */
-export function reattributeStage(tx: Tx, ctx: AuthContext, jobIn: Job, opts: { previousEditorId: string | null; batchId?: string | null }): ReattributeResult {
+export async function reattributeStage(tx: Tx, ctx: AuthContext, jobIn: Job, opts: { previousEditorId: string | null; batchId?: string | null }): Promise<ReattributeResult> {
   const now = ctx.now();
-  const open = loadOpenTransition(tx, jobIn.id);
+  const open = await loadOpenTransition(tx, jobIn.id);
   const duration = durationSeconds(open.enteredAt, now, now);
-  tx.update(jobStatusTransitions)
+  await tx.update(jobStatusTransitions)
     .set({ exitedAt: now, durationSeconds: duration })
-    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)))
-    .run();
+    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)));
   const transitionId = newId();
-  tx.insert(jobStatusTransitions)
+  await tx.insert(jobStatusTransitions)
     .values({
       id: transitionId,
       organisationId: ctx.organisationId,
       jobId: jobIn.id,
-      sequence: nextSequence(tx, jobIn.id),
+      sequence: await nextSequence(tx, jobIn.id),
       kind: "reattribution",
       fromStatusId: open.fromStatusId,
       toStatusId: open.toStatusId,
@@ -598,11 +597,10 @@ export function reattributeStage(tx: Tx, ctx: AuthContext, jobIn: Job, opts: { p
       enteredAt: now,
       editorIdAtEntry: jobIn.editorId,
       photographerIdAtEntry: jobIn.photographerId,
-    })
-    .run();
-  const job = updateJobRow(tx, ctx, jobIn, { statusEnteredAt: now });
-  const names = userNames(tx, [opts.previousEditorId, job.editorId]);
-  const eventId = recordEvent(tx, ctx, {
+    });
+  const job = await updateJobRow(tx, ctx, jobIn, { statusEnteredAt: now });
+  const names = await userNames(tx, [opts.previousEditorId, job.editorId]);
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "transition",
     entityId: transitionId,
     jobId: job.id,
@@ -622,7 +620,7 @@ export function reattributeStage(tx: Tx, ctx: AuthContext, jobIn: Job, opts: { p
       opts.batchId,
     ),
   });
-  tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId)).run();
+  await tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId));
   return { job, transitionId, previousTransitionId: open.id, eventId };
 }
 
@@ -630,32 +628,35 @@ export function reattributeStage(tx: Tx, ctx: AuthContext, jobIn: Job, opts: { p
 /*  Ledger primitives                                                  */
 /* ------------------------------------------------------------------ */
 
-function loadOpenTransition(db: DbLike, jobId: string) {
-  const open = db
-    .select()
-    .from(jobStatusTransitions)
-    .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt)))
-    .get();
+async function loadOpenTransition(db: DbLike, jobId: string) {
+  const open = await first(
+    db
+      .select()
+      .from(jobStatusTransitions)
+      .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt)))
+      .limit(1),
+  );
   if (!open) throw new Error(`Integrity error: job ${jobId} has no open status transition`);
   return open;
 }
 
-function nextSequence(db: DbLike, jobId: string): number {
-  const row = db
-    .select({ n: sql<number>`coalesce(max(${jobStatusTransitions.sequence}), 0)` })
-    .from(jobStatusTransitions)
-    .where(eq(jobStatusTransitions.jobId, jobId))
-    .get();
+async function nextSequence(db: DbLike, jobId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: sql<number>`coalesce(max(${jobStatusTransitions.sequence}), 0)`.mapWith(Number) })
+      .from(jobStatusTransitions)
+      .where(eq(jobStatusTransitions.jobId, jobId)),
+  );
   return (row?.n ?? 0) + 1;
 }
 
-function currentLinkIds(db: DbLike, jobId: string, kinds: readonly LinkKind[]): string[] {
-  return db
+async function currentLinkIds(db: DbLike, jobId: string, kinds: readonly LinkKind[]): Promise<string[]> {
+  const rows = await db
     .select({ id: jobLinks.id })
     .from(jobLinks)
     .where(and(eq(jobLinks.jobId, jobId), inArray(jobLinks.kind, [...kinds]), isNull(jobLinks.supersededAt), isNull(jobLinks.removedAt)))
-    .all()
-    .map((r) => r.id);
+    .orderBy(asc(jobLinks.createdAt), asc(jobLinks.id));
+  return rows.map((r) => r.id);
 }
 
 interface ResolvedRevision {
@@ -666,21 +667,23 @@ interface ResolvedRevision {
 }
 
 /** Fill-once resolution of the job's open revision (if any). */
-function resolveOpenRevision(
+async function resolveOpenRevision(
   tx: Tx,
   ctx: AuthContext,
   job: Job,
   resolution: "resubmitted" | "withdrawn" | "approved" | "cancelled",
   opts: { transitionId: string | null; note?: string | null; batchId?: string | null },
-): ResolvedRevision | null {
-  const open = tx
-    .select()
-    .from(jobRevisions)
-    .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
-    .get();
+): Promise<ResolvedRevision | null> {
+  const open = await first(
+    tx
+      .select()
+      .from(jobRevisions)
+      .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
+      .limit(1),
+  );
   if (!open) return null;
   const now = ctx.now();
-  tx.update(jobRevisions)
+  await tx.update(jobRevisions)
     .set({
       resolvedAt: now,
       resolvedByUserId: ctx.userId,
@@ -688,10 +691,9 @@ function resolveOpenRevision(
       resolutionNote: opts.note ?? null,
       resolveTransitionId: opts.transitionId,
     })
-    .where(and(eq(jobRevisions.id, open.id), isNull(jobRevisions.resolvedAt)))
-    .run();
+    .where(and(eq(jobRevisions.id, open.id), isNull(jobRevisions.resolvedAt)));
   const withdrawn = resolution === "withdrawn";
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "revision",
     entityId: open.id,
     jobId: job.id,
@@ -704,12 +706,13 @@ function resolveOpenRevision(
   return { revisionId: open.id, revisionNumber: open.revisionNumber, requestedByUserId: open.requestedByUserId, eventId };
 }
 
-function loadSlaHours(db: DbLike, organisationId: string): number {
-  const row = db
-    .select({ h: organisationSettings.reviewSlaHours })
-    .from(organisationSettings)
-    .where(eq(organisationSettings.organisationId, organisationId))
-    .get();
+async function loadSlaHours(db: DbLike, organisationId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ h: organisationSettings.reviewSlaHours })
+      .from(organisationSettings)
+      .where(eq(organisationSettings.organisationId, organisationId)),
+  );
   return row?.h ?? BOTTLENECK_DEFAULTS.reviewSlaHours;
 }
 
@@ -784,7 +787,7 @@ function deniedError(ctx: AuthContext, job: WorkflowJobLike, current: WorkflowSt
  * Performs one status move on an already-loaded job (caller checked the
  * version for user input). See the module doc for the step order.
  */
-export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: WorkflowStatus, graph: WorkflowGraph, opts: ApplyMoveOptions): TransitionResult {
+export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: WorkflowStatus, graph: WorkflowGraph, opts: ApplyMoveOptions): Promise<TransitionResult> {
   let job = jobIn;
   let target = targetIn;
   const before = jobIn;
@@ -793,8 +796,8 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   if (target.workflowId !== job.workflowId) throw new NotFoundError("Status");
   if (target.id === current.id) throw new InvalidTransitionError(current.name, target.name, `The job is already in "${current.name}"`);
 
-  const ref = jobPermissionRef(job, ctx.role === "editor" ? loadPastEditorIds(tx, job.id) : undefined);
-  const wjob = toWorkflowJob(tx, job, ref);
+  const ref = jobPermissionRef(job, ctx.role === "editor" ? await loadPastEditorIds(tx, job.id) : undefined);
+  const wjob = await toWorkflowJob(tx, job, ref);
 
   let isOverride = false;
   let isReopen = false;
@@ -847,30 +850,32 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   const requestedAssignee = entersRevision ? (opts.revision?.assigneeUserId ?? null) : null;
   if (requestedAssignee && requestedAssignee !== job.editorId) {
     assertCan(ctx, "job.assign_editor", ref);
-    const editor = loadUserInOrg(tx, ctx, requestedAssignee);
+    const editor = await loadUserInOrg(tx, ctx, requestedAssignee);
     if (!editor.isActive) throw new ValidationError("The revision assignee is deactivated");
     if (editor.role !== "editor") throw new ValidationError("The revision assignee must be an editor");
-    job = swapEditor(tx, ctx, job, editor.id, { reason: "Revision assignee", batchId: opts.batchId }).job;
+    job = (await swapEditor(tx, ctx, job, editor.id, { reason: "Revision assignee", batchId: opts.batchId })).job;
   }
 
   // Decline / unassign: entering new|ready drops the editor before the row is written.
   let declined = false;
   if (CATEGORY_GROUPS.UNASSIGNED.includes(target.category) && job.editorId && opts.mode !== "internal") {
     declined = ctx.userId !== null && ctx.userId === job.editorId && current.category === "assigned";
-    job = swapEditor(tx, ctx, job, null, {
-      unassignReason: declined ? "declined" : "unassigned",
-      reason,
-      batchId: opts.batchId,
-      notifyOld: !declined,
-    }).job;
+    job = (
+      await swapEditor(tx, ctx, job, null, {
+        unassignReason: declined ? "declined" : "unassigned",
+        reason,
+        batchId: opts.batchId,
+        notifyOld: !declined,
+      })
+    ).job;
   }
 
   // Restore into an editor stage whose editor is gone → back to ready instead.
   let releasedInactiveEditorId: string | null = null;
-  if (isRestore && EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !isUserActive(tx, job.editorId)) {
+  if (isRestore && EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !await isUserActive(tx, job.editorId)) {
     if (job.editorId) {
       releasedInactiveEditorId = job.editorId;
-      job = swapEditor(tx, ctx, job, null, { unassignReason: "user_deactivated", reason: "Editor unavailable on restore", batchId: opts.batchId }).job;
+      job = (await swapEditor(tx, ctx, job, null, { unassignReason: "user_deactivated", reason: "Editor unavailable on restore", batchId: opts.batchId })).job;
     }
     target = unassignedTargetOf(graph);
     lateral = false;
@@ -891,36 +896,37 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
     !CATEGORY_GROUPS.TERMINAL.includes(target.category) &&
     !CATEGORY_GROUPS.UNASSIGNED.includes(target.category) &&
     !EDITOR_REQUIRED_CATEGORIES.includes(target.category) &&
-    !isUserActive(tx, job.editorId)
+    !await isUserActive(tx, job.editorId)
   ) {
     releasedInactiveEditorId = job.editorId;
-    job = swapEditor(tx, ctx, job, null, {
-      unassignReason: "user_deactivated",
-      reason: isRestore ? "Editor unavailable on restore" : "Editor unavailable on reopen",
-      batchId: opts.batchId,
-    }).job;
+    job = (
+      await swapEditor(tx, ctx, job, null, {
+        unassignReason: "user_deactivated",
+        reason: isRestore ? "Editor unavailable on restore" : "Editor unavailable on reopen",
+        batchId: opts.batchId,
+      })
+    ).job;
   }
 
-  if (EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !isUserActive(tx, job.editorId)) {
+  if (EDITOR_REQUIRED_CATEGORIES.includes(target.category) && !await isUserActive(tx, job.editorId)) {
     throw new EditorRequiredError();
   }
 
   // ---- sessions: a running timer belongs to the stage it started in ----
   const closedBy: WorkSessionClosedBy =
     target.category === "submitted" || target.category === "resubmitted" ? "submit" : CATEGORY_GROUPS.TERMINAL.includes(target.category) ? "complete" : "status_change";
-  closeRunningSessions(tx, ctx, { jobId: job.id }, "auto_status_change", closedBy, opts.batchId);
+  await closeRunningSessions(tx, ctx, { jobId: job.id }, "auto_status_change", closedBy, opts.batchId);
 
   // ---- step 6: ledger (close → insert → update jobs) ----
   const now = ctx.now();
-  const open = loadOpenTransition(tx, job.id);
+  const open = await loadOpenTransition(tx, job.id);
   const durationInPrevious = durationSeconds(open.enteredAt, now, now);
-  tx.update(jobStatusTransitions)
+  await tx.update(jobStatusTransitions)
     .set({ exitedAt: now, durationSeconds: durationInPrevious })
-    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)))
-    .run();
+    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)));
   const transitionId = newId();
-  const sequence = nextSequence(tx, job.id);
-  tx.insert(jobStatusTransitions)
+  const sequence = await nextSequence(tx, job.id);
+  await tx.insert(jobStatusTransitions)
     .values({
       id: transitionId,
       organisationId: ctx.organisationId,
@@ -940,8 +946,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       enteredAt: now,
       editorIdAtEntry: job.editorId,
       photographerIdAtEntry: job.photographerId,
-    })
-    .run();
+    });
 
   const tz = ctx.settings.timezone;
   const patch: JobPatch = {
@@ -960,19 +965,20 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   let revisionNumber: number | null = null;
   let staleRevision: ResolvedRevision | null = null;
   if (entersRevision && opts.revision) {
-    staleRevision = resolveOpenRevision(tx, ctx, job, "withdrawn", {
+    staleRevision = await resolveOpenRevision(tx, ctx, job, "withdrawn", {
       transitionId,
       note: "Superseded by a new revision request",
       batchId: opts.batchId,
     });
-    const max = tx
-      .select({ n: sql<number>`coalesce(max(${jobRevisions.revisionNumber}), 0)` })
-      .from(jobRevisions)
-      .where(eq(jobRevisions.jobId, job.id))
-      .get();
+    const max = await first(
+      tx
+        .select({ n: sql<number>`coalesce(max(${jobRevisions.revisionNumber}), 0)`.mapWith(Number) })
+        .from(jobRevisions)
+        .where(eq(jobRevisions.jobId, job.id)),
+    );
     revisionNumber = (max?.n ?? 0) + 1;
     revisionId = newId();
-    tx.insert(jobRevisions)
+    await tx.insert(jobRevisions)
       .values({
         id: revisionId,
         organisationId: ctx.organisationId,
@@ -987,8 +993,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
         dueDate: optionalDeadlineToIso(opts.revision.dueDate, tz) ?? null,
         requestedAt: now,
         requestTransitionId: transitionId,
-      })
-      .run();
+      });
     patch.revisionCount = revisionNumber;
     patch.openRevisionId = revisionId;
   }
@@ -996,13 +1001,13 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   // Revision resolved by this move.
   let resolved: ResolvedRevision | null = null;
   if (withdraw) {
-    resolved = resolveOpenRevision(tx, ctx, job, "withdrawn", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
+    resolved = await resolveOpenRevision(tx, ctx, job, "withdrawn", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
   } else if (target.category === "resubmitted") {
-    resolved = resolveOpenRevision(tx, ctx, job, "resubmitted", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
+    resolved = await resolveOpenRevision(tx, ctx, job, "resubmitted", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
   } else if (target.category === "approved") {
-    resolved = resolveOpenRevision(tx, ctx, job, "approved", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
+    resolved = await resolveOpenRevision(tx, ctx, job, "approved", { transitionId, note: opts.resolutionNote, batchId: opts.batchId });
   } else if (target.category === "cancelled") {
-    resolved = resolveOpenRevision(tx, ctx, job, "cancelled", { transitionId, note: reason, batchId: opts.batchId });
+    resolved = await resolveOpenRevision(tx, ctx, job, "cancelled", { transitionId, note: reason, batchId: opts.batchId });
   }
   if (resolved || (staleRevision && !revisionId)) patch.openRevisionId = null;
 
@@ -1024,7 +1029,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
         patch.lastSubmittedAt = now;
         patch.completionPercent = Math.max(job.completionPercent, 90);
         if (!job.reviewDueDate) {
-          reviewDueDefaulted = new Date(Date.parse(now) + loadSlaHours(tx, ctx.organisationId) * 3_600_000).toISOString();
+          reviewDueDefaulted = new Date(Date.parse(now) + await loadSlaHours(tx, ctx.organisationId) * 3_600_000).toISOString();
           patch.reviewDueDate = reviewDueDefaulted;
         }
         break;
@@ -1063,7 +1068,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
     patch.reopenedCount = job.reopenedCount + 1;
   }
 
-  job = updateJobRow(tx, ctx, job, patch);
+  job = await updateJobRow(tx, ctx, job, patch);
 
   // ---- step 8: events ----
   const onBehalfOf =
@@ -1072,7 +1077,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       : undefined;
   const causeMeta = ctx.isSystem && opts.cause ? { cause: opts.cause } : {};
   const meta = (extra: Record<string, unknown>) => jobEventMeta(job, { ...extra, ...causeMeta }, opts.batchId);
-  const statusEventId = recordEvent(tx, ctx, {
+  const statusEventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
     jobId: job.id,
@@ -1096,10 +1101,10 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       durationInPreviousSeconds: durationInPrevious,
     }),
   });
-  tx.update(jobStatusTransitions).set({ activityEventId: statusEventId }).where(eq(jobStatusTransitions.id, transitionId)).run();
-  emitAutomationEvent(tx, ctx, { eventId: statusEventId, eventType: "job.status_changed", jobId: job.id });
+  await tx.update(jobStatusTransitions).set({ activityEventId: statusEventId }).where(eq(jobStatusTransitions.id, transitionId));
+  await emitAutomationEvent(tx, ctx, { eventId: statusEventId, eventType: "job.status_changed", jobId: job.id });
 
-  const milestone = (eventType: EventType, action: EventAction, extra: Record<string, unknown> = {}, prev?: unknown, next?: unknown) =>
+  const milestone = (eventType: EventType, action: EventAction, extra: Record<string, unknown> = {}, prev?: unknown, next?: unknown): Promise<string> =>
     recordEvent(tx, ctx, {
       entityType: "job",
       entityId: job.id,
@@ -1115,7 +1120,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
   const photographerAndCreator = [job.photographerId, job.createdByUserId];
 
   if (reviewDueDefaulted) {
-    const evt = recordEvent(tx, ctx, {
+    const evt = await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: job.id,
       jobId: job.id,
@@ -1125,12 +1130,12 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       newValue: { value: reviewDueDefaulted },
       metadata: jobEventMeta(job, { cause: "sla_default", transitionId, wasOverdue: false }, opts.batchId),
     });
-    emitAutomationEvent(tx, ctx, { eventId: evt, eventType: "job.review_due_date_changed", jobId: job.id });
+    await emitAutomationEvent(tx, ctx, { eventId: evt, eventType: "job.review_due_date_changed", jobId: job.id });
   }
 
   if (revisionId && revisionNumber !== null && opts.revision) {
     const p = opts.revision;
-    const revEvent = recordEvent(tx, ctx, {
+    const revEvent = await recordEvent(tx, ctx, {
       entityType: "revision",
       entityId: revisionId,
       jobId: job.id,
@@ -1148,10 +1153,10 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
       },
       metadata: meta({ revisionId, transitionId, revisionNumber }),
     });
-    tx.update(jobRevisions).set({ activityEventId: revEvent }).where(eq(jobRevisions.id, revisionId)).run();
+    await tx.update(jobRevisions).set({ activityEventId: revEvent }).where(eq(jobRevisions.id, revisionId));
     if (p.instructions) {
       const noteId = newId();
-      tx.insert(jobNotes)
+      await tx.insert(jobNotes)
         .values({
           id: noteId,
           organisationId: ctx.organisationId,
@@ -1162,9 +1167,8 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
           revisionId,
           createdAt: now,
           updatedAt: now,
-        })
-        .run();
-      recordEvent(tx, ctx, {
+        });
+      await recordEvent(tx, ctx, {
         entityType: "note",
         entityId: noteId,
         jobId: job.id,
@@ -1175,46 +1179,47 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
         metadata: meta({ noteId, editCount: 0, revisionId }),
       });
     }
-    sendJobNotification(tx, ctx, job, "revision_requested", [job.editorId], `Revision #${revisionNumber} requested on ${job.jobNumber}`, revEvent, `revision-${revisionNumber}`);
-    emitAutomationEvent(tx, ctx, { eventId: revEvent, eventType: "revision.requested", jobId: job.id });
+    await sendJobNotification(tx, ctx, job, "revision_requested", [job.editorId], `Revision #${revisionNumber} requested on ${job.jobNumber}`, revEvent, `revision-${revisionNumber}`);
+    await emitAutomationEvent(tx, ctx, { eventId: revEvent, eventType: "revision.requested", jobId: job.id });
   }
 
   if (sideEffects) {
     const released = releasedInactiveEditorId ? { releasedInactiveEditorId, releaseReason: "editor_deactivated" } : {};
     if (isRestore) {
-      const evt = milestone("job.restored", "restored", { reason, ...released }, { cancelledAt: before.cancelledAt }, { statusId: target.id, category: target.category });
-      sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId], `${job.jobNumber} was restored`, evt);
+      const evt = await milestone("job.restored", "restored", { reason, ...released }, { cancelledAt: before.cancelledAt }, { statusId: target.id, category: target.category });
+      await sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId], `${job.jobNumber} was restored`, evt);
     } else if (isReopen) {
-      const evt = milestone("job.reopened", "reopened", { reason, ...released }, { completedAt: before.completedAt }, { statusId: target.id, category: target.category });
-      const extra = ctx.role === "photographer" ? managersOf(tx, ctx.organisationId) : [];
-      sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId, ...extra], `${job.jobNumber} was reopened`, evt);
+      const evt = await milestone("job.reopened", "reopened", { reason, ...released }, { completedAt: before.completedAt }, { statusId: target.id, category: target.category });
+      const extra = ctx.role === "photographer" ? await managersOf(tx, ctx.organisationId) : [];
+      await sendJobNotification(tx, ctx, job, "job_reopened", [job.editorId, job.photographerId, ...extra], `${job.jobNumber} was reopened`, evt);
     }
     if (declined) {
-      const evt = milestone("job.declined", "declined", { reason, previousEditorId: before.editorId });
-      sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...managersOf(tx, ctx.organisationId)], `${job.jobNumber} was declined by the editor`, evt);
+      const evt = await milestone("job.declined", "declined", { reason, previousEditorId: before.editorId });
+      const managers = await managersOf(tx, ctx.organisationId);
+      await sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...managers], `${job.jobNumber} was declined by the editor`, evt);
     }
     switch (target.category) {
       case "accepted":
-        milestone("job.accepted", "accepted", onBehalfOf ? { onBehalfOf } : {});
+        await milestone("job.accepted", "accepted", onBehalfOf ? { onBehalfOf } : {});
         break;
       case "in_progress":
-        if (firstStart) milestone("job.work_started", "started", onBehalfOf ? { onBehalfOf } : {});
+        if (firstStart) await milestone("job.work_started", "started", onBehalfOf ? { onBehalfOf } : {});
         break;
       case "submitted": {
-        const evt = milestone("job.submitted", "submitted", { resubmission: false, ...(onBehalfOf ? { onBehalfOf } : {}) });
-        sendJobNotification(tx, ctx, job, "work_submitted", photographerAndCreator, `${job.jobNumber} was submitted for review`, evt);
-        if (currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"]).length === 0) {
+        const evt = await milestone("job.submitted", "submitted", { resubmission: false, ...(onBehalfOf ? { onBehalfOf } : {}) });
+        await sendJobNotification(tx, ctx, job, "work_submitted", photographerAndCreator, `${job.jobNumber} was submitted for review`, evt);
+        if ((await currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"])).length === 0) {
           warnings.push("No finished-files or editing-workspace link is attached yet");
         }
         break;
       }
       case "resubmitted": {
-        const evt = milestone("job.submitted", "submitted", {
+        const evt = await milestone("job.submitted", "submitted", {
           resubmission: true,
           revisionNumber: resolved?.revisionNumber ?? null,
           ...(onBehalfOf ? { onBehalfOf } : {}),
         });
-        sendJobNotification(
+        await sendJobNotification(
           tx,
           ctx,
           job,
@@ -1223,37 +1228,37 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
           `${job.jobNumber} was resubmitted`,
           evt,
         );
-        if (currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"]).length === 0) {
+        if ((await currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"])).length === 0) {
           warnings.push("No finished-files or editing-workspace link is attached yet");
         }
         break;
       }
       case "review":
-        milestone("job.review_started", "started", { reviewerUserId: ctx.userId });
+        await milestone("job.review_started", "started", { reviewerUserId: ctx.userId });
         break;
       case "approved": {
-        const evt = milestone("job.approved", "approved", {
+        const evt = await milestone("job.approved", "approved", {
           onTime: job.wasOnTime,
           dueDateAtApproval: job.dueDateAtApproval,
           revisionCount: job.revisionCount,
         });
-        sendJobNotification(tx, ctx, job, "work_approved", [job.editorId], `${job.jobNumber} was approved`, evt);
+        await sendJobNotification(tx, ctx, job, "work_approved", [job.editorId], `${job.jobNumber} was approved`, evt);
         break;
       }
       case "delivered": {
-        const deliveryLinkIds = currentLinkIds(tx, job.id, ["client_delivery", "gallery"]);
-        milestone("job.delivered", "delivered", { deliveryLinkIds });
+        const deliveryLinkIds = await currentLinkIds(tx, job.id, ["client_delivery", "gallery"]);
+        await milestone("job.delivered", "delivered", { deliveryLinkIds });
         if (deliveryLinkIds.length === 0) warnings.push("No client-delivery or gallery link is attached yet");
         break;
       }
       case "completed": {
-        const evt = milestone("job.completed", "completed");
-        sendJobNotification(tx, ctx, job, "job_completed", [job.photographerId, job.editorId], `${job.jobNumber} was completed`, evt);
+        const evt = await milestone("job.completed", "completed");
+        await sendJobNotification(tx, ctx, job, "job_completed", [job.photographerId, job.editorId], `${job.jobNumber} was completed`, evt);
         break;
       }
       case "cancelled": {
-        const evt = milestone("job.cancelled", "cancelled", { reason });
-        sendJobNotification(tx, ctx, job, "job_cancelled", [job.editorId, job.photographerId], `${job.jobNumber} was cancelled`, evt);
+        const evt = await milestone("job.cancelled", "cancelled", { reason });
+        await sendJobNotification(tx, ctx, job, "job_cancelled", [job.editorId, job.photographerId], `${job.jobNumber} was cancelled`, evt);
         break;
       }
       default:
@@ -1269,7 +1274,7 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
     isEditorWorking(target.category) &&
     can(ctx, "timer.use", jobPermissionRef(job))
   ) {
-    startTimer(tx, ctx, { jobId: job.id, switchFromRunning: true });
+    await startTimer(tx, ctx, { jobId: job.id, switchFromRunning: true });
   }
 
   return {
@@ -1292,11 +1297,11 @@ export function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: Workfl
 /* ------------------------------------------------------------------ */
 
 /** §4.3 — the only public writer of `jobs.status_id`. */
-export function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unknown): TransitionResult {
+export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(TransitionInput, input);
-  const { job } = loadVisibleJob(tx, ctx, p.jobId);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
-  const target = resolveTransitionTarget(tx, ctx, job, graph, p);
+  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const target = await resolveTransitionTarget(tx, ctx, job, graph, p);
   assertVersion(job, p.expectedVersion);
   return applyMove(tx, ctx, job, target, graph, {
     mode: "user",
@@ -1312,16 +1317,16 @@ export function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unknown): T
  * Status move without `expectedVersion` (bulk operations and automations:
  * the job is freshly loaded inside the per-job transaction).
  */
-export function transitionLoadedJob(
+export async function transitionLoadedJob(
   tx: Tx,
   ctx: AuthContext,
   jobId: string,
   target: { toStatusId?: string | null; toCategory?: StatusCategory | null },
   opts: Omit<ApplyMoveOptions, "mode"> = {},
-): TransitionResult {
-  const { job } = loadVisibleJob(tx, ctx, jobId);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
-  const status = resolveTransitionTarget(tx, ctx, job, graph, target);
+): Promise<TransitionResult> {
+  const { job } = await loadVisibleJob(tx, ctx, jobId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const status = await resolveTransitionTarget(tx, ctx, job, graph, target);
   return applyMove(tx, ctx, job, status, graph, { ...opts, mode: "user" });
 }
 
@@ -1332,10 +1337,10 @@ export interface AllowedTransitionsResult {
 }
 
 /** `GET /api/jobs/:id/transitions` — the actor's allowed moves (buttons + kanban). */
-export function getAllowedTransitions(db: DbLike, ctx: AuthContext, jobId: string): AllowedTransitionsResult {
-  const { job, ref } = loadVisibleJob(db, ctx, jobId);
-  const graph = loadWorkflowGraph(db, ctx.organisationId, job.workflowId);
-  const wjob = toWorkflowJob(db, job, ref);
+export async function getAllowedTransitions(db: DbLike, ctx: AuthContext, jobId: string): Promise<AllowedTransitionsResult> {
+  const { job, ref } = await loadVisibleJob(db, ctx, jobId);
+  const graph = await loadWorkflowGraph(db, ctx.organisationId, job.workflowId);
+  const wjob = await toWorkflowJob(db, job, ref);
   if (ctx.isSystem) {
     return {
       transitions: systemMoves(ctx, wjob, graph).map((m) => ({
@@ -1361,17 +1366,19 @@ export function getAllowedTransitions(db: DbLike, ctx: AuthContext, jobId: strin
 }
 
 /** Full `JobAvailableActions` for the job detail header. */
-export function getAvailableActions(db: DbLike, ctx: AuthContext, jobId: string): JobAvailableActions {
-  const { job, ref } = loadVisibleJob(db, ctx, jobId);
-  const graph = loadWorkflowGraph(db, ctx.organisationId, job.workflowId);
+export async function getAvailableActions(db: DbLike, ctx: AuthContext, jobId: string): Promise<JobAvailableActions> {
+  const { job, ref } = await loadVisibleJob(db, ctx, jobId);
+  const graph = await loadWorkflowGraph(db, ctx.organisationId, job.workflowId);
   const running = ctx.userId
-    ? db
-        .select({ id: workSessions.id })
-        .from(workSessions)
-        .where(and(eq(workSessions.jobId, job.id), eq(workSessions.userId, ctx.userId), isNull(workSessions.endedAt)))
-        .get()
+    ? await first(
+        db
+          .select({ id: workSessions.id })
+          .from(workSessions)
+          .where(and(eq(workSessions.jobId, job.id), eq(workSessions.userId, ctx.userId), isNull(workSessions.endedAt)))
+          .limit(1),
+      )
     : undefined;
-  const actions = availableActions(ctx, toWorkflowJob(db, job, ref), graph.statuses, graph.edges, {
+  const actions = availableActions(ctx, await toWorkflowJob(db, job, ref), graph.statuses, graph.edges, {
     timeTrackingEnabled: ctx.settings.timeTrackingEnabled,
     openRevision: job.openRevisionId !== null,
     hasRunningSession: running !== undefined,
@@ -1381,11 +1388,11 @@ export function getAvailableActions(db: DbLike, ctx: AuthContext, jobId: string)
 }
 
 /** Restore a cancelled job to the status it was cancelled from (initial status if archived). */
-export function restoreJob(tx: Tx, ctx: AuthContext, input: unknown): TransitionResult {
+export async function restoreJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(RestoreInput, input);
-  const { job } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
   assertVersion(job, p.expectedVersion);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const current = statusIn(graph, job.statusId);
   if (current.category !== "cancelled") throw new InvalidTransitionError(current.name, "restore", "Only cancelled jobs can be restored");
   const target = restoreTargetOf(graph.statuses, job.previousStatusId);
@@ -1400,36 +1407,35 @@ export interface MigrateWorkflowResult {
 }
 
 /** Moves one job to another workflow (`kind='migration'` transition, `job.workflow_migrated`). */
-export function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): MigrateWorkflowResult {
+export async function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Promise<MigrateWorkflowResult> {
   const p = parseInput(MigrateWorkflowInput, input);
-  const { job: loaded, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.migrate_workflow", ref);
   assertVersion(loaded, p.expectedVersion);
-  const workflow = loadWorkflowInOrg(tx, ctx, p.workflowId);
+  const workflow = await loadWorkflowInOrg(tx, ctx, p.workflowId);
   if (workflow.archivedAt !== null) throw new ValidationError("That workflow is archived");
   if (workflow.id === loaded.workflowId) throw new ValidationError("The job already uses that workflow");
-  const toStatus = loadStatusInWorkflow(tx, ctx, workflow.id, p.toStatusId);
+  const toStatus = await loadStatusInWorkflow(tx, ctx, workflow.id, p.toStatusId);
   if (toStatus.archivedAt !== null) throw new NotFoundError("Status");
-  if (EDITOR_REQUIRED_CATEGORIES.includes(toStatus.category) && !isUserActive(tx, loaded.editorId)) throw new EditorRequiredError();
-  const fromGraph = loadWorkflowGraph(tx, ctx.organisationId, loaded.workflowId);
+  if (EDITOR_REQUIRED_CATEGORIES.includes(toStatus.category) && !await isUserActive(tx, loaded.editorId)) throw new EditorRequiredError();
+  const fromGraph = await loadWorkflowGraph(tx, ctx.organisationId, loaded.workflowId);
   const fromStatus = statusIn(fromGraph, loaded.statusId);
-  const fromWorkflow = loadWorkflowInOrg(tx, ctx, loaded.workflowId);
+  const fromWorkflow = await loadWorkflowInOrg(tx, ctx, loaded.workflowId);
 
-  closeRunningSessions(tx, ctx, { jobId: loaded.id }, "auto_status_change", "status_change");
+  await closeRunningSessions(tx, ctx, { jobId: loaded.id }, "auto_status_change", "status_change");
   const now = ctx.now();
-  const open = loadOpenTransition(tx, loaded.id);
+  const open = await loadOpenTransition(tx, loaded.id);
   const duration = durationSeconds(open.enteredAt, now, now);
-  tx.update(jobStatusTransitions)
+  await tx.update(jobStatusTransitions)
     .set({ exitedAt: now, durationSeconds: duration })
-    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)))
-    .run();
+    .where(and(eq(jobStatusTransitions.id, open.id), isNull(jobStatusTransitions.exitedAt)));
   const transitionId = newId();
-  tx.insert(jobStatusTransitions)
+  await tx.insert(jobStatusTransitions)
     .values({
       id: transitionId,
       organisationId: ctx.organisationId,
       jobId: loaded.id,
-      sequence: nextSequence(tx, loaded.id),
+      sequence: await nextSequence(tx, loaded.id),
       kind: "migration",
       fromStatusId: fromStatus.id,
       toStatusId: toStatus.id,
@@ -1442,9 +1448,8 @@ export function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Migra
       enteredAt: now,
       editorIdAtEntry: loaded.editorId,
       photographerIdAtEntry: loaded.photographerId,
-    })
-    .run();
-  const job = updateJobRow(tx, ctx, loaded, {
+    });
+  const job = await updateJobRow(tx, ctx, loaded, {
     workflowId: workflow.id,
     statusId: toStatus.id,
     statusCategory: toStatus.category,
@@ -1455,7 +1460,7 @@ export function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Migra
     completedAt: toStatus.category === "completed" ? now : null,
     cancelledAt: toStatus.category === "cancelled" ? now : null,
   });
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
     jobId: job.id,
@@ -1471,7 +1476,7 @@ export function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Migra
       durationInPreviousSeconds: duration,
     }),
   });
-  tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId)).run();
+  await tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId));
   return { job, transitionId, eventId };
 }
 
@@ -1479,16 +1484,16 @@ export function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown): Migra
 /*  Convenience wrappers (POST /api/jobs/:id/accept|decline|…)         */
 /* ------------------------------------------------------------------ */
 
-function moveToCategory(
+async function moveToCategory(
   tx: Tx,
   ctx: AuthContext,
   p: { jobId: string; expectedVersion: number; toStatusId?: string; reason?: string | null; startTimer?: boolean },
   category: StatusCategory,
   extra: { revision?: RevisionInputValue | null } = {},
-): TransitionResult {
-  const { job } = loadVisibleJob(tx, ctx, p.jobId);
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
-  const target = resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: category });
+): Promise<TransitionResult> {
+  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: category });
   if (target.category !== category) {
     throw new ValidationError(`That status is not a "${category}" status`, { formErrors: [], fieldErrors: { toStatusId: ["Wrong category"] } });
   }
@@ -1503,7 +1508,7 @@ function moveToCategory(
 
 const categoryWrapper =
   (category: StatusCategory) =>
-  (tx: Tx, ctx: AuthContext, input: unknown): TransitionResult =>
+  (tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> =>
     moveToCategory(tx, ctx, parseInput(CategoryMoveInput, input), category);
 
 /** Editor accepts an assigned job (assigned → accepted). */
@@ -1524,12 +1529,12 @@ export const deliverJob = categoryWrapper("delivered");
 export const completeJob = categoryWrapper("completed");
 
 /** Any active status → cancelled (reason required). */
-export function cancelJob(tx: Tx, ctx: AuthContext, input: unknown): TransitionResult {
+export async function cancelJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   return moveToCategory(tx, ctx, parseInput(CancelInput, input), "cancelled");
 }
 
 /** completed → in_progress (default) | revision (payload required) | approved; reason required. */
-export function reopenJob(tx: Tx, ctx: AuthContext, input: unknown): TransitionResult {
+export async function reopenJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(ReopenInput, input);
   return moveToCategory(tx, ctx, p, p.toCategory ?? "in_progress", { revision: p.revision ?? null });
 }
@@ -1550,22 +1555,22 @@ export function bulkFailure(id: string, err: unknown): BulkResult["failed"][numb
  * (the callback receives it). With `organisationId`, the org's pending
  * automation runs execute once after all per-job transactions committed (§7).
  */
-export function runPerJob(
+export async function runPerJob(
   jobIds: readonly string[],
-  fn: (tx: Tx, jobId: string, batchId: string) => void,
+  fn: (tx: Tx, jobId: string, batchId: string) => Promise<void> | void,
   options: { db?: Db; batchId?: string; organisationId?: string } = {},
-): BulkResult {
+): Promise<BulkResult> {
   const batchId = options.batchId ?? shortId();
   const ok: string[] = [];
   const failed: BulkResult["failed"] = [];
   for (const jobId of Array.from(new Set(jobIds))) {
     try {
-      withTx((tx) => fn(tx, jobId, batchId), { db: options.db });
+      await withTx((tx) => fn(tx, jobId, batchId), { db: options.db });
       ok.push(jobId);
     } catch (err) {
       failed.push(bulkFailure(jobId, err));
     }
   }
-  if (options.organisationId && ok.length > 0) runAutomationsAfterCommit(options.db ?? getDb(), options.organisationId);
+  if (options.organisationId && ok.length > 0) await runAutomationsAfterCommit(options.db ?? getDb(), options.organisationId);
   return { ok, failed, batchId };
 }

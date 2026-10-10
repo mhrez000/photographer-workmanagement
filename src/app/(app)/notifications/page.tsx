@@ -21,8 +21,8 @@ export default async function NotificationsPage({ searchParams }: PageProps<"/no
   const { ctx, db } = await pageContext();
   if (ctx.userId) guard(ctx, "notification.read", { userId: ctx.userId, organisationId: ctx.organisationId });
 
-  const unread = load(() => unreadCount(db, ctx));
-  const page = load(() => listNotifications(db, ctx, { unread: filter === "unread", limit: PAGE_SIZE }));
+  const unread = await load(() => unreadCount(db, ctx));
+  const page = await load(() => listNotifications(db, ctx, { unread: filter === "unread", limit: PAGE_SIZE }));
   const tz = ctx.settings.timezone;
 
   const tabs = [

@@ -40,7 +40,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/insigh
   const { ctx, db } = await pageContext();
   guard(ctx, "analytics.view");
   const rangeInput = rangeFromParams(sp, DEFAULT_PRESET);
-  const o = load(() => getAnalyticsOverview(db, ctx, rangeInput));
+  const o = await load(() => getAnalyticsOverview(db, ctx, rangeInput));
   const tz = ctx.settings.timezone;
 
   /* ---------- volume ---------- */
@@ -72,7 +72,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/insigh
   const slowestStage = stageData.reduce<BarListDatum | null>((m, d) => (m === null || (d.value ?? 0) > (m.value ?? 0) ? d : m), null);
 
   /* ---------- turnaround distribution ---------- */
-  const production = allowed(ctx, "reports.view") ? load(() => getReport(db, ctx, "production", o.range)) : null;
+  const production = allowed(ctx, "reports.view") ? await load(() => getReport(db, ctx, "production", o.range)) : null;
   const turnarounds = (production?.rows ?? [])
     .filter((r) => typeof r.approvedAt === "string" && r.approvedAt >= o.range.from && r.approvedAt < o.range.to && typeof r.turnaroundHours === "number")
     .map((r) => r.turnaroundHours as number);
@@ -99,7 +99,7 @@ export default async function AnalyticsPage({ searchParams }: PageProps<"/insigh
   const slowerThanTeam = teamTa === null ? 0 : editorTurnaround.filter((d) => (d.value ?? 0) > teamTa * 1.25).length;
 
   /* ---------- capacity ---------- */
-  const workloads = canViewTeamWorkloads(ctx) ? load(() => getWorkloads(db, ctx)).filter((w) => w.editor.isActive) : [];
+  const workloads = canViewTeamWorkloads(ctx) ? (await load(() => getWorkloads(db, ctx))).filter((w) => w.editor.isActive) : [];
   const utilisation = o.capacityHours > 0 ? o.loadHours / o.capacityHours : null;
   const capacityData: BarListDatum[] = workloads
     .sort((a, b) => b.ratio - a.ratio)

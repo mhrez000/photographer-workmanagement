@@ -11,7 +11,7 @@ export const metadata: Metadata = { title: "Your profile" };
 export default async function ProfileSettingsPage() {
   const { ctx, db } = await pageContext();
   const tz = ctx.settings.timezone;
-  const detail = load(() => getUserDetail(db, ctx, ctx.userId ?? ""));
+  const detail = await load(() => getUserDetail(db, ctx, ctx.userId ?? ""));
   const profile = detail.profile;
   if (!profile) return null; // self always gets the full profile.
 

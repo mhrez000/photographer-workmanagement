@@ -11,7 +11,7 @@ export const GET = read((db, ctx, q) => listUsers(db, ctx, q));
 export const POST = handle(async (req) => {
   const ctx = await requireContext();
   const result = await inviteUserWithTempPassword(ctx, await bodyOrNull(req));
-  runAutomationsAfterCommit(getDb(), ctx.organisationId);
+  await runAutomationsAfterCommit(getDb(), ctx.organisationId);
   return result;
 });
 

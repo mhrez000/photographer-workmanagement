@@ -13,10 +13,10 @@
  *   from the ledgers, audited as `job.field_changed` with cause "recompute".
  *
  * Status changes never happen here: they go through ./workflow.
- * Every function is synchronous (better-sqlite3 transactions).
+ * Every function is async (Postgres); callers await them inside one `withTx`.
  */
-import { and, count, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import type { Db, Tx } from "@/db/index";
+import { and, asc, count, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { first, one, type Db, type Tx } from "@/db/index";
 import {
   activityEvents,
   jobAssignments,
@@ -84,60 +84,65 @@ export interface CreateJobResult {
   editorAssignment: AssignEditorResult | null;
 }
 
-function nextJobNumber(tx: Tx, organisationId: string): string {
-  const seq = tx
-    .update(organisations)
-    .set({ jobSequence: sql`${organisations.jobSequence} + 1` })
-    .where(eq(organisations.id, organisationId))
-    .returning({ n: organisations.jobSequence })
-    .get();
+async function nextJobNumber(tx: Tx, organisationId: string): Promise<string> {
+  const seq = await first(
+    tx
+      .update(organisations)
+      .set({ jobSequence: sql`${organisations.jobSequence} + 1` })
+      .where(eq(organisations.id, organisationId))
+      .returning({ n: organisations.jobSequence }),
+  );
   if (!seq) throw new NotFoundError("Organisation");
-  const settings = tx
-    .select({ prefix: organisationSettings.jobNumberPrefix })
-    .from(organisationSettings)
-    .where(eq(organisationSettings.organisationId, organisationId))
-    .get();
+  const settings = await first(
+    tx
+      .select({ prefix: organisationSettings.jobNumberPrefix })
+      .from(organisationSettings)
+      .where(eq(organisationSettings.organisationId, organisationId)),
+  );
   return `${settings?.prefix ?? DEFAULT_JOB_NUMBER_PREFIX}-${String(seq.n).padStart(JOB_NUMBER_PAD, "0")}`;
 }
 
-export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobResult {
+export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<CreateJobResult> {
   assertCan(ctx, "job.create");
   const p = parseInput(CreateJobInput, input);
   const creatorId = ctx.userId;
   if (!creatorId) throw new ValidationError("Jobs are created by a person");
   const tz = ctx.settings.timezone;
 
-  const project = loadProjectInOrg(tx, ctx, p.projectId);
+  const project = await loadProjectInOrg(tx, ctx, p.projectId);
   if (project.archivedAt) throw new ValidationError("That project is archived", { formErrors: [], fieldErrors: { projectId: ["Archived"] } });
   if (p.clientId !== undefined) {
-    loadClientInOrg(tx, ctx, p.clientId);
+    await loadClientInOrg(tx, ctx, p.clientId);
     if (p.clientId !== project.clientId) {
       throw new ValidationError("The project belongs to a different client", { formErrors: [], fieldErrors: { clientId: ["Does not match the project"] } });
     }
   }
-  const client = loadClientInOrg(tx, ctx, project.clientId);
+  const client = await loadClientInOrg(tx, ctx, project.clientId);
   if (client.archivedAt) throw new ValidationError("That client is archived", { formErrors: [], fieldErrors: { clientId: ["Archived"] } });
-  const jobType = loadJobTypeInOrg(tx, ctx, p.jobTypeId);
+  const jobType = await loadJobTypeInOrg(tx, ctx, p.jobTypeId);
   if (jobType.archivedAt) throw new ValidationError("That job type is archived", { formErrors: [], fieldErrors: { jobTypeId: ["Archived"] } });
-  const workflow = loadWorkflowInOrg(tx, ctx, jobType.workflowId);
+  const workflow = await loadWorkflowInOrg(tx, ctx, jobType.workflowId);
   if (workflow.archivedAt) throw new ValidationError("The job type's workflow is archived");
-  const initial = tx
-    .select()
-    .from(workflowStatuses)
-    .where(and(eq(workflowStatuses.workflowId, workflow.id), eq(workflowStatuses.isInitial, true), isNull(workflowStatuses.archivedAt)))
-    .get();
+  const initial = await first(
+    tx
+      .select()
+      .from(workflowStatuses)
+      .where(and(eq(workflowStatuses.workflowId, workflow.id), eq(workflowStatuses.isInitial, true), isNull(workflowStatuses.archivedAt)))
+      .orderBy(asc(workflowStatuses.sortOrder), asc(workflowStatuses.id))
+      .limit(1),
+  );
   if (!initial) throw new ValidationError("The job type's workflow has no initial status");
 
   const photographerId = p.photographerId !== undefined ? p.photographerId : ctx.role === "photographer" ? creatorId : null;
   if (photographerId) {
-    const photographer = loadUserInOrg(tx, ctx, photographerId);
+    const photographer = await loadUserInOrg(tx, ctx, photographerId);
     if (!photographer.isActive) throw new ValidationError(`${photographer.name} is deactivated`, { formErrors: [], fieldErrors: { photographerId: ["Deactivated"] } });
     if (photographer.role === "editor") {
       throw new ValidationError(`${photographer.name} is an editor`, { formErrors: [], fieldErrors: { photographerId: ["Must be a photographer, manager or owner"] } });
     }
   }
 
-  const jobNumber = nextJobNumber(tx, ctx.organisationId);
+  const jobNumber = await nextJobNumber(tx, ctx.organisationId);
   const now = ctx.now();
   const jobId = newId();
   const values = {
@@ -167,10 +172,10 @@ export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobRe
     createdAt: now,
     updatedAt: now,
   } satisfies typeof jobs.$inferInsert;
-  tx.insert(jobs).values(values).run();
+  await tx.insert(jobs).values(values);
 
   const transitionId = newId();
-  tx.insert(jobStatusTransitions)
+  await tx.insert(jobStatusTransitions)
     .values({
       id: transitionId,
       organisationId: ctx.organisationId,
@@ -187,13 +192,12 @@ export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobRe
       enteredAt: now,
       editorIdAtEntry: null,
       photographerIdAtEntry: photographerId,
-    })
-    .run();
+    });
 
   let photographerAssignmentId: string | null = null;
   if (photographerId) {
     photographerAssignmentId = newId();
-    tx.insert(jobAssignments)
+    await tx.insert(jobAssignments)
       .values({
         id: photographerAssignmentId,
         organisationId: ctx.organisationId,
@@ -204,11 +208,10 @@ export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobRe
         assignedAt: now,
         reason: "Job created",
         statusCategoryAtAssign: initial.category,
-      })
-      .run();
+      });
   }
 
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: jobId,
     jobId,
@@ -235,11 +238,11 @@ export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobRe
     },
     metadata: jobEventMeta(values, { transitionId }),
   });
-  tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId)).run();
+  await tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId));
   if (photographerAssignmentId) {
-    tx.update(jobAssignments).set({ activityEventId: eventId }).where(eq(jobAssignments.id, photographerAssignmentId)).run();
+    await tx.update(jobAssignments).set({ activityEventId: eventId }).where(eq(jobAssignments.id, photographerAssignmentId));
     if (photographerId !== creatorId) {
-      notify(tx, ctx, {
+      await notify(tx, ctx, {
         userIds: [photographerId],
         type: "job_assigned",
         title: `You are the photographer on ${jobNumber}`,
@@ -250,13 +253,13 @@ export function createJob(tx: Tx, ctx: AuthContext, input: unknown): CreateJobRe
       });
     }
   }
-  emitAutomationEvent(tx, ctx, { eventId, eventType: "job.created", jobId });
+  await emitAutomationEvent(tx, ctx, { eventId, eventType: "job.created", jobId });
 
-  let job = tx.select().from(jobs).where(eq(jobs.id, jobId)).get() as Job;
+  let job: Job = await one(tx.select().from(jobs).where(eq(jobs.id, jobId)), "job");
   let editorAssignment: AssignEditorResult | null = null;
   if (p.editorId) {
     assertCan(ctx, "job.assign_editor", permissionRefOf(job));
-    editorAssignment = assignEditorToJob(tx, ctx, job, p.editorId, { reason: "Assigned at creation" });
+    editorAssignment = await assignEditorToJob(tx, ctx, job, p.editorId, { reason: "Assigned at creation" });
     job = editorAssignment.job;
   }
   return { job, transitionId, eventId, editorAssignment };
@@ -315,14 +318,14 @@ export interface UpdateJobResult {
  * checked the version). Checks each field's permission, keeps client =
  * project.client, writes ONE version-bumped UPDATE and one event per field.
  */
-export function applyJobFieldChanges(
+export async function applyJobFieldChanges(
   tx: Tx,
   ctx: AuthContext,
   jobIn: Job,
   ref: JobPermissionRef,
   fields: JobFieldsValue,
   opts: { batchId?: string | null } = {},
-): UpdateJobResult {
+): Promise<UpdateJobResult> {
   const present = (Object.keys(fields) as (keyof JobFieldsValue)[]).filter((k) => fields[k] !== undefined);
   for (const action of new Set(present.map((k) => FIELD_ACTIONS[k]))) assertCan(ctx, action, ref);
 
@@ -347,10 +350,10 @@ export function applyJobFieldChanges(
   // Client / project consistency: the client always follows the project.
   if (fields.projectId !== undefined || fields.clientId !== undefined) {
     const projectChanged = fields.projectId !== undefined && fields.projectId !== job.projectId;
-    const project = loadProjectInOrg(tx, ctx, fields.projectId ?? job.projectId);
+    const project = await loadProjectInOrg(tx, ctx, fields.projectId ?? job.projectId);
     if (projectChanged && project.archivedAt) throw new ValidationError("That project is archived", { formErrors: [], fieldErrors: { projectId: ["Archived"] } });
     if (fields.clientId !== undefined) {
-      loadClientInOrg(tx, ctx, fields.clientId);
+      await loadClientInOrg(tx, ctx, fields.clientId);
       if (fields.clientId !== project.clientId) {
         throw new ValidationError(
           projectChanged ? "The project belongs to a different client" : "Choose a project of that client to change the client",
@@ -359,12 +362,12 @@ export function applyJobFieldChanges(
       }
     }
     if (projectChanged) {
-      const oldProject = loadProjectInOrg(tx, ctx, job.projectId);
+      const oldProject = await loadProjectInOrg(tx, ctx, job.projectId);
       patch.projectId = project.id;
       plain.push({ field: "projectId", from: job.projectId, to: project.id, fromLabel: oldProject.name, toLabel: project.name });
       if (project.clientId !== job.clientId) {
-        const oldClient = loadClientInOrg(tx, ctx, job.clientId);
-        const newClient = loadClientInOrg(tx, ctx, project.clientId);
+        const oldClient = await loadClientInOrg(tx, ctx, job.clientId);
+        const newClient = await loadClientInOrg(tx, ctx, project.clientId);
         patch.clientId = project.clientId;
         plain.push({ field: "clientId", from: job.clientId, to: project.clientId, fromLabel: oldClient.name, toLabel: newClient.name });
       }
@@ -372,9 +375,9 @@ export function applyJobFieldChanges(
   }
 
   if (fields.jobTypeId !== undefined && fields.jobTypeId !== job.jobTypeId) {
-    const next = loadJobTypeInOrg(tx, ctx, fields.jobTypeId);
+    const next = await loadJobTypeInOrg(tx, ctx, fields.jobTypeId);
     if (next.archivedAt) throw new ValidationError("That job type is archived", { formErrors: [], fieldErrors: { jobTypeId: ["Archived"] } });
-    const prev = loadJobTypeInOrg(tx, ctx, job.jobTypeId);
+    const prev = await loadJobTypeInOrg(tx, ctx, job.jobTypeId);
     patch.jobTypeId = next.id;
     plain.push({ field: "jobTypeId", from: job.jobTypeId, to: next.id, fromLabel: prev.name, toLabel: next.name });
   }
@@ -403,14 +406,14 @@ export function applyJobFieldChanges(
 
   if (plain.length === 0 && dates.length === 0 && !priorityChange) return { job, changed: [] };
 
-  const updated = updateJobRow(tx, ctx, job, patch);
+  const updated = await updateJobRow(tx, ctx, job, patch);
   const now = ctx.now();
   const meta = (extra: Record<string, unknown>) => jobEventMeta(updated, extra, opts.batchId);
   const changed: string[] = [];
   const managementActor = isManagement(ctx) && !ctx.isSystem;
 
   for (const c of plain) {
-    recordEvent(tx, ctx, {
+    await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: updated.id,
       jobId: updated.id,
@@ -424,7 +427,7 @@ export function applyJobFieldChanges(
   }
 
   if (priorityChange) {
-    const evt = recordEvent(tx, ctx, {
+    const evt = await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: updated.id,
       jobId: updated.id,
@@ -434,7 +437,7 @@ export function applyJobFieldChanges(
       newValue: { priority: priorityChange.to },
       metadata: meta({}),
     });
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [updated.editorId, managementActor ? updated.photographerId : null],
       type: "priority_changed",
       title: `${updated.jobNumber} priority is now ${priorityChange.to}`,
@@ -443,14 +446,14 @@ export function applyJobFieldChanges(
       activityEventId: evt,
       linkPath: jobLinkPath(updated.id),
     });
-    emitAutomationEvent(tx, ctx, { eventId: evt, eventType: "job.priority_changed", jobId: updated.id });
+    await emitAutomationEvent(tx, ctx, { eventId: evt, eventType: "job.priority_changed", jobId: updated.id });
     changed.push("priority");
   }
 
   for (const d of dates) {
     const deadlineBound = CATEGORY_GROUPS.DEADLINE_BOUND.includes(updated.statusCategory);
     const wasOverdue = d.from !== null && deadlineBound && Date.parse(d.from) < Date.parse(now);
-    const evt = recordEvent(tx, ctx, {
+    const evt = await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: updated.id,
       jobId: updated.id,
@@ -461,7 +464,7 @@ export function applyJobFieldChanges(
       metadata: meta({ field: d.field, wasOverdue }),
     });
     if (d.field !== "shootDate") {
-      notify(tx, ctx, {
+      await notify(tx, ctx, {
         userIds: [updated.editorId, managementActor ? updated.photographerId : null],
         type: "deadline_changed",
         title: `${updated.jobNumber} deadline changed`,
@@ -470,7 +473,7 @@ export function applyJobFieldChanges(
         activityEventId: evt,
         linkPath: jobLinkPath(updated.id),
       });
-      emitAutomationEvent(tx, ctx, { eventId: evt, eventType: DATE_EVENTS[d.field], jobId: updated.id });
+      await emitAutomationEvent(tx, ctx, { eventId: evt, eventType: DATE_EVENTS[d.field], jobId: updated.id });
     }
     changed.push(d.field);
   }
@@ -479,51 +482,51 @@ export function applyJobFieldChanges(
 }
 
 /** `PATCH /api/jobs/:id` — any subset of fields, each with its own permission. */
-export function updateJob(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function updateJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(UpdateJobInput, input);
-  const { job, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertVersion(job, p.expectedVersion);
   const { jobId: _jobId, expectedVersion: _version, ...fields } = p;
   void _jobId;
   void _version;
-  return applyJobFieldChanges(tx, ctx, job, ref, fields);
+  return await applyJobFieldChanges(tx, ctx, job, ref, fields);
 }
 
-function updateOne(tx: Tx, ctx: AuthContext, jobId: string, expectedVersion: number, fields: JobFieldsValue): UpdateJobResult {
-  const { job, ref } = loadVisibleJob(tx, ctx, jobId);
+async function updateOne(tx: Tx, ctx: AuthContext, jobId: string, expectedVersion: number, fields: JobFieldsValue): Promise<UpdateJobResult> {
+  const { job, ref } = await loadVisibleJob(tx, ctx, jobId);
   assertVersion(job, expectedVersion);
-  return applyJobFieldChanges(tx, ctx, job, ref, fields);
+  return await applyJobFieldChanges(tx, ctx, job, ref, fields);
 }
 
-export function setPriority(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setPriority(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetPriorityInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { priority: p.priority });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { priority: p.priority });
 }
 
 /** Civil date (stored as end of that day in the org timezone), ISO instant, or null. */
-export function setDueDate(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setDueDate(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetDateInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { dueDate: p.value });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { dueDate: p.value });
 }
 
-export function setReviewDueDate(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setReviewDueDate(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetDateInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { reviewDueDate: p.value });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { reviewDueDate: p.value });
 }
 
-export function setDeliveryDueDate(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setDeliveryDueDate(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetDateInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { deliveryDueDate: p.value });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { deliveryDueDate: p.value });
 }
 
-export function setShootDate(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setShootDate(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetDateInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { shootDate: p.value });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { shootDate: p.value });
 }
 
-export function setCompletionPercent(tx: Tx, ctx: AuthContext, input: unknown): UpdateJobResult {
+export async function setCompletionPercent(tx: Tx, ctx: AuthContext, input: unknown): Promise<UpdateJobResult> {
   const p = parseInput(SetCompletionPercentInput, input);
-  return updateOne(tx, ctx, p.jobId, p.expectedVersion, { completionPercent: p.completionPercent });
+  return await updateOne(tx, ctx, p.jobId, p.expectedVersion, { completionPercent: p.completionPercent });
 }
 
 /* ------------------------------------------------------------------ */
@@ -538,16 +541,16 @@ export interface PauseResult {
 }
 
 /** Editor (or O/M on behalf) pauses work while in an EDITOR_WORKING status; closes the running timer. */
-export function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): PauseResult {
+export async function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<PauseResult> {
   const p = parseInput(PauseInput, input);
-  const { job: loaded, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.pause", ref);
   assertVersion(loaded, p.expectedVersion);
   if (loaded.isPaused) throw new ValidationError("Work on this job is already paused");
-  const closedSessionIds = closeRunningSessions(tx, ctx, { jobId: loaded.id }, "paused", "user");
-  const job = updateJobRow(tx, ctx, loaded, { isPaused: true, pausedAt: ctx.now() });
+  const closedSessionIds = await closeRunningSessions(tx, ctx, { jobId: loaded.id }, "paused", "user");
+  const job = await updateJobRow(tx, ctx, loaded, { isPaused: true, pausedAt: ctx.now() });
   const onBehalfOf = isManagement(ctx) && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
     jobId: job.id,
@@ -557,7 +560,7 @@ export function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): PauseResult 
     newValue: { isPaused: true },
     metadata: jobEventMeta(job, { sessionId: closedSessionIds[0] ?? null, reason: p.reason ?? null, ...(onBehalfOf ? { onBehalfOf } : {}) }),
   });
-  notify(tx, ctx, {
+  await notify(tx, ctx, {
     userIds: [job.photographerId],
     type: "job_paused",
     title: `Work on ${job.jobNumber} was paused`,
@@ -569,15 +572,15 @@ export function pauseJob(tx: Tx, ctx: AuthContext, input: unknown): PauseResult 
   return { job, eventId, closedSessionIds };
 }
 
-export function resumeJob(tx: Tx, ctx: AuthContext, input: unknown): PauseResult {
+export async function resumeJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<PauseResult> {
   const p = parseInput(PauseInput, input);
-  const { job: loaded, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.pause", ref);
   assertVersion(loaded, p.expectedVersion);
   if (!loaded.isPaused) throw new ValidationError("Work on this job is not paused");
-  const job = updateJobRow(tx, ctx, loaded, { isPaused: false, pausedAt: null });
+  const job = await updateJobRow(tx, ctx, loaded, { isPaused: false, pausedAt: null });
   const onBehalfOf = isManagement(ctx) && job.editorId && job.editorId !== ctx.userId ? job.editorId : undefined;
-  const eventId = recordEvent(tx, ctx, {
+  const eventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
     jobId: job.id,
@@ -595,25 +598,25 @@ export function resumeJob(tx: Tx, ctx: AuthContext, input: unknown): PauseResult
 /* ------------------------------------------------------------------ */
 
 /** `POST /api/jobs/bulk/priority` — one tx per job, per-job `job.set_priority`. */
-export function bulkSetPriority(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): BulkResult {
+export async function bulkSetPriority(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): Promise<BulkResult> {
   const p = parseInput(BulkPriorityInput, input);
   return runPerJob(
     p.jobIds,
-    (tx, jobId, batchId) => {
-      const { job, ref } = loadVisibleJob(tx, ctx, jobId);
-      applyJobFieldChanges(tx, ctx, job, ref, { priority: p.priority }, { batchId });
+    async (tx, jobId, batchId) => {
+      const { job, ref } = await loadVisibleJob(tx, ctx, jobId);
+      await applyJobFieldChanges(tx, ctx, job, ref, { priority: p.priority }, { batchId });
     },
     { ...options, organisationId: ctx.organisationId },
   );
 }
 
 /** `POST /api/jobs/bulk/transition` — one tx per job through the workflow engine. */
-export function bulkTransition(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): BulkResult {
+export async function bulkTransition(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): Promise<BulkResult> {
   const p = parseInput(BulkTransitionInput, input);
   return runPerJob(
     p.jobIds,
-    (tx, jobId, batchId) => {
-      transitionLoadedJob(tx, ctx, jobId, { toStatusId: p.toStatusId, toCategory: p.toCategory }, { reason: p.reason, override: p.override, batchId });
+    async (tx, jobId, batchId) => {
+      await transitionLoadedJob(tx, ctx, jobId, { toStatusId: p.toStatusId, toCategory: p.toCategory }, { reason: p.reason, override: p.override, batchId });
     },
     { ...options, organisationId: ctx.organisationId },
   );
@@ -645,22 +648,22 @@ export interface RecomputeResult {
  * and deadline snapshots are not rebuilt. `ctx` defaults to a system
  * context of the job's organisation.
  */
-export function recomputeJobDerived(tx: Tx, jobId: string, ctxIn?: AuthContext): RecomputeResult {
-  const job = tx.select().from(jobs).where(eq(jobs.id, jobId)).get();
+export async function recomputeJobDerived(tx: Tx, jobId: string, ctxIn?: AuthContext): Promise<RecomputeResult> {
+  const job = await first(tx.select().from(jobs).where(eq(jobs.id, jobId)));
   if (!job || (ctxIn && ctxIn.organisationId !== job.organisationId)) throw new NotFoundError("Job");
-  const ctx: AuthContext = ctxIn ? { ...ctxIn, cause: "recompute" } : systemContext(job.organisationId, { db: tx, cause: "recompute" });
+  const ctx: AuthContext = ctxIn ? { ...ctxIn, cause: "recompute" } : await systemContext(job.organisationId, { db: tx, cause: "recompute" });
 
   const derived: Partial<Record<keyof Job, unknown>> = {};
-  const open = tx
+  const open = await tx
     .select()
     .from(jobStatusTransitions)
     .where(and(eq(jobStatusTransitions.jobId, job.id), isNull(jobStatusTransitions.exitedAt)))
-    .all();
+    .orderBy(asc(jobStatusTransitions.sequence));
   if (open.length !== 1) {
     throw new ValidationError(`Job ${job.jobNumber} has ${open.length} open stages; the transition ledger needs manual repair`);
   }
   const stage = open[0];
-  const status = tx.select().from(workflowStatuses).where(eq(workflowStatuses.id, stage.toStatusId)).get();
+  const status = await first(tx.select().from(workflowStatuses).where(eq(workflowStatuses.id, stage.toStatusId)));
   if (!status) throw new NotFoundError("Status");
   derived.statusId = stage.toStatusId;
   derived.workflowId = status.workflowId;
@@ -670,49 +673,72 @@ export function recomputeJobDerived(tx: Tx, jobId: string, ctxIn?: AuthContext):
   derived.completedAt = stage.toCategory === "completed" ? stage.enteredAt : null;
   derived.cancelledAt = stage.toCategory === "cancelled" ? stage.enteredAt : null;
 
-  const openAssignment = (role: "photographer" | "editor") =>
-    tx
-      .select({ userId: jobAssignments.userId })
-      .from(jobAssignments)
-      .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, role), isNull(jobAssignments.unassignedAt)))
-      .get()?.userId ?? null;
-  derived.photographerId = openAssignment("photographer");
-  derived.editorId = openAssignment("editor");
+  const openAssignment = async (role: "photographer" | "editor"): Promise<string | null> =>
+    (
+      await first(
+        tx
+          .select({ userId: jobAssignments.userId })
+          .from(jobAssignments)
+          .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, role), isNull(jobAssignments.unassignedAt)))
+          .orderBy(desc(jobAssignments.rowid))
+          .limit(1),
+      )
+    )?.userId ?? null;
+  derived.photographerId = await openAssignment("photographer");
+  derived.editorId = await openAssignment("editor");
   derived.previousEditorId =
-    tx
-      .select({ userId: jobAssignments.userId })
-      .from(jobAssignments)
-      .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, "editor"), isNotNull(jobAssignments.unassignedAt)))
-      .orderBy(desc(jobAssignments.unassignedAt), desc(jobAssignments.assignedAt))
-      .get()?.userId ?? null;
+    (
+      await first(
+        tx
+          .select({ userId: jobAssignments.userId })
+          .from(jobAssignments)
+          .where(and(eq(jobAssignments.jobId, job.id), eq(jobAssignments.role, "editor"), isNotNull(jobAssignments.unassignedAt)))
+          .orderBy(desc(jobAssignments.unassignedAt), desc(jobAssignments.assignedAt), desc(jobAssignments.rowid))
+          .limit(1),
+      )
+    )?.userId ?? null;
 
   derived.revisionCount =
-    tx
-      .select({ n: sql<number>`coalesce(max(${jobRevisions.revisionNumber}), 0)` })
-      .from(jobRevisions)
-      .where(eq(jobRevisions.jobId, job.id))
-      .get()?.n ?? 0;
+    (
+      await first(
+        tx
+          .select({ n: sql<number>`coalesce(max(${jobRevisions.revisionNumber}), 0)`.mapWith(Number) })
+          .from(jobRevisions)
+          .where(eq(jobRevisions.jobId, job.id)),
+      )
+    )?.n ?? 0;
   derived.openRevisionId =
-    tx
-      .select({ id: jobRevisions.id })
-      .from(jobRevisions)
-      .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
-      .get()?.id ?? null;
+    (
+      await first(
+        tx
+          .select({ id: jobRevisions.id })
+          .from(jobRevisions)
+          .where(and(eq(jobRevisions.jobId, job.id), isNull(jobRevisions.resolvedAt)))
+          .orderBy(asc(jobRevisions.revisionNumber))
+          .limit(1),
+      )
+    )?.id ?? null;
   derived.reopenedCount =
-    tx
-      .select({ n: count() })
-      .from(jobStatusTransitions)
-      .where(and(eq(jobStatusTransitions.jobId, job.id), eq(jobStatusTransitions.isReopen, true)))
-      .get()?.n ?? 0;
+    (
+      await first(
+        tx
+          .select({ n: count() })
+          .from(jobStatusTransitions)
+          .where(and(eq(jobStatusTransitions.jobId, job.id), eq(jobStatusTransitions.isReopen, true))),
+      )
+    )?.n ?? 0;
   if (job.isPaused && !CATEGORY_GROUPS.EDITOR_WORKING.includes(status.category)) {
     derived.isPaused = false;
     derived.pausedAt = null;
   }
-  const lastEvent = tx
-    .select({ at: sql<string | null>`max(${activityEvents.createdAt})` })
-    .from(activityEvents)
-    .where(eq(activityEvents.jobId, job.id))
-    .get()?.at;
+  const lastEvent = (
+    await first(
+      tx
+        .select({ at: sql<string | null>`max(${activityEvents.createdAt})` })
+        .from(activityEvents)
+        .where(eq(activityEvents.jobId, job.id)),
+    )
+  )?.at;
   if (lastEvent) derived.lastActivityAt = lastEvent;
 
   const changes: DerivedChange[] = [];
@@ -726,13 +752,12 @@ export function recomputeJobDerived(tx: Tx, jobId: string, ctxIn?: AuthContext):
   if (changes.length === 0) return { jobId: job.id, job, changes };
 
   const now = ctx.now();
-  tx.update(jobs)
+  await tx.update(jobs)
     .set({ ...(patch as Partial<typeof jobs.$inferInsert>), version: job.version + 1, updatedAt: now })
-    .where(eq(jobs.id, job.id))
-    .run();
+    .where(eq(jobs.id, job.id));
   for (const c of changes) {
     if (c.column === "lastActivityAt") continue; // audit exemption (§5)
-    recordEvent(tx, ctx, {
+    await recordEvent(tx, ctx, {
       entityType: "job",
       entityId: job.id,
       jobId: job.id,
@@ -743,16 +768,16 @@ export function recomputeJobDerived(tx: Tx, jobId: string, ctxIn?: AuthContext):
       metadata: jobEventMeta(job, { field: c.column, cause: "recompute", repaired: true }),
     });
   }
-  const fresh = tx.select().from(jobs).where(eq(jobs.id, job.id)).get() as Job;
+  const fresh: Job = await one(tx.select().from(jobs).where(eq(jobs.id, job.id)), "job");
   return { jobId: job.id, job: fresh, changes };
 }
 
 /** `POST /api/jobs/:id/recompute` — owner-only repair (`system.integrity`). */
-export function repairJob(tx: Tx, ctx: AuthContext, input: unknown): RecomputeResult {
+export async function repairJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<RecomputeResult> {
   assertCan(ctx, "system.integrity");
   const p = parseInput(JobIdInput, input);
-  const { job } = loadVisibleJob(tx, ctx, p.jobId);
-  return recomputeJobDerived(tx, job.id, ctx);
+  const { job } = await loadVisibleJob(tx, ctx, p.jobId);
+  return await recomputeJobDerived(tx, job.id, ctx);
 }
 
 /** True when the actor may edit any job field (UI helper). */

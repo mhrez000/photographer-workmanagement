@@ -51,13 +51,13 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
   let notice: string | null = null;
   let groups: TeamWorkGroup[];
   try {
-    groups = getTeamWork(db, ctx, toJobListInput(sp, { role }));
+    groups = await getTeamWork(db, ctx, toJobListInput(sp, { role }));
   } catch (err) {
     if (!(err instanceof ValidationError)) throw err;
     notice = "Some filters in the link were invalid and were ignored.";
-    groups = getTeamWork(db, ctx, { role });
+    groups = await getTeamWork(db, ctx, { role });
   }
-  const jobTypes = listJobTypes(db, ctx).map((t) => ({ id: t.id, name: t.name, colour: t.colour }));
+  const jobTypes = (await listJobTypes(db, ctx)).map((t) => ({ id: t.id, name: t.name, colour: t.colour }));
 
   const totals = groups.reduce(
     (acc, g) => {

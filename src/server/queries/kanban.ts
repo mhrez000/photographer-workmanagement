@@ -59,9 +59,9 @@ function columnOrder(column: KanbanColumn | "cancelled"): SQL[] {
 }
 
 /** Adds `allowedColumns` to job rows (one workflow-graph load for all cards). */
-export function toKanbanCards(db: DbLike, ctx: AuthContext, raws: readonly RawJobRow[], now: string): KanbanCard[] {
-  const rows = mapJobRows(db, ctx, raws, now);
-  const graphs = loadWorkflowGraphs(
+export async function toKanbanCards(db: DbLike, ctx: AuthContext, raws: readonly RawJobRow[], now: string): Promise<KanbanCard[]> {
+  const rows = await mapJobRows(db, ctx, raws, now);
+  const graphs = await loadWorkflowGraphs(
     db,
     ctx,
     raws.map((r) => r.job.workflowId),
@@ -75,31 +75,33 @@ export function toKanbanCards(db: DbLike, ctx: AuthContext, raws: readonly RawJo
 }
 
 /** The full board for the actor (filters = the All Work vocabulary + perColumnLimit). */
-export function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknown = {}): KanbanBoard {
+export async function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<KanbanBoard> {
   const f = parseInput(KanbanQuerySchema, input ?? {});
   const now = ctx.now();
-  const bounds = orgDayBounds(ctx, now, loadOrgSettingsRow(db, ctx)?.weekStartsOn ?? 1);
+  const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
   const filterWhere = jobFiltersWhere(ctx, { ...f, includeCancelled: true }, bounds, { defaultHideCancelled: false });
   const limit = f.perColumnLimit ?? KANBAN_DEFAULT_PER_COLUMN;
 
-  const columns: KanbanColumnView[] = KANBAN_COLUMNS.map((column) => {
+  // Sequential on purpose: `db` may be a transaction (one connection).
+  const columns: KanbanColumnView[] = [];
+  for (const column of KANBAN_COLUMNS) {
     const meta = KANBAN_COLUMN_META[column];
     const where = and(filterWhere, categoryIn(meta.categories));
-    const raws = selectRawJobs(db, ctx, { where, orderBy: columnOrder(column), limit });
-    return {
+    const raws = await selectRawJobs(db, ctx, { where, orderBy: columnOrder(column), limit });
+    columns.push({
       column,
       label: meta.label,
       categories: [...meta.categories],
-      cards: toKanbanCards(db, ctx, raws, now),
-      count: countJobs(db, ctx, where),
-    };
-  });
+      cards: await toKanbanCards(db, ctx, raws, now),
+      count: await countJobs(db, ctx, where),
+    });
+  }
 
   let cancelled: KanbanBoard["cancelled"] = null;
   if (f.includeCancelled) {
     const where = and(filterWhere, eq(jobs.statusCategory, "cancelled"));
-    const raws = selectRawJobs(db, ctx, { where, orderBy: columnOrder("cancelled"), limit });
-    cancelled = { cards: toKanbanCards(db, ctx, raws, now), count: countJobs(db, ctx, where) };
+    const raws = await selectRawJobs(db, ctx, { where, orderBy: columnOrder("cancelled"), limit });
+    cancelled = { cards: await toKanbanCards(db, ctx, raws, now), count: await countJobs(db, ctx, where) };
   }
   return { columns, cancelled, asOf: now };
 }
@@ -109,9 +111,10 @@ export function getKanbanBoard(db: DbLike, ctx: AuthContext, input: unknown = {}
  * the actor (noop / single target / ambiguous picker / none + reason).
  * 404 when the job is not visible.
  */
-export function previewKanbanDrop(db: DbLike, ctx: AuthContext, jobId: string, column: KanbanColumn): KanbanDropResult {
-  const { job, ref } = loadVisibleJob(db, ctx, jobId);
-  const raw = selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 })[0];
-  const graph = loadWorkflowGraphs(db, ctx, [job.workflowId]).get(job.workflowId) ?? { statuses: [], edges: [] };
+export async function previewKanbanDrop(db: DbLike, ctx: AuthContext, jobId: string, column: KanbanColumn): Promise<KanbanDropResult> {
+  const { job, ref } = await loadVisibleJob(db, ctx, jobId);
+  const raw = (await selectRawJobs(db, ctx, { where: eq(jobs.id, job.id), limit: 1 }))[0];
+  const graph = (await loadWorkflowGraphs(db, ctx, [job.workflowId])).get(job.workflowId) ?? { statuses: [], edges: [] };
+
   return resolveKanbanDrop(ctx, workflowJobOf(job, raw?.editor ? raw.editor.isActive : undefined, ref.pastEditorIds), column, graph.statuses, graph.edges);
 }

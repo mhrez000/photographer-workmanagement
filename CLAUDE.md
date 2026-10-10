@@ -5,7 +5,7 @@ Product brief: `docs/PRODUCT-SPEC.md`. Architecture + data model: `docs/ARCHITEC
 
 ## Stack (fixed — do not swap libraries)
 - Next.js 16.4 App Router (`src/app`), React 19, TypeScript strict, Tailwind CSS v4 (`src/app/globals.css` holds design tokens).
-- Drizzle ORM + better-sqlite3. DB file `data/app.db`. Schema in `src/db/schema.ts`; client in `src/db/index.ts`.
+- Drizzle ORM on **Postgres** (ASYNC everywhere): production = Supabase via `postgres` (postgres-js, `DATABASE_URL`); local dev/tests/e2e = PGlite (in-process Postgres, `PGLITE_DATA_DIR`, default `./data/pglite`). Schema `src/db/schema.ts` (pg-core); client `src/db/index.ts`; migrations `drizzle/` (integrity triggers in `drizzle/0001_guards.sql`). Conversion rules: `docs/POSTGRES-MIGRATION.md`.
 - Zod 4 for validation (`import { z } from "zod"`), jose for signed session cookies, bcryptjs for passwords.
 - UI: lucide-react icons, @dnd-kit (kanban), recharts (charts), cmdk (command palette), date-fns (dates), `cn()` from `src/lib/utils.ts`.
 - Tests: vitest (`src/**/*.test.ts`), Playwright (`e2e/`).
@@ -46,17 +46,18 @@ e2e/*                           Playwright
 ```
 
 ## Commands
-`npm run dev` · `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` · `npm run db:push` · `npm run db:guard` · `npm run db:seed` · `npm run db:reset` · `npm run db:verify` · `npm run e2e`
+`npm run dev` · `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` · `npm run db:generate` · `npm run db:migrate` · `npm run db:seed` · `npm run db:reset` · `npm run db:verify` · `npm run e2e` · remote: `npm run db:migrate:remote` · `npm run db:seed:remote [-- --wipe]` · `npm run db:verify:remote`
 
-- `db:reset` (dev only) = delete `data/app.db*` → `db:push` → `db:guard` (28 integrity triggers) → `db:seed` (real services under a fake clock, ~15 s; exits 1 on drift or a missed §39 minimum). `db:seed` refuses to run when organisations already exist.
+- `db:reset` (dev only, local PGlite only) = delete `./data/pglite` → `db:migrate` (schema + 28 integrity triggers) → `db:seed` (real services under a fake clock; exits 1 on drift or a missed §39 minimum) → `db:verify`. Refuses when `DATABASE_URL` is set. Stop `npm run dev` first (one process per PGlite data dir). `db:seed` refuses to run when organisations already exist.
 - `db:verify` recomputes every derived job column from the ledgers (same check as `GET /api/system/integrity`); must report 0 drift.
-- After any `schema.ts` change run `npx drizzle-kit generate` (the committed `drizzle/` DDL feeds `makeTestDb()`).
-- Env: `.env` needs `SESSION_SECRET` (≥ 32 chars) and optional `DATABASE_PATH` (default `./data/app.db`); see `.env.example`.
+- After any `schema.ts` change run `npx drizzle-kit generate` (the freshness test in `src/db/test-db.test.ts` fails until you do). Trigger changes = a new custom migration.
+- Env: local dev needs none (`npm install` → `npm run db:reset` → `npm run dev`; without `SESSION_SECRET` the dev server generates `data/.session-secret`). Optional `.env`: `SESSION_SECRET` (≥ 32 chars, REQUIRED in production), `PGLITE_DATA_DIR`, `CRON_SECRET`; see `.env.example`. Supabase URLs (`DATABASE_URL` = transaction pooler :6543, `DIRECT_URL` = session pooler :5432) live ONLY in `.env.supabase` (gitignored, not loaded by Next; never print them) and in Vercel env vars. Never put `DATABASE_URL` in `.env`/`.env.local`.
+- Remote (Supabase): `db:migrate:remote` (schema + guards, idempotent) → `db:seed:remote` (refuses a non-empty target; `-- --wipe` REPLACES all remote data) → `db:verify:remote` (0 drift). Production-mode check: `npx next build` then `node scripts/start-remote.mjs 3160`. `REMOTE_ENV_FILE=<file>` retargets all of these (e.g. a local Postgres rehearsal). Remote writes need the user's explicit go-ahead.
 
 Demo login (seeded, all `Password123!`): owner `owner@studio.test`; managers `manager1@`/`manager2@studio.test`; `photographer01..12@studio.test` (photographer01 has team-workload + analytics flags); `editor01..13@studio.test` (editor11 and editor13 are deactivated). Second org for isolation tests: `owner@other.test`. Full roster in `src/db/seed/catalog.ts`.
 
 ## Page conventions (UI integration pass)
-- Pages: `const { ctx, db } = await pageContext(); guard(ctx, "<action>"); const x = load(() => query(db, ctx, …))` (`src/server/page.ts`). Client islands call `api` from `src/lib/api-client.ts` then `router.refresh()`; URL search params hold filter/sort/tab state.
+- Pages: `const { ctx, db } = await pageContext(); guard(ctx, "<action>"); const x = await load(() => query(db, ctx, …))` (`src/server/page.ts`). Client islands call `api` from `src/lib/api-client.ts` then `router.refresh()`; URL search params hold filter/sort/tab state.
 - **Real 403/404 status**: once a segment's `loading.tsx` streams, the status is locked at 200. Put permission/existence gates that must return a real 403/404 in a `layout.tsx` ABOVE the loading boundary (e.g. `settings/organisation/layout.tsx`, `jobs/[id]/layout.tsx`). A segment with child routes keeps its own `page`/`loading`/`error` in a `(list)` (or `(detail)`) route group so its skeleton does not wrap the children. `(app)/forbidden.tsx` and `(app)/not-found.tsx` render inside the app shell.
 - Shared display/actions live in `@/components/jobs` (StatusPill, PriorityPill, DueChip, PersonChip, WorkloadBand, CapacityBar, JobActionBar, ConflictDialog…), `@/components/common` (SectionCard, StatTile, ConfirmDialog, RouteError), `@/components/filters`. Do not write local copies.
 - Nav visibility: `src/config/nav.ts` items take `roles` plus an optional `grant` (`analytics` / `teamWorkloads` / `teamWork`) computed with `can()` in `src/app/(app)/layout.tsx`, so flag-based access (e.g. photographer analytics) shows in the sidebar and palette.

@@ -14,8 +14,8 @@
  *   - completedThisWeek/Month: completedInRange over jobs whose editor_id = E
  *   - revisionRate: last 30 days, jobs credited to E as approving editor
  */
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
-import type { DbLike } from "@/db/index";
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { first, type DbLike } from "@/db/index";
 import { jobAssignments, jobs, users } from "@/db/schema";
 import { CATEGORY_GROUPS, WORKLOAD_THRESHOLDS } from "@/lib/constants";
 import { addCivilDays, civilDate, civilDiffDays, startOfCivilDayIso, todayCivil } from "@/lib/dates";
@@ -41,6 +41,7 @@ import { assertCan, can, isManagement } from "@/server/auth/permissions";
 import { loadUserInOrg } from "@/server/services/_shared";
 import {
   approvedJobsInRange,
+  binaryAsc,
   completedJobsInRange,
   groupBy,
   lastDaysRange,
@@ -86,22 +87,26 @@ const userRefOf = (u: Pick<User, "id" | "name" | "role" | "avatarColour" | "isAc
  * gate). `editorIds` restricts the output rows (the underlying counts are
  * identical either way).
  */
-export function computeWorkloads(db: DbLike, ctx: AuthContext, opts: { now?: string; editorIds?: readonly string[] } = {}): WorkloadComputation {
+export async function computeWorkloads(
+  db: DbLike,
+  ctx: AuthContext,
+  opts: { now?: string; editorIds?: readonly string[] } = {},
+): Promise<WorkloadComputation> {
   const now = opts.now ?? ctx.now();
-  const settings = loadOrgSettings(db, ctx);
+  const settings = await loadOrgSettings(db, ctx);
   const ws = workloadSettingsOf(settings);
-  const jobTypeDefaults = loadJobTypeDefaultHours(db, ctx);
+  const jobTypeDefaults = await loadJobTypeDefaultHours(db, ctx);
 
   const restrict = opts.editorIds ? [...new Set(opts.editorIds)] : null;
   if (restrict && restrict.length === 0) return { rows: [], held: new Map(), dueSoonForBottleneck: new Map(), settings, now };
 
-  const activeWithEditor = loadMetricJobs(db, ctx, {
+  const activeWithEditor = await loadMetricJobs(db, ctx, {
     scope: "org",
     where: and(isNotNull(jobs.editorId), categoryIn(CATEGORY_GROUPS.ACTIVE), restrict ? inArray(jobs.editorId, restrict) : undefined),
   });
   const holders = new Set(activeWithEditor.map((j) => j.editorId).filter((v): v is string => v !== null));
 
-  const candidates: EditorUser[] = db
+  const candidateRows: EditorUser[] = await db
     .select({
       id: users.id,
       name: users.name,
@@ -118,16 +123,15 @@ export function computeWorkloads(db: DbLike, ctx: AuthContext, opts: { now?: str
         restrict ? inArray(users.id, restrict) : undefined,
       ),
     )
-    .orderBy(asc(users.name))
-    .all()
-    .filter((u) => u.isActive || holders.has(u.id));
+    .orderBy(binaryAsc(users.name), asc(users.id));
+  const candidates = candidateRows.filter((u) => u.isActive || holders.has(u.id));
 
   const month = monthRangeAt(ctx, now);
   const week = weekRangeAt(ctx, now, settings.weekStartsOn);
   const editorFilter = restrict ? inArray(jobs.editorId, restrict) : isNotNull(jobs.editorId);
-  const completedMonth = groupBy(completedJobsInRange(db, ctx, month, { scope: "org", where: editorFilter }), (j) => j.editorId);
-  const completedWeek = groupBy(completedJobsInRange(db, ctx, week, { scope: "org", where: editorFilter }), (j) => j.editorId);
-  const approved = groupBy(approvedJobsInRange(db, ctx, lastDaysRange(ctx, now, 30), { scope: "org" }), (j) => j.approvingEditorId);
+  const completedMonth = groupBy(await completedJobsInRange(db, ctx, month, { scope: "org", where: editorFilter }), (j) => j.editorId);
+  const completedWeek = groupBy(await completedJobsInRange(db, ctx, week, { scope: "org", where: editorFilter }), (j) => j.editorId);
+  const approved = groupBy(await approvedJobsInRange(db, ctx, lastDaysRange(ctx, now, 30), { scope: "org" }), (j) => j.approvingEditorId);
 
   const byEditor = groupBy(activeWithEditor, (j) => j.editorId);
   const held = new Map<string, MetricJob[]>();
@@ -187,18 +191,18 @@ export function bottleneckEditorsOf(c: WorkloadComputation): BottleneckEditor[] 
  * editor's aggregate row; otherwise only the viewer's own row (editors) or
  * nothing (photographers). Aggregates only — never job rows.
  */
-export function getWorkloads(db: DbLike, ctx: AuthContext): WorkloadRow[] {
-  if (can(ctx, "workloads.view_team")) return computeWorkloads(db, ctx).rows;
+export async function getWorkloads(db: DbLike, ctx: AuthContext): Promise<WorkloadRow[]> {
+  if (can(ctx, "workloads.view_team")) return (await computeWorkloads(db, ctx)).rows;
   assertCan(ctx, "workloads.view_self");
   if (ctx.userId === null) return [];
-  return computeWorkloads(db, ctx, { editorIds: [ctx.userId] }).rows;
+  return (await computeWorkloads(db, ctx, { editorIds: [ctx.userId] })).rows;
 }
 
 /** The viewer's own workload row (null when they hold nothing and are not an editor). */
-export function getMyWorkload(db: DbLike, ctx: AuthContext): WorkloadRow | null {
+export async function getMyWorkload(db: DbLike, ctx: AuthContext): Promise<WorkloadRow | null> {
   assertCan(ctx, "workloads.view_self");
   if (ctx.userId === null) return null;
-  return computeWorkloads(db, ctx, { editorIds: [ctx.userId] }).rows[0] ?? null;
+  return (await computeWorkloads(db, ctx, { editorIds: [ctx.userId] })).rows[0] ?? null;
 }
 
 function emptyRow(u: User, settings: OrganisationSettings): WorkloadRow {
@@ -231,38 +235,39 @@ function emptyRow(u: User, settings: OrganisationSettings): WorkloadRow {
  * foreign / missing ids → 404. For photographers the job lists follow
  * photographer_id and the averages use the jobs they shot.
  */
-export function getWorkloadDetail(db: DbLike, ctx: AuthContext, userId: string): WorkloadDetail {
-  const target = loadUserInOrg(db, ctx, userId);
+export async function getWorkloadDetail(db: DbLike, ctx: AuthContext, userId: string): Promise<WorkloadDetail> {
+  const target = await loadUserInOrg(db, ctx, userId);
   if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
   else assertCan(ctx, "performance.view");
 
   const now = ctx.now();
   const tz = ctx.settings.timezone;
-  const computation = computeWorkloads(db, ctx, { now, editorIds: [target.id] });
+  const computation = await computeWorkloads(db, ctx, { now, editorIds: [target.id] });
   const row = computation.rows[0] ?? emptyRow(target, computation.settings);
   const asPhotographer = target.role === "photographer";
   const holder = asPhotographer ? jobs.photographerId : jobs.editorId;
 
-  const currentJobs = selectJobRows(db, ctx, { where: and(eq(holder, target.id), categoryIn(CATEGORY_GROUPS.ACTIVE)) });
+  const currentJobs = await selectJobRows(db, ctx, { where: and(eq(holder, target.id), categoryIn(CATEGORY_GROUPS.ACTIVE)) });
   const overdueJobs = currentJobs.filter((j) => j.isOverdue);
-  const recentCompleted = selectJobRows(db, ctx, {
+  const recentCompleted = await selectJobRows(db, ctx, {
     where: and(eq(holder, target.id), eq(jobs.statusCategory, "completed")),
-    orderBy: [desc(jobs.completedAt), asc(jobs.id)],
+    orderBy: [sql`${jobs.completedAt} desc nulls last`, asc(jobs.id)],
     limit: 10,
   });
 
   const last30 = lastDaysRange(ctx, now, 30);
-  const approved = approvedJobsInRange(db, ctx, last30, { scope: "org", where: asPhotographer ? eq(jobs.photographerId, target.id) : undefined }).filter(
+  const approved = (await approvedJobsInRange(db, ctx, last30, { scope: "org", where: asPhotographer ? eq(jobs.photographerId, target.id) : undefined })).filter(
     (j) => asPhotographer || j.approvingEditorId === target.id,
   );
-  const transitions = loadTransitionsByJob(
+  const transitions = await loadTransitionsByJob(
     db,
     ctx,
     approved.map((j) => j.id),
   );
   const tOf = (id: string) => transitions.get(id) ?? [];
 
-  const editorTransitions = asPhotographer ? [] : loadEditorTransitions(db, ctx, target.id, { enteredFrom: lastDaysRange(ctx, now, 90).from });
+  const editorTransitions = asPhotographer ? [] : await loadEditorTransitions(db, ctx, target.id, { enteredFrom: lastDaysRange(ctx, now, 90).from });
+  const history = asPhotographer ? [] : await workloadHistory(db, ctx, target.id, now, tz, computation.settings);
 
   return {
     ...row,
@@ -274,16 +279,24 @@ export function getWorkloadDetail(db: DbLike, ctx: AuthContext, userId: string):
     avgReviewSeconds: mean(approved.map((j) => reviewSeconds(tOf(j.id), now))),
     onTimePercent: toPercent(onTimeRate(approved).rate),
     secondsPerCategory: asPhotographer ? {} : avgSecondsPerCategory(editorTransitions, target.id),
-    history: asPhotographer ? [] : workloadHistory(db, ctx, target.id, now, tz, computation.settings),
+    history,
   };
 }
 
 /** Last 30 civil days of held-job count / score for one editor (§8 historical workload). */
-export function workloadHistory(db: DbLike, ctx: AuthContext, editorId: string, now: string, tz: string, settings: OrganisationSettings, days = 30) {
+export async function workloadHistory(
+  db: DbLike,
+  ctx: AuthContext,
+  editorId: string,
+  now: string,
+  tz: string,
+  settings: OrganisationSettings,
+  days = 30,
+): Promise<ReturnType<typeof historicalWorkloadSeries>> {
   const today = todayCivil(tz, new Date(now));
   const fromCivil = addCivilDays(today, -(days - 1));
   const range = lastDaysRange(ctx, now, days);
-  const assignments: AssignmentLike[] = db
+  const assignments: AssignmentLike[] = await db
     .select({
       jobId: jobAssignments.jobId,
       userId: jobAssignments.userId,
@@ -301,18 +314,18 @@ export function workloadHistory(db: DbLike, ctx: AuthContext, editorId: string, 
         or(isNull(jobAssignments.unassignedAt), gte(jobAssignments.unassignedAt, range.from)),
       ),
     )
-    .all();
+    .orderBy(asc(jobAssignments.assignedAt), asc(jobAssignments.rowid));
   const jobIds = [...new Set(assignments.map((a) => a.jobId))];
   if (jobIds.length === 0) return historicalWorkloadSeries([], [], { from: fromCivil, to: today, timeZone: tz, now }, { editorId });
-  const transitions = [...loadTransitionsByJob(db, ctx, jobIds).values()].flat().map((t) => ({
+  const transitions = [...(await loadTransitionsByJob(db, ctx, jobIds)).values()].flat().map((t) => ({
     jobId: t.jobId ?? "",
     toCategory: t.toCategory,
     enteredAt: t.enteredAt,
     exitedAt: t.exitedAt,
   }));
-  const jobTypeDefaults = loadJobTypeDefaultHours(db, ctx);
+  const jobTypeDefaults = await loadJobTypeDefaultHours(db, ctx);
   const jobHours: Record<string, number> = {};
-  for (const j of loadMetricJobs(db, ctx, { scope: "org", where: inArray(jobs.id, jobIds) })) {
+  for (const j of await loadMetricJobs(db, ctx, { scope: "org", where: inArray(jobs.id, jobIds) })) {
     jobHours[j.id] = j.estimatedHours ?? jobTypeDefaults[j.jobTypeId] ?? settings.defaultEstimatedHours;
   }
   return historicalWorkloadSeries(assignments, transitions, { from: fromCivil, to: today, timeZone: tz, now }, {
@@ -328,18 +341,19 @@ export function canViewTeamWorkloads(ctx: AuthContext): boolean {
 }
 
 /** Number of active (non-terminal) jobs a user currently holds in either role. */
-export function openJobCountFor(db: DbLike, ctx: AuthContext, userId: string): number {
-  const row = db
-    .select({ n: sql<number>`count(*)`.mapWith(Number) })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.organisationId, ctx.organisationId),
-        categoryIn(CATEGORY_GROUPS.ACTIVE),
-        or(eq(jobs.editorId, userId), eq(jobs.photographerId, userId)),
+export async function openJobCountFor(db: DbLike, ctx: AuthContext, userId: string): Promise<number> {
+  const row = await first(
+    db
+      .select({ n: sql<number>`count(*)`.mapWith(Number) })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.organisationId, ctx.organisationId),
+          categoryIn(CATEGORY_GROUPS.ACTIVE),
+          or(eq(jobs.editorId, userId), eq(jobs.photographerId, userId)),
+        ),
       ),
-    )
-    .get();
+  );
   return row?.n ?? 0;
 }
 
@@ -354,24 +368,24 @@ const COMPLETED_WORK_WEEKS = 8;
  * self (workloads.view_self) or management (performance.view). Rows follow
  * job visibility.
  */
-export function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): UserCompletedWork {
-  const target = loadUserInOrg(db, ctx, userId);
+export async function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: string, rawRange?: unknown): Promise<UserCompletedWork> {
+  const target = await loadUserInOrg(db, ctx, userId);
   if (target.id === ctx.userId) assertCan(ctx, "workloads.view_self");
   else assertCan(ctx, "performance.view");
-  const range = resolveRangeInput(ctx, rawRange, undefined, { db });
+  const range = await resolveRangeInput(ctx, rawRange, undefined, { db });
   const holder = target.role === "photographer" ? jobs.photographerId : jobs.editorId;
   const within = (col: typeof jobs.completedAt | typeof jobs.approvedAt, from: string, to: string) => and(gte(col, from), lt(col, to));
 
-  const raws = selectRawJobs(db, ctx, {
+  const raws = await selectRawJobs(db, ctx, {
     where: and(
       eq(holder, target.id),
       categoryIn(CATEGORY_GROUPS.DONE),
       or(within(jobs.completedAt, range.from, range.to), within(jobs.approvedAt, range.from, range.to)),
     ),
-    orderBy: [sql`coalesce(${jobs.completedAt}, ${jobs.approvedAt}) desc`, asc(jobs.id)],
+    orderBy: [sql`coalesce(${jobs.completedAt}, ${jobs.approvedAt}) desc nulls last`, asc(jobs.id)],
     limit: COMPLETED_WORK_LIMIT,
   });
-  const rows = mapJobRows(db, ctx, raws);
+  const rows = await mapJobRows(db, ctx, raws);
   const items: CompletedWorkItem[] = raws.map((r, i) => ({
     job: rows[i],
     approvedAt: r.job.approvedAt,
@@ -385,7 +399,7 @@ export function getUserCompletedWork(db: DbLike, ctx: AuthContext, userId: strin
   const firstWeek = addCivilDays(today, -(COMPLETED_WORK_WEEKS * 7 - 1));
   const from = startOfCivilDayIso(firstWeek, tz);
   const to = startOfCivilDayIso(addCivilDays(today, 1), tz);
-  const done = completedJobsInRange(db, ctx, { from, to }, { scope: "org", where: eq(holder, target.id) });
+  const done = await completedJobsInRange(db, ctx, { from, to }, { scope: "org", where: eq(holder, target.id) });
   const weekly = Array.from({ length: COMPLETED_WORK_WEEKS }, (_, i) => ({ week: addCivilDays(firstWeek, i * 7), completed: 0, onTime: 0, late: 0 }));
   for (const j of done) {
     const day = civilDate(j.completedAt, tz);

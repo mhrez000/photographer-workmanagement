@@ -73,7 +73,7 @@ function Cell({ cell }: { cell: PermissionMatrixRow["cells"][Role] }) {
 export default async function RolesSettingsPage() {
   const { ctx } = await pageContext();
   guard(ctx, "settings.view");
-  const rows = load(() => getPermissionMatrix(ctx));
+  const rows = await load(() => getPermissionMatrix(ctx));
   const grouped = AREAS.map((area) => ({ area, rows: rows.filter((r) => areaOf(r.action) === area.id) })).filter((g) => g.rows.length > 0);
 
   return (

@@ -6,6 +6,6 @@ export default async function Layout({ children, params }: LayoutProps<"/setting
   const { id } = await params;
   const { ctx, db } = await pageContext();
   guard(ctx, "workflow.view");
-  load(() => getWorkflowGraph(db, ctx, decodeURIComponent(id)));
+  await load(() => getWorkflowGraph(db, ctx, decodeURIComponent(id)));
   return children;
 }

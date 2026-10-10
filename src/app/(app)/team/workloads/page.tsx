@@ -17,14 +17,14 @@ export const metadata: Metadata = { title: "Workloads" };
 export default async function WorkloadsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "workloads.view_team");
-  const rows = load(() => getWorkloads(db, ctx));
-  const settings = loadOrgSettings(db, ctx);
+  const rows = await load(() => getWorkloads(db, ctx));
+  const settings = await loadOrgSettings(db, ctx);
 
   let capacityEdit: Record<string, { version: number; usesDefault: boolean }> | null = null;
   if (allowed(ctx, "user.set_capacity")) {
     capacityEdit = {};
     const ids = new Set(rows.map((r) => r.editor.id));
-    for (const u of load(() => listUsers(db, ctx, { role: "editor" }))) {
+    for (const u of await load(() => listUsers(db, ctx, { role: "editor" }))) {
       const p = u as UserProfile;
       if (!ids.has(p.id) || typeof p.version !== "number") continue;
       if (!allowed(ctx, "user.set_capacity", { id: p.id, role: p.role, isActive: p.isActive, organisationId: p.organisationId })) continue;

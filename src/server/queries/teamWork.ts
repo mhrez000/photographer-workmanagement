@@ -15,7 +15,7 @@
  *   the revision rate covers jobs approved in the last 30 days whose current
  *   editor is the person.
  */
-import { and, eq, gte, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { jobTypes, jobs, users } from "@/db/schema";
@@ -26,7 +26,18 @@ import type { AuthContext, JobRow, OrganisationSettings, TeamWorkGroup, Workload
 import { can, isManagement } from "@/server/auth/permissions";
 import { parseInput } from "@/server/services/_shared";
 import { jobFiltersWhere, JobListFiltersSchema } from "./jobs";
-import { categoryIn, jobRowQuery, loadOrgSettingsRow, mapJobRows, orgDayBounds, selectJobRows, visibleJobsWhere, type OrgDayBounds, type RawJobRow } from "./scope";
+import {
+  categoryIn,
+  defaultJobOrder,
+  jobRowQuery,
+  loadOrgSettingsRow,
+  mapJobRows,
+  orgDayBounds,
+  selectJobRows,
+  visibleJobsWhere,
+  type OrgDayBounds,
+  type RawJobRow,
+} from "./scope";
 
 export const TeamWorkQuerySchema = JobListFiltersSchema.extend({
   role: z.preprocess((v) => (Array.isArray(v) ? v[0] : v === "" ? undefined : v), z.enum(["editor", "photographer"]).default("editor")),
@@ -51,7 +62,7 @@ interface CompletedCounts {
   month: number;
 }
 
-function completedCounts(db: DbLike, ctx: AuthContext, editorIds: readonly string[], bounds: OrgDayBounds): Map<string, CompletedCounts> {
+async function completedCounts(db: DbLike, ctx: AuthContext, editorIds: readonly string[], bounds: OrgDayBounds): Promise<Map<string, CompletedCounts>> {
   const out = new Map<string, CompletedCounts>();
   if (editorIds.length === 0) return out;
   const tz = ctx.settings.timezone;
@@ -59,7 +70,7 @@ function completedCounts(db: DbLike, ctx: AuthContext, editorIds: readonly strin
   const month = { from: startOfCivilDayIso(mStart, tz), to: startOfCivilDayIso(mEnd, tz) };
   const from = month.from < bounds.weekStart ? month.from : bounds.weekStart;
   const to = month.to > bounds.weekEnd ? month.to : bounds.weekEnd;
-  const rows = db
+  const rows = await db
     .select({ editorId: jobs.editorId, completedAt: jobs.completedAt })
     .from(jobs)
     .where(
@@ -70,8 +81,7 @@ function completedCounts(db: DbLike, ctx: AuthContext, editorIds: readonly strin
         gte(jobs.completedAt, from),
         lt(jobs.completedAt, to),
       ),
-    )
-    .all();
+    );
   for (const r of rows) {
     if (!r.editorId || !r.completedAt) continue;
     const c = out.get(r.editorId) ?? { week: 0, month: 0 };
@@ -82,14 +92,19 @@ function completedCounts(db: DbLike, ctx: AuthContext, editorIds: readonly strin
   return out;
 }
 
-function approvedForRate(db: DbLike, ctx: AuthContext, editorIds: readonly string[], since: string): Map<string, { approvedAt: string | null; revisionCount: number }[]> {
+async function approvedForRate(
+  db: DbLike,
+  ctx: AuthContext,
+  editorIds: readonly string[],
+  since: string,
+): Promise<Map<string, { approvedAt: string | null; revisionCount: number }[]>> {
   const out = new Map<string, { approvedAt: string | null; revisionCount: number }[]>();
   if (editorIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ editorId: jobs.editorId, approvedAt: jobs.approvedAt, revisionCount: jobs.revisionCount })
     .from(jobs)
     .where(and(eq(jobs.organisationId, ctx.organisationId), inArray(jobs.editorId, [...editorIds]), isNotNull(jobs.approvedAt), gte(jobs.approvedAt, since)))
-    .all();
+    .orderBy(asc(jobs.approvedAt), asc(jobs.id));
   for (const r of rows) {
     if (!r.editorId) continue;
     out.set(r.editorId, [...(out.get(r.editorId) ?? []), { approvedAt: r.approvedAt, revisionCount: r.revisionCount }]);
@@ -141,10 +156,10 @@ export function buildWorkloadRow(
 }
 
 /** Team Work groups (see file header). */
-export function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): TeamWorkGroup[] {
+export async function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<TeamWorkGroup[]> {
   const q = parseInput(TeamWorkQuerySchema, input ?? {});
   const now = ctx.now();
-  const settingsRow = loadOrgSettingsRow(db, ctx);
+  const settingsRow = await loadOrgSettingsRow(db, ctx);
   const bounds = orgDayBounds(ctx, now, settingsRow?.weekStartsOn ?? 1);
   const personCol = q.role === "editor" ? jobs.editorId : jobs.photographerId;
 
@@ -155,7 +170,7 @@ export function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): 
     isNotNull(personCol),
     allowedPeople ? inArray(personCol, allowedPeople.length ? allowedPeople : ["__none__"]) : undefined,
   );
-  const rows = selectJobRows(db, ctx, {
+  const rows = await selectJobRows(db, ctx, {
     where,
     orderBy: [sql`${jobs.dueDate} asc nulls last`, sql`${jobs.createdAt} desc`, sql`${jobs.id} asc`],
     limit: MAX_JOBS,
@@ -170,11 +185,10 @@ export function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): 
   const personIds = [...byPerson.keys()];
   if (personIds.length === 0) return [];
 
-  const people = db
+  const people = await db
     .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive, capacityHoursPerWeek: users.capacityHoursPerWeek })
     .from(users)
-    .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, personIds)))
-    .all();
+    .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, personIds)));
   const peopleById = new Map(people.map((p) => [p.id, p]));
 
   // Workload aggregates (editors only, gated).
@@ -184,26 +198,25 @@ export function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): 
   if (workloadIds.length > 0) {
     const settings = workloadSettingsOf(settingsRow);
     const jobTypeDefaults: Record<string, number | null> = {};
-    for (const jt of db
+    for (const jt of await db
       .select({ id: jobTypes.id, hours: jobTypes.defaultEstimatedHours })
       .from(jobTypes)
-      .where(eq(jobTypes.organisationId, ctx.organisationId))
-      .all()) {
+      .where(eq(jobTypes.organisationId, ctx.organisationId))) {
       jobTypeDefaults[jt.id] = jt.hours;
     }
     // Workload = aggregate over ALL of the editor's active jobs (org-scoped, not
     // visibility-scoped: workloads.view_team grants aggregates, never the rows).
     const activeByEditor = new Map<string, JobRow[]>();
-    const aggregateRaws = jobRowQuery(db)
+    const aggregateRaws = (await jobRowQuery(db)
       .where(and(eq(jobs.organisationId, ctx.organisationId), inArray(jobs.editorId, workloadIds), categoryIn(CATEGORY_GROUPS.ACTIVE)))
-      .limit(MAX_JOBS)
-      .all() as RawJobRow[];
-    for (const r of mapJobRows(db, ctx, aggregateRaws, now)) {
+      .orderBy(...defaultJobOrder())
+      .limit(MAX_JOBS)) as RawJobRow[];
+    for (const r of await mapJobRows(db, ctx, aggregateRaws, now)) {
       if (r.editor) activeByEditor.set(r.editor.id, [...(activeByEditor.get(r.editor.id) ?? []), r]);
     }
-    const completed = completedCounts(db, ctx, workloadIds, bounds);
+    const completed = await completedCounts(db, ctx, workloadIds, bounds);
     const since = new Date(Date.parse(now) - 30 * 86_400_000).toISOString();
-    const approved = approvedForRate(db, ctx, workloadIds, since);
+    const approved = await approvedForRate(db, ctx, workloadIds, since);
     workloads = new Map(
       workloadIds
         .map((id) => {
@@ -241,13 +254,13 @@ export function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): 
 }
 
 /** Visible-job count per person (cheap badge helper for the Team Work tabs). */
-export function teamWorkCounts(db: DbLike, ctx: AuthContext, role: "editor" | "photographer" = "editor"): Map<string, number> {
+export async function teamWorkCounts(db: DbLike, ctx: AuthContext, role: "editor" | "photographer" = "editor"): Promise<Map<string, number>> {
   const col = role === "editor" ? jobs.editorId : jobs.photographerId;
-  const rows = db
+  const rows = await db
     .select({ id: col, n: sql<number>`count(*)` })
     .from(jobs)
     .where(and(visibleJobsWhere(ctx), categoryIn(CATEGORY_GROUPS.ACTIVE), isNotNull(col)))
-    .groupBy(col)
-    .all();
+    .groupBy(col);
+
   return new Map(rows.filter((r): r is { id: string; n: number } => r.id !== null).map((r) => [r.id, Number(r.n)]));
 }

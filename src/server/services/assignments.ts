@@ -15,10 +15,10 @@
  * Unassign (`userId = null`): editor-held (assigned / accepted / in_progress /
  * revision) → `ready` (else the initial status); elsewhere ledger swap only.
  *
- * Every function is synchronous (better-sqlite3 transactions).
+ * Every function is async (Postgres); callers await them inside one `withTx`.
  */
 import { and, eq, isNull } from "drizzle-orm";
-import type { Db, Tx } from "@/db/index";
+import { first, type Db, type Tx } from "@/db/index";
 import { jobAssignments } from "@/db/schema";
 import { CATEGORY_GROUPS, type StatusCategory, type UnassignReason } from "@/lib/constants";
 import { newId } from "@/lib/ids";
@@ -77,7 +77,7 @@ function unassignReasonFrom(reason: string | null | undefined, explicit: Unassig
  * check `job.assign_editor`, or are the deactivation flow). Validates the
  * target (in-org, active, editor) and applies the §4.5 status handling.
  */
-export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: string | null, opts: AssignEditorOptions = {}): AssignEditorResult {
+export async function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: string | null, opts: AssignEditorOptions = {}): Promise<AssignEditorResult> {
   let job = jobIn;
   const unchanged: AssignEditorResult = {
     job,
@@ -89,7 +89,7 @@ export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: 
   };
   if (job.statusCategory === "cancelled") throw new ValidationError("Restore the cancelled job before changing its editor");
   if (userId) {
-    const target = loadUserInOrg(tx, ctx, userId);
+    const target = await loadUserInOrg(tx, ctx, userId);
     if (!target.isActive) throw new ValidationError(`${target.name} is deactivated and cannot be assigned`);
     if (target.role !== "editor") throw new ValidationError(`${target.name} is not an editor`);
   }
@@ -97,7 +97,7 @@ export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: 
 
   const category = job.statusCategory;
   const previousEditorId = job.editorId;
-  const swap = swapEditor(tx, ctx, job, userId, {
+  const swap = await swapEditor(tx, ctx, job, userId, {
     reason: opts.reason,
     unassignReason: opts.unassignReason,
     batchId: opts.batchId,
@@ -106,11 +106,11 @@ export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: 
 
   let transition: TransitionResult | null = null;
   let reattribution: ReattributeResult | null = null;
-  const graph = loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
+  const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
 
   if (userId === null) {
     if (CATEGORY_GROUPS.EDITOR_HOLDS.includes(category)) {
-      transition = applyMove(tx, ctx, job, unassignedTargetOf(graph), graph, { mode: "internal", reason: opts.reason ?? "Editor unassigned", batchId: opts.batchId });
+      transition = await applyMove(tx, ctx, job, unassignedTargetOf(graph), graph, { mode: "internal", reason: opts.reason ?? "Editor unassigned", batchId: opts.batchId });
       job = transition.job;
     }
   } else if (category === "new" || category === "ready" || category === "accepted") {
@@ -118,14 +118,14 @@ export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: 
       .filter((s) => s.archivedAt === null && s.category === "assigned")
       .sort((a, b) => a.sortOrder - b.sortOrder)[0];
     if (assigned) {
-      transition = applyMove(tx, ctx, job, assigned, graph, { mode: "internal", reason: opts.reason ?? null, batchId: opts.batchId });
+      transition = await applyMove(tx, ctx, job, assigned, graph, { mode: "internal", reason: opts.reason ?? null, batchId: opts.batchId });
       job = transition.job;
     } else if (category === "accepted") {
-      reattribution = reattributeStage(tx, ctx, job, { previousEditorId, batchId: opts.batchId });
+      reattribution = await reattributeStage(tx, ctx, job, { previousEditorId, batchId: opts.batchId });
       job = reattribution.job;
     }
   } else if (REATTRIBUTE_CATEGORIES.includes(category)) {
-    reattribution = reattributeStage(tx, ctx, job, { previousEditorId, batchId: opts.batchId });
+    reattribution = await reattributeStage(tx, ctx, job, { previousEditorId, batchId: opts.batchId });
     job = reattribution.job;
   }
 
@@ -133,9 +133,9 @@ export function assignEditorToJob(tx: Tx, ctx: AuthContext, jobIn: Job, userId: 
 }
 
 /** `POST /api/jobs/:id/assign { role: "editor", userId | null }` — assign, reassign or (null) unassign the editor. */
-export function assignEditor(tx: Tx, ctx: AuthContext, input: unknown): AssignEditorResult {
+export async function assignEditor(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignEditorResult> {
   const p = parseInput(AssignEditorInput, input);
-  const { job, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.assign_editor", ref);
   if (p.expectedVersion !== undefined) assertVersion(job, p.expectedVersion);
   return assignEditorToJob(tx, ctx, job, p.userId, {
@@ -145,9 +145,9 @@ export function assignEditor(tx: Tx, ctx: AuthContext, input: unknown): AssignEd
 }
 
 /** Removes the editor (editor-held jobs go back to Ready). */
-export function unassignEditor(tx: Tx, ctx: AuthContext, input: unknown): AssignEditorResult {
+export async function unassignEditor(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignEditorResult> {
   const p = parseInput(UnassignEditorInput, input);
-  const { job, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.assign_editor", ref);
   if (p.expectedVersion !== undefined) assertVersion(job, p.expectedVersion);
   return assignEditorToJob(tx, ctx, job, null, {
@@ -164,15 +164,15 @@ export interface AssignPhotographerResult {
 }
 
 /** Assigns / replaces / removes the job's photographer (owner, manager or photographer role targets). */
-export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): AssignPhotographerResult {
+export async function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignPhotographerResult> {
   const p = parseInput(AssignPhotographerInput, input);
-  const { job: loaded, ref } = loadVisibleJob(tx, ctx, p.jobId);
+  const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
   assertCan(ctx, "job.assign_photographer", ref);
   if (p.expectedVersion !== undefined) assertVersion(loaded, p.expectedVersion);
   if (loaded.statusCategory === "cancelled") throw new ValidationError("Restore the cancelled job before changing its photographer");
   const previous = loaded.photographerId;
   if (p.userId) {
-    const target = loadUserInOrg(tx, ctx, p.userId);
+    const target = await loadUserInOrg(tx, ctx, p.userId);
     if (!target.isActive) throw new ValidationError(`${target.name} is deactivated and cannot be assigned`);
     if (target.role === "editor") throw new ValidationError(`${target.name} is an editor; choose a photographer, manager or owner`);
   }
@@ -180,19 +180,20 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
 
   const now = ctx.now();
   const meta = (extra: Record<string, unknown>) => jobEventMeta(loaded, extra);
-  const open = tx
-    .select()
-    .from(jobAssignments)
-    .where(and(eq(jobAssignments.jobId, loaded.id), eq(jobAssignments.role, "photographer"), isNull(jobAssignments.unassignedAt)))
-    .get();
+  const open = await first(
+    tx
+      .select()
+      .from(jobAssignments)
+      .where(and(eq(jobAssignments.jobId, loaded.id), eq(jobAssignments.role, "photographer"), isNull(jobAssignments.unassignedAt)))
+      .limit(1),
+  );
   const unassignReason: UnassignReason = p.unassignReason ?? (p.userId ? "reassigned" : "unassigned");
   let endedEventId: string | null = null;
   if (open) {
-    tx.update(jobAssignments)
+    await tx.update(jobAssignments)
       .set({ unassignedAt: now, unassignedByUserId: ctx.userId, unassignReason })
-      .where(and(eq(jobAssignments.id, open.id), isNull(jobAssignments.unassignedAt)))
-      .run();
-    endedEventId = recordEvent(tx, ctx, {
+      .where(and(eq(jobAssignments.id, open.id), isNull(jobAssignments.unassignedAt)));
+    endedEventId = await recordEvent(tx, ctx, {
       entityType: "assignment",
       entityId: open.id,
       jobId: loaded.id,
@@ -207,7 +208,7 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
   let createdEventId: string | null = null;
   if (p.userId) {
     assignmentId = newId();
-    tx.insert(jobAssignments)
+    await tx.insert(jobAssignments)
       .values({
         id: assignmentId,
         organisationId: ctx.organisationId,
@@ -218,9 +219,8 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
         assignedAt: now,
         reason: p.reason ?? null,
         statusCategoryAtAssign: loaded.statusCategory,
-      })
-      .run();
-    createdEventId = recordEvent(tx, ctx, {
+      });
+    createdEventId = await recordEvent(tx, ctx, {
       entityType: "assignment",
       entityId: assignmentId,
       jobId: loaded.id,
@@ -230,11 +230,11 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
       newValue: { userId: p.userId, role: "photographer" },
       metadata: meta({ assignmentId, reason: p.reason ?? null, statusCategory: loaded.statusCategory }),
     });
-    tx.update(jobAssignments).set({ activityEventId: createdEventId }).where(eq(jobAssignments.id, assignmentId)).run();
+    await tx.update(jobAssignments).set({ activityEventId: createdEventId }).where(eq(jobAssignments.id, assignmentId));
   }
-  const job = updateJobRow(tx, ctx, loaded, { photographerId: p.userId });
+  const job = await updateJobRow(tx, ctx, loaded, { photographerId: p.userId });
   if (p.userId && createdEventId) {
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [p.userId],
       type: "job_assigned",
       title: `You are the photographer on ${job.jobNumber}`,
@@ -243,10 +243,10 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
       activityEventId: createdEventId,
       linkPath: jobLinkPath(job.id),
     });
-    emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
+    await emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
   }
   if (previous && endedEventId) {
-    notify(tx, ctx, {
+    await notify(tx, ctx, {
       userIds: [previous],
       type: p.userId ? "job_reassigned" : "job_unassigned",
       title: p.userId ? `${job.jobNumber} has a new photographer` : `You were removed from ${job.jobNumber}`,
@@ -260,25 +260,25 @@ export function assignPhotographer(tx: Tx, ctx: AuthContext, input: unknown): As
 }
 
 /** `POST /api/jobs/:id/assign { role, userId | null, reason, expectedVersion }`. */
-export function assignRole(tx: Tx, ctx: AuthContext, input: unknown): AssignEditorResult | AssignPhotographerResult {
+export async function assignRole(tx: Tx, ctx: AuthContext, input: unknown): Promise<AssignEditorResult | AssignPhotographerResult> {
   const p = parseInput(AssignInput, input);
   const { role, ...rest } = p;
-  return role === "editor" ? assignEditor(tx, ctx, rest) : assignPhotographer(tx, ctx, rest);
+  return role === "editor" ? await assignEditor(tx, ctx, rest) : await assignPhotographer(tx, ctx, rest);
 }
 
 /**
  * `POST /api/jobs/bulk/reassign` — one transaction per job, one batchId,
  * no expectedVersion; HTTP 200 with `BulkResult` even when some fail.
  */
-export function bulkReassign(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): BulkResult {
+export async function bulkReassign(ctx: AuthContext, input: unknown, options: { db?: Db } = {}): Promise<BulkResult> {
   assertCan(ctx, "job.bulk_reassign");
   const p = parseInput(BulkReassignInput, input);
   return runPerJob(
     p.jobIds,
-    (tx, jobId, batchId) => {
-      const { job, ref } = loadVisibleJob(tx, ctx, jobId);
+    async (tx, jobId, batchId) => {
+      const { job, ref } = await loadVisibleJob(tx, ctx, jobId);
       assertCan(ctx, "job.assign_editor", ref);
-      const result = assignEditorToJob(tx, ctx, job, p.userId, { reason: p.reason, batchId });
+      const result = await assignEditorToJob(tx, ctx, job, p.userId, { reason: p.reason, batchId });
       if (!result.changed) {
         throw new ValidationError(p.userId ? "The job is already assigned to that editor" : "The job has no editor");
       }

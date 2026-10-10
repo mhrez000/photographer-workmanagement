@@ -12,7 +12,7 @@ export const metadata: Metadata = { title: "Notification settings" };
 export default async function NotificationSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "notification.prefs");
-  const prefs = load(() => getNotificationPrefs(db, ctx));
+  const prefs = await load(() => getNotificationPrefs(db, ctx));
 
   return (
     <PageContainer width="narrow">

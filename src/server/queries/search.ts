@@ -11,7 +11,7 @@
  * organisation; editors only those of jobs visible to them. People: active
  * users of the organisation (name; email too for owners / managers).
  */
-import { and, asc, desc, eq, exists, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, exists, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
 import { clients, jobComments, jobNotes, jobs, projects, users, workflowStatuses } from "@/db/schema";
 import { JOB_NUMBER_PAD } from "@/lib/constants";
@@ -31,7 +31,7 @@ export function emptySearchResults(query: string): SearchResults {
 
 /** SQL matching `term` as a whole job number (case-insensitive; bare digits match the padded suffix). */
 function exactNumberSql(term: string): SQL {
-  const parts: SQL[] = [sql`upper(${jobs.jobNumber}) = upper(${term})`];
+  const parts: SQL[] = [sql`upper(${jobs.jobNumber}) = upper(${term}::text)`];
   if (/^\d+$/.test(term)) {
     const padded = term.length >= JOB_NUMBER_PAD ? term : term.padStart(JOB_NUMBER_PAD, "0");
     parts.push(sql`${jobs.jobNumber} like ${`%-${padded}`}`);
@@ -50,7 +50,12 @@ function toHit(raw: RawJobRow, matchedIn: MatchedIn): JobHit {
   };
 }
 
-export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: { limit?: number } = {}): SearchResults {
+/** Case-insensitive name order (the SQLite `collate nocase` twin) with a byte-order tie-break. */
+function nocaseOrder(column: SQLWrapper): SQL[] {
+  return [sql`lower(${column})`, sql`${column} collate "C"`];
+}
+
+export async function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: { limit?: number } = {}): Promise<SearchResults> {
   assertCan(ctx, "search.global");
   const term = (query ?? "").trim().slice(0, 200);
   if (term.length === 0) return emptySearchResults(term);
@@ -59,7 +64,7 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
 
   /* ---------------- jobs ---------------- */
   const exact = exactNumberSql(term);
-  const exactRaw = selectRawJobs(db, ctx, { where: exact, orderBy: [sql`length(${jobs.jobNumber})`, asc(jobs.jobNumber)], limit: 1 })[0];
+  const exactRaw = (await selectRawJobs(db, ctx, { where: exact, orderBy: [sql`length(${jobs.jobNumber})`, sql`${jobs.jobNumber} collate "C"`], limit: 1 }))[0];
 
   const hits = new Map<string, JobHit>();
   const add = (raws: readonly RawJobRow[], matchedIn: (r: RawJobRow) => MatchedIn) => {
@@ -70,7 +75,7 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
   };
   if (exactRaw) add([exactRaw], () => "number");
 
-  const direct = selectRawJobs(db, ctx, {
+  const direct = await selectRawJobs(db, ctx, {
     where: or(exact, likeSql(jobs.jobNumber, term), likeSql(jobs.name, term), likeSql(sql`coalesce(${jobs.description}, '')`, term)),
     orderBy: [
       sql`(case when ${exact} then 0 when ${likeSql(jobs.jobNumber, term)} then 1 when ${likeSql(jobs.name, term)} then 2 else 3 end)`,
@@ -90,7 +95,7 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
 
   if (hits.size < limit) {
     // Current status name (case-insensitive LIKE; the row query already joins workflow_statuses).
-    add(selectRawJobs(db, ctx, { where: likeSql(sql`${workflowStatuses.name}`, term), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "status");
+    add(await selectRawJobs(db, ctx, { where: likeSql(sql`${workflowStatuses.name}`, term), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "status");
   }
   if (hits.size < limit) {
     const noteKinds = isManagement(ctx) ? undefined : ne(jobNotes.kind, "internal");
@@ -98,14 +103,14 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
       .select({ one: sql`1` })
       .from(jobNotes)
       .where(and(eq(jobNotes.jobId, jobs.id), eq(jobNotes.organisationId, org), isNull(jobNotes.archivedAt), noteKinds, likeSql(jobNotes.body, term)));
-    add(selectRawJobs(db, ctx, { where: exists(noteMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "note");
+    add(await selectRawJobs(db, ctx, { where: exists(noteMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "note");
   }
   if (hits.size < limit) {
     const commentMatch = db
       .select({ one: sql`1` })
       .from(jobComments)
       .where(and(eq(jobComments.jobId, jobs.id), eq(jobComments.organisationId, org), isNull(jobComments.deletedAt), likeSql(jobComments.body, term)));
-    add(selectRawJobs(db, ctx, { where: exists(commentMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "comment");
+    add(await selectRawJobs(db, ctx, { where: exists(commentMatch), orderBy: [desc(jobs.lastActivityAt), asc(jobs.id)], limit }), () => "comment");
   }
 
   /* ---------------- clients / projects ---------------- */
@@ -119,13 +124,12 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
         .where(and(sql`${jobs.clientId} = ${col}`, visibleJobsWhere(ctx))),
     );
 
-  const clientRows = db
+  const clientRows = await db
     .select({ id: clients.id, name: clients.name })
     .from(clients)
     .where(and(eq(clients.organisationId, org), likeSql(clients.name, term), orgWide ? undefined : visibleJobFor(sql`${clients.id}`)))
-    .orderBy(sql`(${clients.archivedAt} is not null)`, sql`${clients.name} collate nocase`)
-    .limit(limit)
-    .all();
+    .orderBy(sql`(${clients.archivedAt} is not null)`, ...nocaseOrder(clients.name), asc(clients.id))
+    .limit(limit);
 
   const projectVisible = (): SQL =>
     exists(
@@ -134,7 +138,7 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
         .from(jobs)
         .where(and(sql`${jobs.projectId} = ${projects.id}`, visibleJobsWhere(ctx))),
     );
-  const projectRows = db
+  const projectRows = await db
     .select({ id: projects.id, name: projects.name, clientId: projects.clientId, clientName: clients.name })
     .from(projects)
     .innerJoin(clients, eq(clients.id, projects.clientId))
@@ -145,20 +149,19 @@ export function globalSearch(db: DbLike, ctx: AuthContext, query: string, opts: 
         can(ctx, "project.view", { organisationId: org, hasVisibleJob: false }) ? undefined : projectVisible(),
       ),
     )
-    .orderBy(sql`(${projects.archivedAt} is not null)`, sql`${projects.name} collate nocase`)
-    .limit(limit)
-    .all();
+    .orderBy(sql`(${projects.archivedAt} is not null)`, ...nocaseOrder(projects.name), asc(projects.id))
+    .limit(limit);
 
   /* ---------------- people ---------------- */
   const userMatch = isManagement(ctx) ? or(likeSql(users.name, term), likeSql(users.email, term)) : likeSql(users.name, term);
   const userRows = can(ctx, "team.view_members")
-    ? db
+    ? await db
         .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
         .from(users)
         .where(and(eq(users.organisationId, org), eq(users.isActive, true), isNull(users.anonymisedAt), userMatch))
-        .orderBy(sql`${users.name} collate nocase`)
+        .orderBy(...nocaseOrder(users.name), asc(users.id))
         .limit(limit)
-        .all()
+
     : [];
 
   return {

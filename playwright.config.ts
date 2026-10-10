@@ -8,11 +8,13 @@ import { defineConfig, devices } from "@playwright/test";
  *   run against that already-running server. No web server is started and no
  *   database is touched — the specs create every job/user they need via the API.
  * - `E2E_BASE_URL` unset (`npm run e2e`): Playwright owns a dev server on :3100
- *   backed by `data/e2e.db`. The web server command first resets that database
- *   (`npm run e2e:prepare` = DATABASE_PATH=./data/e2e.db tsx src/db/reset.ts).
- *   Playwright starts `webServer` BEFORE `globalSetup`, and SQLite cannot be
- *   deleted while the server holds it open, so the reset is chained in front of
- *   the server command instead of living in globalSetup. When a server is already
+ *   backed by the PGlite data dir `data/pglite-e2e`. The web server command first
+ *   resets that database (`npm run e2e:prepare` = PGLITE_DATA_DIR=./data/pglite-e2e
+ *   tsx src/db/reset.ts, i.e. the `db:reset` pipeline pointed at that dir).
+ *   Playwright starts `webServer` BEFORE `globalSetup`, and PGlite allows one
+ *   process per data dir (the server holds it open), so the reset is chained in
+ *   front of the server command instead of living in globalSetup. `DATABASE_URL`
+ *   is forced empty so e2e can never reach a remote database. When a server is already
  *   listening on :3100 (`reuseExistingServer`), stop it and run
  *   `npm run e2e:prepare && npm run e2e`.
  */
@@ -52,6 +54,6 @@ export default defineConfig({
         url: `http://localhost:${OWN_PORT}/login`,
         reuseExistingServer: true,
         timeout: 240_000,
-        env: { DATABASE_PATH: "./data/e2e.db" },
+        env: { PGLITE_DATA_DIR: "./data/pglite-e2e", DATABASE_URL: "" },
       },
 });

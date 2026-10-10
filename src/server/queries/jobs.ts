@@ -21,9 +21,9 @@
  * still renders; the REST endpoint (`listJobsApi`) is strict: an unknown
  * query key is a 400.
  */
-import { and, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { z } from "zod";
-import type { DbLike } from "@/db/index";
+import { first, type DbLike } from "@/db/index";
 import { clients, jobLinks, jobTypes, jobs, projects, savedViews, workflowStatuses } from "@/db/schema";
 import {
   CATEGORY_GROUPS,
@@ -193,22 +193,23 @@ export function decodeOffsetCursor(cursor: string | undefined | null): number {
 /*  Saved view merge                                                   */
 /* ------------------------------------------------------------------ */
 
-function loadViewConfig(db: DbLike, ctx: AuthContext, viewId: string): SavedViewConfig {
-  const view = db
-    .select()
-    .from(savedViews)
-    .where(and(eq(savedViews.id, viewId), eq(savedViews.organisationId, ctx.organisationId), isNull(savedViews.archivedAt)))
-    .get();
+async function loadViewConfig(db: DbLike, ctx: AuthContext, viewId: string): Promise<SavedViewConfig> {
+  const view = await first(
+    db
+      .select()
+      .from(savedViews)
+      .where(and(eq(savedViews.id, viewId), eq(savedViews.organisationId, ctx.organisationId), isNull(savedViews.archivedAt))),
+  );
   if (!view || (view.ownerUserId !== ctx.userId && !view.isShared)) throw new NotFoundError("Saved view");
   return view.config;
 }
 
-function mergeView(db: DbLike, ctx: AuthContext, raw: unknown): unknown {
+async function mergeView(db: DbLike, ctx: AuthContext, raw: unknown): Promise<unknown> {
   if (!raw || typeof raw !== "object") return raw;
   const explicit = raw as Record<string, unknown>;
   const viewId = Array.isArray(explicit.viewId) ? explicit.viewId[0] : explicit.viewId;
   if (typeof viewId !== "string" || viewId === "") return raw;
-  const config = loadViewConfig(db, ctx, viewId);
+  const config = await loadViewConfig(db, ctx, viewId);
   const base: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(config.filters ?? {})) if (v !== null && v !== undefined) base[k] = v;
   if (config.sort?.length) base.sort = config.sort;
@@ -264,8 +265,8 @@ const CIVIL_RE = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * Instant bound for the drill-down params. `from`: civil date → start of that
  * day; `to` (exclusive): civil date → start of the NEXT day (the day is
- * included). ISO instants are normalised to the stored `…Z` form so string
- * comparison in SQLite is chronological.
+ * included). ISO instants are normalised to the stored `…Z` form so the text
+ * comparison in SQL is chronological.
  */
 function instantOf(value: string, side: "from" | "to", tz: string): string {
   if (CIVIL_RE.test(value)) return startOfCivilDayIso(side === "from" ? value : addCivilDays(value, 1), tz);
@@ -344,19 +345,28 @@ export function jobFiltersWhere(ctx: AuthContext, f: JobListFilters, bounds: Org
 
 const hasCurrentLinkSql = sql`(exists (select 1 from ${jobLinks} where ${jobLinks.jobId} = ${jobs.id} and ${jobLinks.supersededAt} is null and ${jobLinks.removedAt} is null))`;
 
+/**
+ * Case-insensitive name order (the SQLite `collate nocase` twin): `lower(x)`,
+ * then the byte order of `x` (C collation) so ties are deterministic on every
+ * Postgres collation.
+ */
+function nocase(column: SQLWrapper): SQL[] {
+  return [sql`lower(${column})`, sql`${column} collate "C"`];
+}
+
 /** Sort expressions per table column (each sorted in the requested direction, nulls last). */
 function sortExpressions(column: JobTableColumn): SQL[] {
   switch (column) {
     case "job":
-      return [sql`length(${jobs.jobNumber})`, sql`${jobs.jobNumber}`];
+      return [sql`length(${jobs.jobNumber})`, sql`${jobs.jobNumber} collate "C"`];
     case "client":
-      return [sql`${clients.name} collate nocase`];
+      return nocase(clients.name);
     case "project":
-      return [sql`${projects.name} collate nocase`];
+      return nocase(projects.name);
     case "photographer":
-      return [sql`${photographerUser.name} collate nocase`];
+      return nocase(photographerUser.name);
     case "editor":
-      return [sql`${editorUser.name} collate nocase`];
+      return nocase(editorUser.name);
     case "status":
       return [categoryOrderSql(), sql`${workflowStatuses.sortOrder}`];
     case "priority":
@@ -377,7 +387,7 @@ function sortExpressions(column: JobTableColumn): SQL[] {
     case "link":
       return [hasCurrentLinkSql];
     case "jobType":
-      return [sql`${jobTypes.name} collate nocase`];
+      return nocase(jobTypes.name);
     case "reviewDueDate":
       return [sql`${jobs.reviewDueDate}`];
     case "deliveryDueDate":
@@ -420,32 +430,41 @@ const DUE_BUCKETS: readonly { key: string; label: string }[] = [
 function groupSql(groupBy: JobGroupBy, b: OrgDayBounds): GroupSql {
   switch (groupBy) {
     case "status":
-      return { key: sql`${jobs.statusId}`, label: sql`${workflowStatuses.name}`, order: [categoryOrderSql(), sql`${workflowStatuses.sortOrder}`, sql`${jobs.statusId}`] };
+      return {
+        key: sql`${jobs.statusId}`,
+        label: sql`${workflowStatuses.name}`,
+        order: [categoryOrderSql(), sql`${workflowStatuses.sortOrder}`, sql`${jobs.statusId} collate "C"`],
+      };
     case "editor":
       return {
         key: sql`coalesce(${jobs.editorId}, 'none')`,
         label: sql`coalesce(${editorUser.name}, 'Unassigned')`,
-        order: [sql`(${jobs.editorId} is null)`, sql`${editorUser.name} collate nocase`, sql`${jobs.editorId}`],
+        order: [nullsLastSql(jobs.editorId), ...nocase(editorUser.name), sql`${jobs.editorId} collate "C"`],
       };
     case "photographer":
       return {
         key: sql`coalesce(${jobs.photographerId}, 'none')`,
         label: sql`coalesce(${photographerUser.name}, 'No photographer')`,
-        order: [sql`(${jobs.photographerId} is null)`, sql`${photographerUser.name} collate nocase`, sql`${jobs.photographerId}`],
+        order: [nullsLastSql(jobs.photographerId), ...nocase(photographerUser.name), sql`${jobs.photographerId} collate "C"`],
       };
     case "client":
-      return { key: sql`${jobs.clientId}`, label: sql`${clients.name}`, order: [sql`${clients.name} collate nocase`, sql`${jobs.clientId}`] };
+      return { key: sql`${jobs.clientId}`, label: sql`${clients.name}`, order: [...nocase(clients.name), sql`${jobs.clientId} collate "C"`] };
     case "priority":
       // Urgent first.
-      return { key: sql`${jobs.priority}`, label: sql`${jobs.priority}`, order: [sql`(${PRIORITIES.length - 1} - ${priorityOrderSql()})`] };
+      return { key: sql`${jobs.priority}`, label: sql`${jobs.priority}`, order: [sql`(${sql.raw(String(PRIORITIES.length - 1))} - ${priorityOrderSql()})`] };
     case "jobType":
-      return { key: sql`${jobs.jobTypeId}`, label: sql`${jobTypes.name}`, order: [sql`${jobTypes.name} collate nocase`, sql`${jobs.jobTypeId}`] };
+      return { key: sql`${jobs.jobTypeId}`, label: sql`${jobTypes.name}`, order: [...nocase(jobTypes.name), sql`${jobs.jobTypeId} collate "C"`] };
     case "dueDate": {
       const bucket = dueBucketSql(b);
       const whens = DUE_BUCKETS.map((d, i) => sql`when ${d.key} then ${i}`);
       return { key: bucket, label: bucket, order: [sql`(case ${bucket} ${sql.join(whens, sql` `)} else 99 end)`] };
     }
   }
+}
+
+/** 0 for a value, 1 for NULL (an integer, so it also works inside `min()` — Postgres has no min(boolean)). */
+function nullsLastSql(column: SQLWrapper): SQL {
+  return sql`(case when ${column} is null then 1 else 0 end)`;
 }
 
 function groupLabel(groupBy: JobGroupBy, key: string, rawLabel: string): string {
@@ -488,8 +507,8 @@ function applyAliases(raw: unknown): unknown {
   return out;
 }
 
-export function parseJobListFilters(db: DbLike, ctx: AuthContext, input: unknown): JobListFilters {
-  return parseInput(JobListFiltersSchema, mergeView(db, ctx, applyAliases(input ?? {})));
+export async function parseJobListFilters(db: DbLike, ctx: AuthContext, input: unknown): Promise<JobListFilters> {
+  return parseInput(JobListFiltersSchema, await mergeView(db, ctx, applyAliases(input ?? {})));
 }
 
 /** UI-only keys the work table may forward to GET /api/jobs (accepted and ignored). */
@@ -519,12 +538,12 @@ function checkApiQuery(input: unknown): Record<string, unknown> {
 }
 
 /** The filters GET /api/jobs applies for `input` (strict; aliases folded; saved view merged). */
-export function parseJobListApiQuery(db: DbLike, ctx: AuthContext, input: unknown): JobListFilters {
+export async function parseJobListApiQuery(db: DbLike, ctx: AuthContext, input: unknown): Promise<JobListFilters> {
   return parseJobListFilters(db, ctx, checkApiQuery(input));
 }
 
 /** `GET /api/jobs` — `listJobs` behind the strict query schema. */
-export function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}): JobListResult {
+export async function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<JobListResult> {
   return listJobs(db, ctx, checkApiQuery(input));
 }
 
@@ -533,10 +552,10 @@ export function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}): 
  * params). Throws ValidationError for bad input, NotFoundError for a
  * foreign / private saved view.
  */
-export function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}): JobListResult {
-  const f = parseJobListFilters(db, ctx, input);
+export async function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<JobListResult> {
+  const f = await parseJobListFilters(db, ctx, input);
   const now = ctx.now();
-  const bounds = orgDayBounds(ctx, now, loadOrgSettingsRow(db, ctx)?.weekStartsOn ?? 1);
+  const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
   const where = jobFiltersWhere(ctx, f, bounds);
   const limit = f.limit ?? JOB_LIST_DEFAULT_LIMIT;
   const offset = decodeOffsetCursor(f.cursor);
@@ -550,20 +569,24 @@ export function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}): Job
     sql`${jobs.id} asc`,
   ];
 
-  const raws = selectRawJobs(db, ctx, { where, orderBy, limit: limit + 1, offset });
+  const raws = await selectRawJobs(db, ctx, { where, orderBy, limit: limit + 1, offset });
   const hasMore = raws.length > limit;
   const page = hasMore ? raws.slice(0, limit) : raws;
-  const rows = mapJobRows(db, ctx, page, now);
+  const rows = await mapJobRows(db, ctx, page, now);
 
-  const totalRow = jobCountQuery(db).where(and(visibleJobsWhere(ctx), where)).get();
+  const totalRow = await first(jobCountQuery(db).where(and(visibleJobsWhere(ctx), where)));
   const total = Number(totalRow?.n ?? 0);
 
   let groups: JobGroup[] | null = null;
   let rowGroupKeys: string[] | null = null;
   if (group && f.groupBy) {
     const groupBy = f.groupBy;
-    const counted = db
-      .select({ key: sql<string>`${group.key}`, label: sql<string>`${group.label}`, n: sql<number>`count(*)` })
+    // GROUP BY 1 (the key's output position): the key SQL carries bind
+    // parameters (e.g. the due-date bucket bounds), and Postgres would not
+    // match `$1…` in the SELECT list with `$7…` in a repeated GROUP BY
+    // expression. The label is functionally constant per group → min().
+    const counted = await db
+      .select({ key: sql<string>`${group.key}`, label: sql<string>`min(${group.label})`, n: sql<number>`count(*)` })
       .from(jobs)
       .innerJoin(clients, eq(clients.id, jobs.clientId))
       .innerJoin(projects, eq(projects.id, jobs.projectId))
@@ -572,9 +595,8 @@ export function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}): Job
       .leftJoin(photographerUser, eq(photographerUser.id, jobs.photographerId))
       .leftJoin(editorUser, eq(editorUser.id, jobs.editorId))
       .where(and(visibleJobsWhere(ctx), where))
-      .groupBy(group.key)
-      .orderBy(...group.order.map((o) => sql`min(${o})`))
-      .all();
+      .groupBy(sql`1`)
+      .orderBy(...group.order.map((o) => sql`min(${o})`));
     groups = counted.map((g) => ({ key: String(g.key), label: groupLabel(groupBy, String(g.key), String(g.label)), count: Number(g.n) }));
     rowGroupKeys = page.map((r) => rowGroupKey(groupBy, r.job, bounds));
   }
@@ -617,14 +639,15 @@ function rowGroupKey(groupBy: JobGroupBy, job: { statusId: string; editorId: str
 }
 
 /** Visible job by its human number (`/api/jobs/by-number/:n`); 404 when missing or not visible. */
-export function getJobRowByNumber(db: DbLike, ctx: AuthContext, jobNumber: string): JobRow {
-  const raws = selectRawJobs(db, ctx, { where: sql`upper(${jobs.jobNumber}) = upper(${jobNumber.trim()})`, limit: 1 });
+export async function getJobRowByNumber(db: DbLike, ctx: AuthContext, jobNumber: string): Promise<JobRow> {
+  const raws = await selectRawJobs(db, ctx, { where: sql`upper(${jobs.jobNumber}) = upper(${jobNumber.trim()}::text)`, limit: 1 });
   if (raws.length === 0) throw new NotFoundError("Job");
-  return mapJobRows(db, ctx, raws)[0];
+  return (await mapJobRows(db, ctx, raws))[0];
 }
 
 /** Visible jobs by id (any order), mapped to JobRow; ids not visible are silently skipped. */
-export function getJobRowsByIds(db: DbLike, ctx: AuthContext, ids: readonly string[]): JobRow[] {
+export async function getJobRowsByIds(db: DbLike, ctx: AuthContext, ids: readonly string[]): Promise<JobRow[]> {
   if (ids.length === 0) return [];
-  return mapJobRows(db, ctx, selectRawJobs(db, ctx, { where: inArray(jobs.id, [...new Set(ids)]) }));
+  return mapJobRows(db, ctx, await selectRawJobs(db, ctx, { where: inArray(jobs.id, [...new Set(ids)]) }));
+
 }

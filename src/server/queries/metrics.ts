@@ -12,9 +12,9 @@
  *   - `revisionWeekWindows()`   → revision spike inputs
  *   - `jobCountsBy()`           → open / overdue / due today / completed per client/project/person
  */
-import { and, asc, eq, gte, inArray, isNotNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, lt, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { z } from "zod";
-import type { DbLike } from "@/db/index";
+import { first, type DbLike } from "@/db/index";
 import { activityEvents, jobRevisions, jobStatusTransitions, jobTypes, jobs, organisationSettings, users } from "@/db/schema";
 import { BOTTLENECK_DEFAULTS, CATEGORY_GROUPS, DEFAULT_TIMEZONE, RANGE_PRESETS, STATUS_CATEGORIES, WORKLOAD_THRESHOLDS, type Priority, type StatusCategory } from "@/lib/constants";
 import { addCivilDays, civilMonthRange, resolveRange, startOfCivilDayIso, todayCivil } from "@/lib/dates";
@@ -56,13 +56,23 @@ function chunks<T>(items: readonly T[], size = CHUNK): T[][] {
 
 const isoMinusDays = (iso: string, days: number): string => new Date(Date.parse(iso) - days * DAY_MS).toISOString();
 
+/**
+ * `ORDER BY <text column> ASC` in byte order on every Postgres — what SQLite's
+ * BINARY collation gave and what PGlite ("C") gives, but NOT Supabase's
+ * default linguistic collation (which ignores punctuation / case first).
+ * Used for name-ordered lists so dev, tests and production agree.
+ */
+export function binaryAsc(column: SQLWrapper): SQL {
+  return sql`${column} collate "C" asc`;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Organisation settings                                              */
 /* ------------------------------------------------------------------ */
 
 /** organisation_settings row, or the column defaults when the row is missing. */
-export function loadOrgSettings(db: DbLike, ctx: AuthContext): OrganisationSettings {
-  const row = db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, ctx.organisationId)).get();
+export async function loadOrgSettings(db: DbLike, ctx: AuthContext): Promise<OrganisationSettings> {
+  const row = await first(db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, ctx.organisationId)));
   if (row) return row;
   return {
     organisationId: ctx.organisationId,
@@ -122,12 +132,11 @@ export function bottleneckSettingsOf(s: OrganisationSettings): BottleneckSetting
 }
 
 /** job_types.default_estimated_hours by job type id (workload estHours fallback). */
-export function loadJobTypeDefaultHours(db: DbLike, ctx: AuthContext): Record<string, number | null> {
-  const rows = db
+export async function loadJobTypeDefaultHours(db: DbLike, ctx: AuthContext): Promise<Record<string, number | null>> {
+  const rows = await db
     .select({ id: jobTypes.id, hours: jobTypes.defaultEstimatedHours })
     .from(jobTypes)
-    .where(eq(jobTypes.organisationId, ctx.organisationId))
-    .all();
+    .where(eq(jobTypes.organisationId, ctx.organisationId));
   const out: Record<string, number | null> = {};
   for (const r of rows) out[r.id] = r.hours;
   return out;
@@ -158,16 +167,16 @@ export const RangeInputSchema = z
  * `opts.weekStartsOn`, or pass `opts.db` and it is loaded (only when the
  * preset needs it). Without either the week starts on Monday.
  */
-export function resolveRangeInput(
+export async function resolveRangeInput(
   ctx: AuthContext,
   raw: unknown,
   fallback: ResolvedRange["preset"] = "last_30_days",
   opts: { db?: DbLike; weekStartsOn?: number } = {},
-): ResolvedRange {
+): Promise<ResolvedRange> {
   if (isResolvedRange(raw)) return raw;
   const input = parseInput(RangeInputSchema, raw ?? {});
   const preset = input.range ?? input.preset ?? (input.from || input.to ? "custom" : fallback);
-  const weekStartsOn = opts.weekStartsOn ?? (preset === "this_week" && opts.db ? loadOrgSettings(opts.db, ctx).weekStartsOn : 1);
+  const weekStartsOn = opts.weekStartsOn ?? (preset === "this_week" && opts.db ? (await loadOrgSettings(opts.db, ctx)).weekStartsOn : 1);
   const r = resolveRange(preset, ctx.settings.timezone, { from: input.from ?? null, to: input.to ?? null }, new Date(ctx.now()), { weekStartsOn });
   return { preset, from: r.from, to: r.to, label: r.label };
 }
@@ -286,17 +295,16 @@ export function scopeWhere(ctx: AuthContext, scope: MetricScope): SQL {
   return scope === "org" ? eq(jobs.organisationId, ctx.organisationId) : visibleJobsWhere(ctx);
 }
 
-export function loadMetricJobs(db: DbLike, ctx: AuthContext, opts: MetricQueryOptions): MetricJob[] {
+export async function loadMetricJobs(db: DbLike, ctx: AuthContext, opts: MetricQueryOptions): Promise<MetricJob[]> {
   return db
     .select(METRIC_JOB_FIELDS)
     .from(jobs)
     .where(and(scopeWhere(ctx, opts.scope), opts.where))
-    .orderBy(asc(jobs.createdAt), asc(jobs.id))
-    .all();
+    .orderBy(asc(jobs.createdAt), asc(jobs.id));
 }
 
 /** Jobs in ACTIVE categories. */
-export function loadActiveMetricJobs(db: DbLike, ctx: AuthContext, opts: MetricQueryOptions): MetricJob[] {
+export async function loadActiveMetricJobs(db: DbLike, ctx: AuthContext, opts: MetricQueryOptions): Promise<MetricJob[]> {
   return loadMetricJobs(db, ctx, { scope: opts.scope, where: and(categoryIn(CATEGORY_GROUPS.ACTIVE), opts.where) });
 }
 
@@ -304,11 +312,11 @@ export function loadActiveMetricJobs(db: DbLike, ctx: AuthContext, opts: MetricQ
  * Dashboard KPI cards (§8) over the scope: ACTIVE jobs + jobs whose latest
  * completion falls in the current week (organisation_settings.week_starts_on).
  */
-export function kpisFor(db: DbLike, ctx: AuthContext, opts: { scope: MetricScope; now?: string; weekStartsOn?: number }): KpiSummary {
+export async function kpisFor(db: DbLike, ctx: AuthContext, opts: { scope: MetricScope; now?: string; weekStartsOn?: number }): Promise<KpiSummary> {
   const now = opts.now ?? ctx.now();
-  const weekStartsOn = opts.weekStartsOn ?? loadOrgSettings(db, ctx).weekStartsOn;
+  const weekStartsOn = opts.weekStartsOn ?? (await loadOrgSettings(db, ctx)).weekStartsOn;
   const week = weekRangeAt(ctx, now, weekStartsOn);
-  const rows = loadMetricJobs(db, ctx, {
+  const rows = await loadMetricJobs(db, ctx, {
     scope: opts.scope,
     where: or(categoryIn(CATEGORY_GROUPS.ACTIVE), and(eq(jobs.statusCategory, "completed"), gte(jobs.completedAt, week.from), lt(jobs.completedAt, week.to))),
   });
@@ -316,7 +324,7 @@ export function kpisFor(db: DbLike, ctx: AuthContext, opts: { scope: MetricScope
 }
 
 /** Jobs created in [from, to). */
-export function createdJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): MetricJob[] {
+export async function createdJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): Promise<MetricJob[]> {
   return loadMetricJobs(db, ctx, { scope: opts.scope, where: and(gte(jobs.createdAt, range.from), lt(jobs.createdAt, range.to), opts.where) });
 }
 
@@ -327,8 +335,8 @@ export function createdJobsInRange(db: DbLike, ctx: AuthContext, range: Range, o
  * only. SQL prefilters on the indexed (org, completed_at) pair; the shared
  * pure `completedInRange()` makes the final decision.
  */
-export function completedJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): MetricJob[] {
-  const rows = loadMetricJobs(db, ctx, {
+export async function completedJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): Promise<MetricJob[]> {
+  const rows = await loadMetricJobs(db, ctx, {
     scope: opts.scope,
     where: and(eq(jobs.statusCategory, "completed"), gte(jobs.completedAt, range.from), lt(jobs.completedAt, range.to), opts.where),
   });
@@ -358,13 +366,12 @@ const approvingEditorSql = sql<string | null>`coalesce(
 )`;
 
 /** Jobs whose (current) `approved_at` ∈ [from, to), with the approving editor. */
-export function approvedJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): ApprovedMetricJob[] {
+export async function approvedJobsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): Promise<ApprovedMetricJob[]> {
   return db
     .select({ ...METRIC_JOB_FIELDS, approvingEditorId: approvingEditorSql })
     .from(jobs)
     .where(and(scopeWhere(ctx, opts.scope), isNotNull(jobs.approvedAt), gte(jobs.approvedAt, range.from), lt(jobs.approvedAt, range.to), opts.where))
-    .orderBy(asc(jobs.approvedAt), asc(jobs.id))
-    .all();
+    .orderBy(asc(jobs.approvedAt), asc(jobs.id));
 }
 
 /* ------------------------------------------------------------------ */
@@ -384,16 +391,15 @@ const TRANSITION_FIELDS = {
 };
 
 /** Every transition row of the given jobs, by job, in sequence order. */
-export function loadTransitionsByJob(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Map<string, TransitionLike[]> {
+export async function loadTransitionsByJob(db: DbLike, ctx: AuthContext, jobIds: readonly string[]): Promise<Map<string, TransitionLike[]>> {
   const out = new Map<string, TransitionLike[]>();
   const ids = [...new Set(jobIds)];
   for (const part of chunks(ids)) {
-    const rows = db
+    const rows = await db
       .select(TRANSITION_FIELDS)
       .from(jobStatusTransitions)
       .where(and(eq(jobStatusTransitions.organisationId, ctx.organisationId), inArray(jobStatusTransitions.jobId, part)))
-      .orderBy(asc(jobStatusTransitions.jobId), asc(jobStatusTransitions.sequence))
-      .all();
+      .orderBy(asc(jobStatusTransitions.jobId), asc(jobStatusTransitions.sequence));
     for (const r of rows) {
       const list = out.get(r.jobId) ?? [];
       list.push(r);
@@ -404,7 +410,12 @@ export function loadTransitionsByJob(db: DbLike, ctx: AuthContext, jobIds: reado
 }
 
 /** Transition rows held by `editorId` (editor_id_at_entry), optionally entered on/after `enteredFrom`. */
-export function loadEditorTransitions(db: DbLike, ctx: AuthContext, editorId: string, opts: { enteredFrom?: string; enteredTo?: string } = {}): TransitionLike[] {
+export async function loadEditorTransitions(
+  db: DbLike,
+  ctx: AuthContext,
+  editorId: string,
+  opts: { enteredFrom?: string; enteredTo?: string } = {},
+): Promise<TransitionLike[]> {
   return db
     .select(TRANSITION_FIELDS)
     .from(jobStatusTransitions)
@@ -416,12 +427,11 @@ export function loadEditorTransitions(db: DbLike, ctx: AuthContext, editorId: st
         opts.enteredTo ? lt(jobStatusTransitions.enteredAt, opts.enteredTo) : undefined,
       ),
     )
-    .orderBy(asc(jobStatusTransitions.enteredAt))
-    .all();
+    .orderBy(asc(jobStatusTransitions.enteredAt), asc(jobStatusTransitions.jobId), asc(jobStatusTransitions.sequence));
 }
 
 /** Closed transitions entered in [from, to) across the org (stage averages). */
-export function loadClosedTransitionsInRange(db: DbLike, ctx: AuthContext, range: Range): TransitionLike[] {
+export async function loadClosedTransitionsInRange(db: DbLike, ctx: AuthContext, range: Range): Promise<TransitionLike[]> {
   return db
     .select(TRANSITION_FIELDS)
     .from(jobStatusTransitions)
@@ -433,7 +443,7 @@ export function loadClosedTransitionsInRange(db: DbLike, ctx: AuthContext, range
         lt(jobStatusTransitions.enteredAt, range.to),
       ),
     )
-    .all();
+    .orderBy(asc(jobStatusTransitions.enteredAt), asc(jobStatusTransitions.jobId), asc(jobStatusTransitions.sequence));
 }
 
 /** Mean closed-stage seconds per category (optionally only rows held by `editorId`), in STATUS_CATEGORIES order. */
@@ -465,7 +475,7 @@ export interface RevisionRequestRow {
 }
 
 /** Revisions requested in [from, to) on jobs in scope. */
-export function revisionsRequestedInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): RevisionRequestRow[] {
+export async function revisionsRequestedInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): Promise<RevisionRequestRow[]> {
   return db
     .select({ id: jobRevisions.id, jobId: jobRevisions.jobId, requestedAt: jobRevisions.requestedAt, assigneeUserId: jobRevisions.assigneeUserId })
     .from(jobRevisions)
@@ -479,7 +489,7 @@ export function revisionsRequestedInRange(db: DbLike, ctx: AuthContext, range: R
         opts.where,
       ),
     )
-    .all();
+    .orderBy(asc(jobRevisions.requestedAt), asc(jobRevisions.id));
 }
 
 /**
@@ -488,12 +498,12 @@ export function revisionsRequestedInRange(db: DbLike, ctx: AuthContext, range: R
  * windows (index 0 = the week before this one), plus the affected jobs of
  * this week. One aggregate query with CASE buckets.
  */
-export function revisionWeekWindows(
+export async function revisionWeekWindows(
   db: DbLike,
   ctx: AuthContext,
   now: string,
   previousWeeks = 4,
-): { thisWeek: number; previousWeeks: number[]; jobs: JobRef[] } {
+): Promise<{ thisWeek: number; previousWeeks: number[]; jobs: JobRef[] }> {
   const bounds = Array.from({ length: previousWeeks + 2 }, (_, i) => isoMinusDays(now, 7 * i));
   // bounds[0] = now, bounds[1] = now − 7d, …
   const buckets = Array.from({ length: previousWeeks + 1 }, (_, i) =>
@@ -503,31 +513,36 @@ export function revisionWeekWindows(
   buckets.forEach((b, i) => {
     fields[`w${i}`] = b;
   });
-  const row = db
-    .select(fields)
-    .from(jobRevisions)
-    .where(
-      and(
-        eq(jobRevisions.organisationId, ctx.organisationId),
-        gte(jobRevisions.requestedAt, bounds[previousWeeks + 1]),
-        lt(jobRevisions.requestedAt, now),
+  const row = await first(
+    db
+      .select(fields)
+      .from(jobRevisions)
+      .where(
+        and(
+          eq(jobRevisions.organisationId, ctx.organisationId),
+          gte(jobRevisions.requestedAt, bounds[previousWeeks + 1]),
+          lt(jobRevisions.requestedAt, now),
+        ),
       ),
-    )
-    .get();
+  );
   const counts = buckets.map((_, i) => Number(row?.[`w${i}`] ?? 0) || 0);
-  const affected = db
+  const affected = await db
     .selectDistinct({ id: jobs.id, jobNumber: jobs.jobNumber, name: jobs.name })
     .from(jobRevisions)
     .innerJoin(jobs, eq(jobs.id, jobRevisions.jobId))
     .where(and(eq(jobRevisions.organisationId, ctx.organisationId), gte(jobRevisions.requestedAt, bounds[1]), lt(jobRevisions.requestedAt, now)))
-    .orderBy(asc(jobs.jobNumber))
-    .all();
+    .orderBy(asc(jobs.jobNumber));
   return { thisWeek: counts[0], previousWeeks: counts.slice(1), jobs: affected };
 }
 
 /** `job.became_overdue` events in [from, to) on jobs in scope (trend "became overdue"). */
-export function overdueEventsInRange(db: DbLike, ctx: AuthContext, range: Range, opts: MetricQueryOptions): { jobId: string; createdAt: string }[] {
-  const rows = db
+export async function overdueEventsInRange(
+  db: DbLike,
+  ctx: AuthContext,
+  range: Range,
+  opts: MetricQueryOptions,
+): Promise<{ jobId: string; createdAt: string }[]> {
+  const rows = await db
     .select({ jobId: activityEvents.jobId, createdAt: activityEvents.createdAt })
     .from(activityEvents)
     .innerJoin(jobs, eq(jobs.id, activityEvents.jobId))
@@ -541,7 +556,7 @@ export function overdueEventsInRange(db: DbLike, ctx: AuthContext, range: Range,
         opts.where,
       ),
     )
-    .all();
+    .orderBy(asc(activityEvents.createdAt), asc(activityEvents.rowid));
   return rows.flatMap((r) => (r.jobId ? [{ jobId: r.jobId, createdAt: r.createdAt }] : []));
 }
 
@@ -567,19 +582,19 @@ export const EMPTY_COUNTS: Readonly<JobCounts> = Object.freeze({ total: 0, open:
  * completed (open stage completed) / completed this month (latest completion
  * in the current civil month).
  */
-export function jobCountsBy(
+export async function jobCountsBy(
   db: DbLike,
   ctx: AuthContext,
   key: JobCountKey,
   opts: MetricQueryOptions & { now?: string },
-): Map<string, JobCounts> {
+): Promise<Map<string, JobCounts>> {
   const now = opts.now ?? ctx.now();
   const bounds = orgDayBounds(ctx, now);
   const month = monthRangeAt(ctx, now);
   const col = COUNT_COLUMNS[key];
   const active = categoryIn(CATEGORY_GROUPS.ACTIVE);
   const bound = categoryIn(CATEGORY_GROUPS.DEADLINE_BOUND);
-  const rows = db
+  const rows = await db
     .select({
       key: col,
       total: sql<number>`count(*)`.mapWith(Number),
@@ -593,8 +608,7 @@ export function jobCountsBy(
     })
     .from(jobs)
     .where(and(scopeWhere(ctx, opts.scope), isNotNull(col), opts.where))
-    .groupBy(col)
-    .all();
+    .groupBy(col);
   const out = new Map<string, JobCounts>();
   for (const r of rows) {
     if (r.key === null) continue;
@@ -617,15 +631,14 @@ export function jobCountsBy(
 /* ------------------------------------------------------------------ */
 
 /** UserRefs for ids in the actor's organisation (foreign/missing ids are skipped). */
-export function loadUserRefs(db: DbLike, ctx: AuthContext, ids: readonly (string | null | undefined)[]): Map<string, UserRef> {
+export async function loadUserRefs(db: DbLike, ctx: AuthContext, ids: readonly (string | null | undefined)[]): Promise<Map<string, UserRef>> {
   const unique = [...new Set(ids.filter((v): v is string => typeof v === "string"))];
   const out = new Map<string, UserRef>();
   for (const part of chunks(unique)) {
-    const rows = db
+    const rows = await db
       .select({ id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive })
       .from(users)
-      .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, part)))
-      .all();
+      .where(and(eq(users.organisationId, ctx.organisationId), inArray(users.id, part)));
     for (const r of rows) out.set(r.id, r);
   }
   return out;

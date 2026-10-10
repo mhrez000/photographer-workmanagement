@@ -38,7 +38,7 @@ export async function generateMetadata({ params }: PageProps<"/jobs/[id]">): Pro
   const { id } = await params;
   try {
     const { ctx, db } = await pageContext();
-    const row = JOB_NUMBER.test(id) ? getJobRowByNumber(db, ctx, id) : getJobRowsByIds(db, ctx, [id])[0];
+    const row = JOB_NUMBER.test(id) ? await getJobRowByNumber(db, ctx, id) : (await getJobRowsByIds(db, ctx, [id]))[0];
     return { title: row ? `${row.jobNumber} · ${row.name}` : "Job" };
   } catch {
     return { title: "Job" };
@@ -75,7 +75,7 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
   if (JOB_NUMBER.test(id)) {
     let targetId: string | null = null;
     try {
-      targetId = getJobRowByNumber(db, ctx, id).id;
+      targetId = (await getJobRowByNumber(db, ctx, id)).id;
     } catch (err) {
       if (!(err instanceof NotFoundError)) throw err;
     }
@@ -90,7 +90,7 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
     }
   }
 
-  const detail = load(() => getJobDetail(db, ctx, id));
+  const detail = await load(() => getJobDetail(db, ctx, id));
   const { job, actions } = detail;
   const ref = permissionRef(detail, ctx.organisationId, ctx.role);
   const isManagement = ctx.role === "owner" || ctx.role === "manager";
@@ -182,7 +182,7 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
     case "timeline": {
       let timeline = null;
       try {
-        timeline = getJobTimeline(db, ctx, job.id);
+        timeline = await getJobTimeline(db, ctx, job.id);
       } catch {
         timeline = null; // bottleneck flags are an enhancement; the stages come from the detail.
       }
@@ -192,12 +192,12 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
     case "activity": {
       const groups = (param(sp, "events") ?? "").split(",").filter(isActivityGroup) as ActivityGroup[];
       const eventType = groups.flatMap((g) => [...ACTIVITY_GROUPS[g].types]);
-      const initial = load(() => getJobActivity(db, ctx, job.id, { limit: 50, ...(eventType.length > 0 ? { eventType } : {}) }));
+      const initial = await load(() => getJobActivity(db, ctx, job.id, { limit: 50, ...(eventType.length > 0 ? { eventType } : {}) }));
       panel = <ActivityTab key={groups.join(",")} jobId={job.id} initial={initial} groups={groups} timeZone={tz} />;
       break;
     }
     case "history": {
-      const entries = load(() => getJobHistory(db, ctx, job.id));
+      const entries = await load(() => getJobHistory(db, ctx, job.id));
       panel = <HistoryTab entries={entries} timeZone={tz} current={job.status} />;
       break;
     }

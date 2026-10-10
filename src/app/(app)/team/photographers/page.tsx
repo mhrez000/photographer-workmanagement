@@ -13,7 +13,7 @@ export const metadata: Metadata = { title: "Photographers" };
 export default async function PhotographersPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "team.view_members");
-  const { people, showStats } = load(() => loadDirectory(db, ctx, "photographer"));
+  const { people, showStats } = await load(() => loadDirectory(db, ctx, "photographer"));
 
   return (
     <PageContainer>

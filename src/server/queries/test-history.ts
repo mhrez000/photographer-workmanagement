@@ -6,7 +6,7 @@
  * written except where a test needs one. Never imported by app code.
  */
 import { and, eq, isNull } from "drizzle-orm";
-import type { Db } from "@/db/index";
+import { first, one, type Db } from "@/db/index";
 import { activityEvents, jobAssignments, jobRevisions, jobStatusTransitions, jobs, workflowStatuses } from "@/db/schema";
 import type { SeedIds } from "@/db/test-db";
 import { durationSeconds } from "@/lib/metrics";
@@ -20,40 +20,42 @@ export interface MoveOptions {
 }
 
 /** Moves `jobId` to the default-workflow status `toKey` at instant `at`, with §4.4 milestone columns. */
-export function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string, at: string, opts: MoveOptions = {}): void {
-  db.transaction((tx) => {
-    const job = tx.select().from(jobs).where(eq(jobs.id, jobId)).get();
+export async function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string, at: string, opts: MoveOptions = {}): Promise<void> {
+  await db.transaction(async (tx) => {
+    const job = await first(tx.select().from(jobs).where(eq(jobs.id, jobId)));
     if (!job) throw new Error(`moveJob: job ${jobId} missing`);
-    const status = tx.select().from(workflowStatuses).where(eq(workflowStatuses.id, ids.statuses[toKey])).get();
+    const status = await first(tx.select().from(workflowStatuses).where(eq(workflowStatuses.id, ids.statuses[toKey])));
     if (!status) throw new Error(`moveJob: status ${toKey} missing`);
-    const open = tx
-      .select()
-      .from(jobStatusTransitions)
-      .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt)))
-      .get();
+    const open = await first(
+      tx
+        .select()
+        .from(jobStatusTransitions)
+        .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt))),
+    );
     if (!open) throw new Error("moveJob: no open transition");
-    tx.update(jobStatusTransitions)
-      .set({ exitedAt: at, durationSeconds: durationSeconds(open.enteredAt, at, at) })
-      .where(eq(jobStatusTransitions.id, open.id))
-      .run();
-    tx.insert(jobStatusTransitions)
-      .values({
-        organisationId: job.organisationId,
-        jobId,
-        sequence: open.sequence + 1,
-        kind: "transition",
-        fromStatusId: open.toStatusId,
-        toStatusId: status.id,
-        fromCategory: open.toCategory,
-        toCategory: status.category,
-        statusName: status.name,
-        actorUserId: opts.actorUserId === undefined ? ids.users.manager : opts.actorUserId,
-        isReopen: opts.isReopen ?? false,
-        enteredAt: at,
-        editorIdAtEntry: job.editorId,
-        photographerIdAtEntry: job.photographerId,
+    await tx
+      .update(jobStatusTransitions)
+      .set({
+        exitedAt: at,
+        durationSeconds: durationSeconds(open.enteredAt, at, at),
       })
-      .run();
+      .where(eq(jobStatusTransitions.id, open.id));
+    await tx.insert(jobStatusTransitions).values({
+      organisationId: job.organisationId,
+      jobId,
+      sequence: open.sequence + 1,
+      kind: "transition",
+      fromStatusId: open.toStatusId,
+      toStatusId: status.id,
+      fromCategory: open.toCategory,
+      toCategory: status.category,
+      statusName: status.name,
+      actorUserId: opts.actorUserId === undefined ? ids.users.manager : opts.actorUserId,
+      isReopen: opts.isReopen ?? false,
+      enteredAt: at,
+      editorIdAtEntry: job.editorId,
+      photographerIdAtEntry: job.photographerId,
+    });
     const c = status.category;
     const milestones: Partial<NewJob> = {};
     if (c === "in_progress" && !job.startedAt) milestones.startedAt = at;
@@ -80,7 +82,8 @@ export function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string, at: 
       milestones.deliveredAt = null;
       milestones.reopenedCount = job.reopenedCount + 1;
     }
-    tx.update(jobs)
+    await tx
+      .update(jobs)
       .set({
         statusId: status.id,
         statusCategory: c,
@@ -94,97 +97,106 @@ export function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string, at: 
         ...milestones,
         ...opts.patch,
       })
-      .where(eq(jobs.id, jobId))
-      .run();
+      .where(eq(jobs.id, jobId));
   });
 }
 
 /** Reassigns the editor mid-stage: closes/open assignments and writes a `reattribution` transition row. */
-export function reattribute(db: Db, ids: SeedIds, jobId: string, newEditorId: string, at: string): void {
-  db.transaction((tx) => {
-    const job = tx.select().from(jobs).where(eq(jobs.id, jobId)).get();
+export async function reattribute(db: Db, ids: SeedIds, jobId: string, newEditorId: string, at: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const job = await first(tx.select().from(jobs).where(eq(jobs.id, jobId)));
     if (!job) throw new Error("reattribute: job missing");
-    tx.update(jobAssignments)
-      .set({ unassignedAt: at, unassignedByUserId: ids.users.manager, unassignReason: "reassigned" })
-      .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.role, "editor"), isNull(jobAssignments.unassignedAt)))
-      .run();
-    tx.insert(jobAssignments)
-      .values({
-        organisationId: job.organisationId,
-        jobId,
-        role: "editor",
-        userId: newEditorId,
-        assignedByUserId: ids.users.manager,
-        assignedAt: at,
-        statusCategoryAtAssign: job.statusCategory,
+    await tx
+      .update(jobAssignments)
+      .set({
+        unassignedAt: at,
+        unassignedByUserId: ids.users.manager,
+        unassignReason: "reassigned",
       })
-      .run();
-    const open = tx
-      .select()
-      .from(jobStatusTransitions)
-      .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt)))
-      .get();
+      .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.role, "editor"), isNull(jobAssignments.unassignedAt)));
+    await tx.insert(jobAssignments).values({
+      organisationId: job.organisationId,
+      jobId,
+      role: "editor",
+      userId: newEditorId,
+      assignedByUserId: ids.users.manager,
+      assignedAt: at,
+      statusCategoryAtAssign: job.statusCategory,
+    });
+    const open = await first(
+      tx
+        .select()
+        .from(jobStatusTransitions)
+        .where(and(eq(jobStatusTransitions.jobId, jobId), isNull(jobStatusTransitions.exitedAt))),
+    );
     if (!open) throw new Error("reattribute: no open transition");
-    tx.update(jobStatusTransitions)
-      .set({ exitedAt: at, durationSeconds: durationSeconds(open.enteredAt, at, at) })
-      .where(eq(jobStatusTransitions.id, open.id))
-      .run();
-    tx.insert(jobStatusTransitions)
-      .values({
-        organisationId: job.organisationId,
-        jobId,
-        sequence: open.sequence + 1,
-        kind: "reattribution",
-        fromStatusId: open.toStatusId,
-        toStatusId: open.toStatusId,
-        fromCategory: open.toCategory,
-        toCategory: open.toCategory,
-        statusName: open.statusName,
-        actorUserId: ids.users.manager,
-        reason: "reassigned",
-        enteredAt: at,
-        editorIdAtEntry: newEditorId,
-        photographerIdAtEntry: job.photographerId,
+    await tx
+      .update(jobStatusTransitions)
+      .set({
+        exitedAt: at,
+        durationSeconds: durationSeconds(open.enteredAt, at, at),
       })
-      .run();
-    tx.update(jobs)
-      .set({ editorId: newEditorId, previousEditorId: job.editorId, updatedAt: at, version: job.version + 1 })
-      .where(eq(jobs.id, jobId))
-      .run();
+      .where(eq(jobStatusTransitions.id, open.id));
+    await tx.insert(jobStatusTransitions).values({
+      organisationId: job.organisationId,
+      jobId,
+      sequence: open.sequence + 1,
+      kind: "reattribution",
+      fromStatusId: open.toStatusId,
+      toStatusId: open.toStatusId,
+      fromCategory: open.toCategory,
+      toCategory: open.toCategory,
+      statusName: open.statusName,
+      actorUserId: ids.users.manager,
+      reason: "reassigned",
+      enteredAt: at,
+      editorIdAtEntry: newEditorId,
+      photographerIdAtEntry: job.photographerId,
+    });
+    await tx
+      .update(jobs)
+      .set({
+        editorId: newEditorId,
+        previousEditorId: job.editorId,
+        updatedAt: at,
+        version: job.version + 1,
+      })
+      .where(eq(jobs.id, jobId));
   });
 }
 
 /** A resolved revision row (#n) requested at `at`; bumps jobs.revision_count to n. */
-export function addRevision(db: Db, ids: SeedIds, jobId: string, n: number, at: string): string {
-  return db.transaction((tx) => {
-    const row = tx
-      .insert(jobRevisions)
-      .values({
-        organisationId: ids.organisationId,
-        jobId,
-        revisionNumber: n,
-        requestedByUserId: ids.users.manager,
-        assigneeUserId: ids.users.editor1,
-        reason: "Colour",
-        description: "Fix colour",
-        requestedAt: at,
-        resolvedAt: at,
-        resolvedByUserId: ids.users.editor1,
-        resolution: "resubmitted",
-      })
-      .returning({ id: jobRevisions.id })
-      .get();
-    tx.update(jobs).set({ revisionCount: n }).where(eq(jobs.id, jobId)).run();
+export async function addRevision(db: Db, ids: SeedIds, jobId: string, n: number, at: string): Promise<string> {
+  return db.transaction(async (tx) => {
+    const row = await one(
+      tx
+        .insert(jobRevisions)
+        .values({
+          organisationId: ids.organisationId,
+          jobId,
+          revisionNumber: n,
+          requestedByUserId: ids.users.manager,
+          assigneeUserId: ids.users.editor1,
+          reason: "Colour",
+          description: "Fix colour",
+          requestedAt: at,
+          resolvedAt: at,
+          resolvedByUserId: ids.users.editor1,
+          resolution: "resubmitted",
+        })
+        .returning({ id: jobRevisions.id }),
+    );
+    await tx.update(jobs).set({ revisionCount: n }).where(eq(jobs.id, jobId));
     return row.id;
   });
 }
 
 /** Sets jobs.last_activity_at directly (stalled-rule tests). */
-export function setLastActivity(db: Db, jobId: string, at: string): void {
-  db.update(jobs).set({ lastActivityAt: at }).where(eq(jobs.id, jobId)).run();
+export async function setLastActivity(db: Db, jobId: string, at: string): Promise<void> {
+  await db.update(jobs).set({ lastActivityAt: at }).where(eq(jobs.id, jobId));
 }
 
 /** Count of activity events for a job (sanity checks). */
-export function eventCount(db: Db, jobId: string): number {
-  return db.select().from(activityEvents).where(eq(activityEvents.jobId, jobId)).all().length;
+export async function eventCount(db: Db, jobId: string): Promise<number> {
+  return (await db.select({ id: activityEvents.id }).from(activityEvents).where(eq(activityEvents.jobId, jobId))).length;
 }

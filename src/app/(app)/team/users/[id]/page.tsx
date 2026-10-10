@@ -52,15 +52,15 @@ export default async function TeamUserPage({ params, searchParams }: PageProps<"
   guard(ctx, "user.view");
   const tz = ctx.settings.timezone;
 
-  const detail = load(() => getUserDetail(db, ctx, id));
+  const detail = await load(() => getUserDetail(db, ctx, id));
   const { ref, profile, teams, workload: w } = detail;
   const isSelf = ref.id === ctx.userId;
   const isPhotographer = ref.role === "photographer";
   const holderKey = isPhotographer ? "photographerId" : "editorId";
   const rangeParam = param(sp, "range");
   const rangeKey = RANGE_OPTIONS.some((o) => o.value === rangeParam) ? (rangeParam as string) : DEFAULT_RANGE;
-  const work = w ? load(() => getUserCompletedWork(db, ctx, ref.id, { range: rangeKey })) : null;
-  const maxActive = w ? loadOrgSettings(db, ctx).maxActiveJobsPerEditor : 0;
+  const work = w ? await load(() => getUserCompletedWork(db, ctx, ref.id, { range: rangeKey })) : null;
+  const maxActive = w ? (await loadOrgSettings(db, ctx)).maxActiveJobsPerEditor : 0;
   // Editors: the list is the jobs behind "Active" (held = WORKLOAD categories, same as WorkloadRow.active);
   // approved / delivered jobs are no longer on their plate. Photographers: every open job they shot.
   const heldCategories: readonly string[] = CATEGORY_GROUPS.WORKLOAD;

@@ -220,13 +220,24 @@ export class Api {
   constructor(readonly ctx: APIRequestContext) {}
 
   async raw<T = unknown>(method: Method, url: string, body?: unknown): Promise<RawResult<T>> {
-    const res: APIResponse = await this.ctx.fetch(url, {
-      method,
-      data: body === undefined ? undefined : body,
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-      failOnStatusCode: false,
-      maxRedirects: 0,
-    });
+    const send = () =>
+      this.ctx.fetch(url, {
+        method,
+        data: body === undefined ? undefined : body,
+        headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+        failOnStatusCode: false,
+        maxRedirects: 0,
+      });
+    let res: APIResponse;
+    try {
+      res = await send();
+    } catch (err) {
+      // A pooled keep-alive socket that sat idle past the server's keep-alive
+      // timeout can be reset just as it is reused (the request never reaches the
+      // app). Retry once — GET only, so a retry can never repeat a mutation.
+      if (method !== "GET" || !/ECONNRESET|socket hang up/.test(String(err))) throw err;
+      res = await send();
+    }
     let json: { data?: T; error?: RawResult["error"] } = {};
     const text = await res.text();
     try {

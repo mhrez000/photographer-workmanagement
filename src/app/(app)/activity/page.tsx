@@ -32,7 +32,7 @@ export default async function ActivityPage({ searchParams }: PageProps<"/activit
   let jobMissing = false;
   if (filters.jobNumber && !filters.jobId) {
     try {
-      const row = getJobRowByNumber(db, ctx, filters.jobNumber);
+      const row = await getJobRowByNumber(db, ctx, filters.jobNumber);
       job = { id: row.id, jobNumber: row.jobNumber, name: row.name };
       filters.query.jobId = row.id;
     } catch (err) {
@@ -42,8 +42,8 @@ export default async function ActivityPage({ searchParams }: PageProps<"/activit
   }
 
   const query = compactQuery(filters.query);
-  const page = jobMissing ? { items: [], nextCursor: null } : load(() => listActivity(db, ctx, query));
-  const users = load(() => listUsers(db, ctx));
+  const page = jobMissing ? { items: [], nextCursor: null } : await load(() => listActivity(db, ctx, query));
+  const users = await load(() => listUsers(db, ctx));
   const people: Record<string, string> = Object.fromEntries(users.map((u) => [u.id, u.name]));
   const canExport = allowed(ctx, "export.csv");
 

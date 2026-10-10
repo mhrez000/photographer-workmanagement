@@ -6,6 +6,6 @@ export default async function Layout({ children, params }: LayoutProps<"/clients
   const { id } = await params;
   const { ctx, db } = await pageContext();
   guard(ctx, "client.view");
-  load(() => getClientDetail(db, ctx, decodeURIComponent(id)));
+  await load(() => getClientDetail(db, ctx, decodeURIComponent(id)));
   return children;
 }
