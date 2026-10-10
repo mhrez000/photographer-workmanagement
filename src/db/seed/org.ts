@@ -4,20 +4,23 @@
  * Only the organisation row, its settings row and the first owner are
  * inserted directly: no service creates an organisation (there is no
  * sign-up flow in v1), and every later service needs an owner to act as.
- * The owner's `user.created` event is still written through recordEvent().
+ * The owner is an admin photographer and the organisation's primary owner
+ * (roles v2, docs/ROLES.md §0). Their `user.created` event is still written
+ * through recordEvent().
  * Everything else (settings, users, workflows, job types, teams, clients,
  * projects, automations, saved views, dashboards) goes through the services.
  */
+import { eq } from "drizzle-orm";
 import { one } from "@/db/index";
 import { organisationSettings, organisations, users } from "@/db/schema";
-import { DEFAULT_JOB_TYPES, DEFAULT_WORKFLOW_NAME, type Role } from "@/lib/constants";
+import { DEFAULT_JOB_TYPES, DEFAULT_WORKFLOW_NAME, EDITOR_FLAGS, MEMBER_FLAGS, type PermissionFlag, type TransitionRole } from "@/lib/constants";
 import type { WorkflowStatus } from "@/lib/types";
 import { recordEvent } from "@/server/audit";
 import { systemContext } from "@/server/auth/session";
 import { nowIso } from "@/server/clock";
 import { createWorkflow, addStatus, addTransition, archiveStatus, reorderStatuses, updateStatus, type WorkflowGraph } from "@/server/services/workflows";
 import { createJobType } from "@/server/services/jobTypes";
-import { inviteUser, type PreparedSecret } from "@/server/services/users";
+import { inviteUser, setPermissions, type PreparedSecret } from "@/server/services/users";
 import { createTeam } from "@/server/services/teams";
 import { createClient } from "@/server/services/clients";
 import { updateSettings } from "@/server/services/settings";
@@ -54,6 +57,7 @@ export async function bootstrapOrganisation(
           passwordHash,
           name: owner.name,
           role: owner.role,
+          isAdmin: owner.isAdmin ?? false,
           title: owner.title,
           avatarColour: owner.avatarColour,
           createdAt: at,
@@ -62,6 +66,8 @@ export async function bootstrapOrganisation(
         .returning({ id: users.id }),
       "owner",
     );
+    // The bootstrapped owner is the primary owner (trigger org_primary_owner: must be an active admin).
+    await tx.update(organisationSettings).set({ primaryOwnerUserId: user.id }).where(eq(organisationSettings.organisationId, org.id));
     const sys = await systemContext(org.id, { db: tx, cause: "seed", requestId: "seed-bootstrap" });
     await recordEvent(tx, sys, {
       entityType: "user",
@@ -69,16 +75,24 @@ export async function bootstrapOrganisation(
       eventType: "user.created",
       action: "created",
       previousValue: null,
-      newValue: { name: owner.name, email: owner.email, role: owner.role, title: owner.title },
-      metadata: { targetUserId: user.id, bootstrap: true },
+      newValue: { name: owner.name, email: owner.email, role: owner.role, isAdmin: owner.isAdmin ?? false, title: owner.title },
+      metadata: { targetUserId: user.id, bootstrap: true, primaryOwner: true },
     });
     rt.registerUser(def.slug, owner.key, user.id, org.id);
     return { organisationId: org.id, ownerId: user.id };
   });
 }
 
-/** Invites `def` as `actorId` (shared pre-hashed secret, so no bcrypt per user). */
+/**
+ * Invites `def` as `actorId` (shared pre-hashed secret, so no bcrypt per user)
+ * with its admin bit and permission switches passed EXPLICITLY to `inviteUser`
+ * (docs/ROLES.md §13: the seed never relies on column / invite defaults).
+ */
 export async function inviteSeedUser(rt: SeedRuntime, orgSlug: string, actorId: string, def: SeedUserDef, secret: PreparedSecret): Promise<string> {
+  if (def.role === "client") throw new Error(`seed: ${def.email} is a client user; use inviteSeedClientUser`);
+  const keys: readonly PermissionFlag[] = def.role === "editor" ? EDITOR_FLAGS : MEMBER_FLAGS;
+  const flags: Partial<Record<PermissionFlag, boolean>> = {};
+  for (const k of keys) if (def.flags?.[k] !== undefined) flags[k] = def.flags[k];
   const result = await rt.act(actorId, (tx, ctx) =>
     inviteUser(
       tx,
@@ -90,14 +104,22 @@ export async function inviteSeedUser(rt: SeedRuntime, orgSlug: string, actorId: 
         title: def.title,
         avatarColour: def.avatarColour,
         capacityHoursPerWeek: def.capacityHoursPerWeek ?? null,
-        canViewTeamWorkloads: def.canViewTeamWorkloads ?? false,
-        canViewAnalytics: def.canViewAnalytics ?? false,
+        ...(def.role === "photographer" && def.isAdmin ? { isAdmin: true } : {}),
+        flags,
       },
       secret,
     ),
   );
   rt.registerUser(orgSlug, def.key, result.user.id, result.user.organisationId);
   return result.user.id;
+}
+
+/**
+ * Sets a user's permission switches as `actorId` (an admin) through
+ * `setPermissions` (`user.flags_changed` with only the changed switches).
+ */
+export async function setSeedPermissions(rt: SeedRuntime, actorId: string, userId: string, flags: Partial<Record<PermissionFlag, boolean>>): Promise<void> {
+  await rt.act(actorId, (tx, ctx) => setPermissions(tx, ctx, { userId, ...flags }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,8 +144,9 @@ function statusByKey(graph: WorkflowGraph, key: string): WorkflowStatus {
   return s;
 }
 
-const OME: Role[] = ["owner", "manager", "editor"];
-const OMP: Role[] = ["owner", "manager", "photographer"];
+/** Roles v2 edge roles (docs/ROLES.md §5.1): editor-side edges; reviewer-side / cancel / unassign edges. */
+const OME: TransitionRole[] = ["admin", "editor"];
+const OMP: TransitionRole[] = ["photographer"];
 
 /** Default workflow (the built-in template, made the organisation default). */
 export async function createDefaultWorkflow(rt: SeedRuntime, ownerId: string): Promise<WorkflowRefs> {
@@ -178,7 +201,7 @@ export async function createVideoWorkflow(rt: SeedRuntime, ownerId: string): Pro
   const submitted = statusByKey(graph, "submitted");
   const cancelled = statusByKey(graph, "cancelled");
   const ready = statusByKey(graph, "ready");
-  const edges: { from: string; to: string; label: string; roles: Role[]; assigneeOnly?: boolean }[] = [
+  const edges: { from: string; to: string; label: string; roles: TransitionRole[]; assigneeOnly?: boolean }[] = [
     { from: rough.id, to: finalCut.id, label: "Move to Final Cut", roles: OME, assigneeOnly: true },
     { from: finalCut.id, to: submitted.id, label: "Submit for review", roles: OME, assigneeOnly: true },
     { from: finalCut.id, to: ready.id, label: "Unassign", roles: OMP },

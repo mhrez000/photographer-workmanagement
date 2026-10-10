@@ -40,10 +40,10 @@ describe("updateLink", () => {
     const raw = await run(ids.users.photographer1, (tx, ctx) =>
       addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://www.dropbox.com/sh/finals", label: "Finals" }),
     );
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     expect(await finishedWorkLinks(db, ctx, jobId)).toEqual([]);
 
-    const updated = await run(ids.users.manager, (tx, c) => updateLink(tx, c, { linkId: raw.id, kind: "finished_files" }));
+    const updated = await run(ids.users.coAdmin, (tx, c) => updateLink(tx, c, { linkId: raw.id, kind: "finished_files" }));
     expect(updated).toMatchObject({ kind: "finished_files", url: raw.url, label: "Finals", supersedesLinkId: raw.id, provider: "dropbox" });
     expect((await finishedWorkLinks(db, ctx, jobId)).map((l) => l.id)).toEqual([updated.id]);
     const slots = await listLinks(db, ctx, jobId, { history: true });
@@ -92,6 +92,6 @@ describe("updateLink", () => {
     const photogs = await run(ids.users.photographer1, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "gallery", url: "https://pixieset.com/g" }));
     expect(await status(() => run(ids.users.editor1, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id, label: "Mine" })))).toBe(403);
     // nothing to change
-    expect(await status(() => run(ids.users.manager, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id })))).toBe(400);
+    expect(await status(() => run(ids.users.coAdmin, (tx, ctx) => updateLink(tx, ctx, { linkId: photogs.id })))).toBe(400);
   });
 });

@@ -4,8 +4,8 @@ import {
   DEFAULT_WORKFLOW_TRANSITIONS,
   EDITOR_LINK_KINDS,
   STATUS_CATEGORIES,
-  type Role,
   type StatusCategory,
+  type TransitionRole,
 } from "@/lib/constants";
 import type { AuthContext, ContextSettings } from "@/lib/types";
 import { AmbiguousTargetError, NotFoundError } from "@/server/errors";
@@ -40,29 +40,44 @@ import {
 
 const ORG = "org-1";
 const OWNER = "u-owner";
-const MANAGER = "u-manager";
+const CO_ADMIN = "u-coadmin";
 const PHOTOG = "u-photog";
 const EDITOR = "u-editor";
-const ACTOR_ID: Record<Role, string> = { owner: OWNER, manager: MANAGER, photographer: PHOTOG, editor: EDITOR };
+
+/**
+ * Roles v2 actors (docs/ROLES.md §12.1 porting rule): v1 "owner" → the admin
+ * owner, v1 "manager" (a second management user acting on any job) → a co-admin,
+ * "photographer" → a team member with the migrated switches (create, assign,
+ * review) on their own jobs, "editor" → the assigned editor.
+ */
+type Actor = "owner" | "coAdmin" | "photographer" | "editor";
+const ACTOR_ID: Record<Actor, string> = { owner: OWNER, coAdmin: CO_ADMIN, photographer: PHOTOG, editor: EDITOR };
 
 const SETTINGS: ContextSettings = {
   timezone: "Australia/Sydney",
   timeTrackingEnabled: true,
-  photographersSeeAllJobs: false,
-  photographersSeeTeamJobs: false,
-  editorsSeeTeamJobs: false,
-  editorsSeeTeamWorkloads: false,
   automationsEnabled: true,
 };
 
-function ctx(role: Role, over: Partial<AuthContext> = {}): AuthContext {
+function ctx(actor: Actor, over: Partial<AuthContext> = {}): AuthContext {
+  const admin = actor === "owner" || actor === "coAdmin";
+  const member = actor === "photographer";
   return {
-    userId: ACTOR_ID[role],
+    userId: ACTOR_ID[actor],
     organisationId: ORG,
-    role,
+    role: actor === "editor" ? "editor" : "photographer",
+    isAdmin: admin,
+    isPrimaryOwner: actor === "owner",
     isActive: true,
-    canViewTeamWorkloads: false,
-    canViewAnalytics: false,
+    canCreateJobs: true,
+    canViewAllJobs: admin,
+    canAssignEditors: admin || member,
+    canReviewSubmissions: admin || member,
+    canViewTeamWorkloads: admin,
+    canViewAnalytics: admin,
+    canViewTeamJobs: false,
+    clientId: null,
+    clientFeedbackEnabled: false,
     teamUserIds: new Set(),
     settings: SETTINGS,
     isSystem: false,
@@ -110,7 +125,7 @@ const st = (key: string, category: StatusCategory, sortOrder: number, isInitial 
   archivedAt: null,
 });
 
-const edge = (from: string, to: string, roles: Role[], flags: Partial<EdgeLike> = {}): EdgeLike => ({
+const edge = (from: string, to: string, roles: TransitionRole[], flags: Partial<EdgeLike> = {}): EdgeLike => ({
   id: `e-${from}-${to}`,
   fromStatusId: sid(from),
   toStatusId: sid(to),
@@ -122,8 +137,9 @@ const edge = (from: string, to: string, roles: Role[], flags: Partial<EdgeLike> 
   ...flags,
 });
 
-const OMP: Role[] = ["owner", "manager", "photographer"];
-const OME: Role[] = ["owner", "manager", "editor"];
+/** roles v2 (§5.1): reviewer-side edges → ["photographer"]; editor-side → ["admin", "editor"]. */
+const OMP: TransitionRole[] = ["photographer"];
+const OME: TransitionRole[] = ["admin", "editor"];
 
 /** "Video" workflow: two in_progress stages (Rough Cut / Final Cut) and a renamed review. */
 const VIDEO_STATUSES: StatusLike[] = [
@@ -164,16 +180,21 @@ function jobAt(key: string, statuses: StatusLike[] = DEFAULT_STATUSES, over: Par
     photographerId: PHOTOG,
     editorId: unassigned ? null : EDITOR,
     createdByUserId: PHOTOG,
+    createdByRole: "photographer",
     statusCategory: status.category,
     isPaused: false,
     pastEditorIds: unassigned ? [] : [EDITOR],
+    draftClosed: true,
+    clientId: "client-1",
+    sharedWithClient: false,
+    projectSharedWithClient: false,
     statusId: status.id,
     previousStatusId: null,
     ...over,
   };
 }
 
-const targets = (role: Role, job: WorkflowJobLike, statuses = DEFAULT_STATUSES, edges = DEFAULT_EDGES) =>
+const targets = (role: Actor, job: WorkflowJobLike, statuses = DEFAULT_STATUSES, edges = DEFAULT_EDGES) =>
   allowedTransitions(ctx(role), job, statuses, edges).map((t) => t.toStatus.key);
 
 /* ------------------------------------------------------------------ */
@@ -249,12 +270,14 @@ describe("resolveTargetStatus", () => {
 const EXPECTED: Record<string, Record<"om" | "photographer" | "editor", string[]>> = {
   new: { om: ["ready", "cancelled"], photographer: ["ready", "cancelled"], editor: [] },
   ready: { om: ["new", "cancelled"], photographer: ["new", "cancelled"], editor: [] },
-  assigned: { om: ["accepted", "in_progress", "cancelled"], photographer: ["cancelled"], editor: ["ready", "accepted", "in_progress"] },
-  accepted: { om: ["in_progress", "cancelled"], photographer: ["cancelled"], editor: ["in_progress"] },
-  in_progress: { om: ["submitted", "cancelled"], photographer: ["cancelled"], editor: ["submitted"] },
+  // roles v2 §5.2: → ready while an editor holds the job is an unassignment (job.assign_editor), offered to
+  // admins and to members with "Assign editors" on jobs they manage.
+  assigned: { om: ["ready", "accepted", "in_progress", "cancelled"], photographer: ["ready", "cancelled"], editor: ["ready", "accepted", "in_progress"] },
+  accepted: { om: ["ready", "in_progress", "cancelled"], photographer: ["ready", "cancelled"], editor: ["in_progress"] },
+  in_progress: { om: ["ready", "submitted", "cancelled"], photographer: ["ready", "cancelled"], editor: ["submitted"] },
   submitted: { om: ["review", "revision", "approved", "cancelled"], photographer: ["review", "revision", "approved", "cancelled"], editor: [] },
   review: { om: ["revision", "approved", "cancelled"], photographer: ["revision", "approved", "cancelled"], editor: [] },
-  revision: { om: ["resubmitted", "cancelled"], photographer: ["cancelled"], editor: ["resubmitted"] },
+  revision: { om: ["ready", "resubmitted", "cancelled"], photographer: ["ready", "cancelled"], editor: ["resubmitted"] },
   resubmitted: { om: ["review", "revision", "approved", "cancelled"], photographer: ["review", "revision", "approved", "cancelled"], editor: [] },
   approved: { om: ["revision", "delivered", "completed", "cancelled"], photographer: ["revision", "delivered", "completed", "cancelled"], editor: [] },
   delivered: { om: ["revision", "completed", "cancelled"], photographer: ["revision", "completed", "cancelled"], editor: [] },
@@ -263,15 +286,15 @@ const EXPECTED: Record<string, Record<"om" | "photographer" | "editor", string[]
 };
 
 describe("allowedTransitions on the default workflow", () => {
-  const cases = Object.keys(EXPECTED).flatMap((key) => (["owner", "manager", "photographer", "editor"] as Role[]).map((role) => [key, role] as const));
+  const cases = Object.keys(EXPECTED).flatMap((key) => (["owner", "coAdmin", "photographer", "editor"] as Actor[]).map((role) => [key, role] as const));
   it.each(cases)("%s as %s", (key, role) => {
     const job = jobAt(key, DEFAULT_STATUSES, key === "cancelled" ? { previousStatusId: sid("in_progress") } : {});
-    const bucket = role === "owner" || role === "manager" ? "om" : role;
+    const bucket = role === "owner" || role === "coAdmin" ? "om" : role;
     expect(targets(role, job)).toEqual(EXPECTED[key][bucket]);
   });
 
   it("labels and flags", () => {
-    const byKey = (role: Role, key: string, to: string) => allowedTransitions(ctx(role), jobAt(key), DEFAULT_STATUSES, DEFAULT_EDGES).find((t) => t.toStatus.key === to);
+    const byKey = (role: Actor, key: string, to: string) => allowedTransitions(ctx(role), jobAt(key), DEFAULT_STATUSES, DEFAULT_EDGES).find((t) => t.toStatus.key === to);
     expect(byKey("editor", "assigned", "ready")?.label).toBe("Decline");
     expect(byKey("editor", "assigned", "in_progress")?.label).toBe("Start");
     expect(byKey("editor", "in_progress", "submitted")?.label).toBe("Submit for review");
@@ -293,6 +316,14 @@ describe("allowedTransitions on the default workflow", () => {
     expect(targets("owner", jobAt("cancelled", DEFAULT_STATUSES, { previousStatusId: null }))).toEqual(["new"]);
   });
 
+  it("members without Assign editors / Review submissions get no unassign or review moves (§5.2 from-gate)", () => {
+    const noFlags = ctx("photographer", { canAssignEditors: false, canReviewSubmissions: false });
+    const moves = (key: string) => allowedTransitions(noFlags, jobAt(key), DEFAULT_STATUSES, DEFAULT_EDGES).map((t) => t.toStatus.key);
+    expect(moves("in_progress")).toEqual(["cancelled"]);
+    expect(moves("submitted")).toEqual([]);
+    expect(moves("approved")).toEqual([]);
+  });
+
   it("other photographers / unassigned editors get nothing", () => {
     expect(targets("photographer", jobAt("submitted", DEFAULT_STATUSES, { photographerId: "u-x", createdByUserId: "u-x" }))).toEqual([]);
     expect(targets("editor", jobAt("in_progress", DEFAULT_STATUSES, { editorId: "u-x" }))).toEqual([]);
@@ -307,7 +338,7 @@ describe("allowedTransitions on the default workflow", () => {
 
   it("generated cancel edge is offered even when the workflow lacks an explicit one", () => {
     const edgesNoCancel = DEFAULT_EDGES.filter((e) => e.toStatusId !== sid("cancelled"));
-    expect(targets("owner", jobAt("in_progress"), DEFAULT_STATUSES, edgesNoCancel)).toEqual(["submitted", "cancelled"]);
+    expect(targets("owner", jobAt("in_progress"), DEFAULT_STATUSES, edgesNoCancel)).toEqual(["ready", "submitted", "cancelled"]);
     expect(targets("photographer", jobAt("completed"), DEFAULT_STATUSES, edgesNoCancel)).not.toContain("cancelled");
   });
 
@@ -332,10 +363,10 @@ describe("actorMayTakeEdge", () => {
     expect(actorMayTakeEdge(ctx("editor"), jobAt("review"), approve)).toBe(false);
     expect(actorMayTakeEdge(ctx("photographer"), jobAt("in_progress"), submit)).toBe(false);
   });
-  it("assigneeOnly → only the current editor (managers act on behalf)", () => {
+  it("assigneeOnly → only the current editor (admins act on behalf)", () => {
     expect(actorMayTakeEdge(ctx("editor"), jobAt("in_progress"), submit)).toBe(true);
     expect(actorMayTakeEdge(ctx("editor"), jobAt("in_progress", DEFAULT_STATUSES, { editorId: "u-x" }), submit)).toBe(false);
-    expect(actorMayTakeEdge(ctx("manager"), jobAt("in_progress"), submit)).toBe(true);
+    expect(actorMayTakeEdge(ctx("coAdmin"), jobAt("in_progress"), submit)).toBe(true);
   });
   it("photographer → own jobs only", () => {
     expect(actorMayTakeEdge(ctx("photographer"), jobAt("review"), approve)).toBe(true);
@@ -391,11 +422,12 @@ describe("availableActions", () => {
   it("photographer reviewing own job", () => {
     const a = availableActions(ctx("photographer"), jobAt("submitted"), DEFAULT_STATUSES, DEFAULT_EDGES, { ...extras, openRevision: true });
     expect(a).toMatchObject({ canEditFields: true, canRequestRevision: true, canWithdrawRevision: true, canCancel: true, canPause: false, canAssignEditor: true });
-    expect(a.canAddNoteKinds).toEqual(["photographer", "revision", "client"]);
+    // roles v2: a member with Review submissions may also write client-visible delivery notes (§3.3)
+    expect(a.canAddNoteKinds).toEqual(["photographer", "revision", "client", "delivery"]);
   });
 
   it("cancelled job: restore only", () => {
-    const a = availableActions(ctx("manager"), jobAt("cancelled", DEFAULT_STATUSES, { previousStatusId: sid("assigned") }), DEFAULT_STATUSES, DEFAULT_EDGES, extras);
+    const a = availableActions(ctx("coAdmin"), jobAt("cancelled", DEFAULT_STATUSES, { previousStatusId: sid("assigned") }), DEFAULT_STATUSES, DEFAULT_EDGES, extras);
     expect(a.canRestore).toBe(true);
     expect(a.canCancel).toBe(false);
     expect(a.canAssignEditor).toBe(false);
@@ -481,7 +513,7 @@ describe("validateWorkflowDefinition", () => {
     ["duplicate key", (s, e) => [s.map((x) => (x.key === "review" ? { ...x, key: "submitted" } : x)), e], /key "submitted" is used 2 times/],
     ["duplicate name", (s, e) => [s.map((x) => (x.key === "review" ? { ...x, name: "Approved" } : x)), e], /name "Approved" is used more than once/],
     ["empty allowedRoles", (s, e) => [s, e.map((y, i) => (i === 0 ? { ...y, allowedRoles: [] } : y))], /at least one role/],
-    ["unknown role", (s, e) => [s, e.map((y, i) => (i === 0 ? { ...y, allowedRoles: ["client" as Role] } : y))], /unknown role "client"/],
+    ["unknown role", (s, e) => [s, e.map((y, i) => (i === 0 ? { ...y, allowedRoles: ["client" as TransitionRole] } : y))], /unknown role "client"/],
     ["duplicate edge", (s, e) => [s, [...e, { ...e[0], id: "dup" }]], /Duplicate transition/],
     ["self loop", (s, e) => [s, [...e, edge("review", "review", OMP)]], /itself/],
     ["dangling edge", (s, e) => [s, [...e, edge("review", "ghost", OMP)]], /missing or archived status/],
@@ -500,13 +532,13 @@ describe("validateWorkflowDefinition", () => {
 });
 
 describe("generateCancelEdges", () => {
-  it("one OMP edge from every active, non-archived status to the cancelled status", () => {
+  it("one photographer edge from every active, non-archived status to the cancelled status", () => {
     const edges = generateCancelEdges(DEFAULT_STATUSES);
     expect(edges).toHaveLength(11);
     expect(new Set(edges.map((e) => e.toStatusId))).toEqual(new Set([sid("cancelled")]));
     expect(edges.map((e) => e.fromStatusId)).not.toContain(sid("completed"));
     expect(edges.map((e) => e.fromStatusId)).not.toContain(sid("cancelled"));
-    expect(edges.every((e) => e.allowedRoles.join() === "owner,manager,photographer" && !e.assigneeOnly && !e.isReopen)).toBe(true);
+    expect(edges.every((e) => e.allowedRoles.join() === "photographer" && !e.assigneeOnly && !e.isReopen)).toBe(true);
     const archived = DEFAULT_STATUSES.map((s) => (s.key === "review" ? { ...s, archivedAt: "2026-01-01T00:00:00Z" } : s));
     expect(generateCancelEdges(archived)).toHaveLength(10);
   });

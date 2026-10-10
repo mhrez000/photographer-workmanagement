@@ -216,7 +216,7 @@ function DashboardEditor({ initial, version, isDefault, available, timeZone }: D
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="sticky top-[calc(var(--topbar-height)+0.5rem)] z-20 flex flex-col gap-3 rounded-lg border border-accent/25 bg-surface/95 p-3 shadow-md backdrop-blur sm:flex-row sm:items-center sm:justify-between sm:px-4">
+      <div className="sticky top-[calc(var(--topbar-height)+0.5rem)] z-(--z-page-sticky) flex flex-col gap-3 rounded-lg border border-accent/25 bg-surface/95 p-3 shadow-md backdrop-blur sm:flex-row sm:items-center sm:justify-between sm:px-4">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-ink">Customising your dashboard</p>
           <p className="text-xs text-ink-muted">Drag tiles (or use the grip with Space and arrow keys) to reorder, pick a size, or hide what you don&apos;t need.</p>

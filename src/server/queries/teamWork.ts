@@ -2,14 +2,16 @@
  * Team Work (ARCHITECTURE.md §10 `/workspace/team`): active jobs grouped by
  * assignee with per-person counts.
  *
- * - Jobs come through `visibleJobsWhere(ctx)` (+ the All Work filter
- *   vocabulary), ACTIVE categories only.
- * - Groups: by editor (default) or photographer; jobs without that person
- *   are omitted (they live in All Work → Unassigned).
- * - Photographers / editors only get groups for themselves and their active
- *   teammates.
- * - `workload` (aggregate WorkloadRow) is filled for editors when the actor
- *   passes `workloads.view_team`, or for the actor's own group; otherwise null.
+ * docs/ROLES.md §10.1:
+ * - Rows = `visibleJobsWhere(ctx)` (+ the All Work filter vocabulary) ∧
+ *   ACTIVE ∧ person column not null. Team membership no longer narrows
+ *   anything; the view-scope switch does not apply (§8).
+ * - Groups: admins and ⚑all members by editor (default) or photographer;
+ *   editors (⚑teamJobs) by editor only. Jobs without that person are omitted
+ *   (they live in All Work → Unassigned).
+ * - `workload` (per-person counts, aggregate WorkloadRow) is filled for
+ *   editors only when the actor passes `workloads.view_team`; an editor gets
+ *   counts only on their own group; otherwise null.
  *   It is computed from the editor's active jobs (§8 formulas in
  *   src/lib/metrics.ts); completed counts use `completedInRange` semantics and
  *   the revision rate covers jobs approved in the last 30 days whose current
@@ -23,10 +25,11 @@ import { CATEGORY_GROUPS, WORKLOAD_THRESHOLDS } from "@/lib/constants";
 import { civilMonthRange, startOfCivilDayIso } from "@/lib/dates";
 import { isDueWithinHours, revisionRate, workloadBand, workloadScore, type WorkloadSettings } from "@/lib/metrics";
 import type { AuthContext, JobRow, OrganisationSettings, TeamWorkGroup, WorkloadRow } from "@/lib/types";
-import { can, isManagement } from "@/server/auth/permissions";
+import { can } from "@/server/auth/permissions";
 import { parseInput } from "@/server/services/_shared";
 import { jobFiltersWhere, JobListFiltersSchema } from "./jobs";
 import {
+  assertStaffRead,
   categoryIn,
   defaultJobOrder,
   jobRowQuery,
@@ -157,19 +160,16 @@ export function buildWorkloadRow(
 
 /** Team Work groups (see file header). */
 export async function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<TeamWorkGroup[]> {
-  const q = parseInput(TeamWorkQuerySchema, input ?? {});
+  assertStaffRead(ctx);
+  const parsed = parseInput(TeamWorkQuerySchema, input ?? {});
+  // Editors group by editor only (§10.1).
+  const q = !ctx.isSystem && ctx.role === "editor" ? { ...parsed, role: "editor" as const } : parsed;
   const now = ctx.now();
   const settingsRow = await loadOrgSettingsRow(db, ctx);
   const bounds = orgDayBounds(ctx, now, settingsRow?.weekStartsOn ?? 1);
   const personCol = q.role === "editor" ? jobs.editorId : jobs.photographerId;
 
-  const allowedPeople: string[] | null = isManagement(ctx) || ctx.isSystem ? null : [...ctx.teamUserIds, ...(ctx.userId ? [ctx.userId] : [])];
-  const where = and(
-    jobFiltersWhere(ctx, q, bounds),
-    categoryIn(CATEGORY_GROUPS.ACTIVE),
-    isNotNull(personCol),
-    allowedPeople ? inArray(personCol, allowedPeople.length ? allowedPeople : ["__none__"]) : undefined,
-  );
+  const where = and(jobFiltersWhere(ctx, q, bounds), categoryIn(CATEGORY_GROUPS.ACTIVE), isNotNull(personCol));
   const rows = await selectJobRows(db, ctx, {
     where,
     orderBy: [sql`${jobs.dueDate} asc nulls last`, sql`${jobs.createdAt} desc`, sql`${jobs.id} asc`],
@@ -253,13 +253,18 @@ export async function getTeamWork(db: DbLike, ctx: AuthContext, input: unknown =
   return groups;
 }
 
-/** Visible-job count per person (cheap badge helper for the Team Work tabs). */
+/**
+ * Visible-job count per person (badge helper for the Team Work tabs). Other
+ * people's counts need `workloads.view_team` (§10.1); without it only the
+ * viewer's own count is returned.
+ */
 export async function teamWorkCounts(db: DbLike, ctx: AuthContext, role: "editor" | "photographer" = "editor"): Promise<Map<string, number>> {
   const col = role === "editor" ? jobs.editorId : jobs.photographerId;
+  const own = can(ctx, "workloads.view_team") ? undefined : eq(col, ctx.userId ?? "");
   const rows = await db
     .select({ id: col, n: sql<number>`count(*)` })
     .from(jobs)
-    .where(and(visibleJobsWhere(ctx), categoryIn(CATEGORY_GROUPS.ACTIVE), isNotNull(col)))
+    .where(and(visibleJobsWhere(ctx), categoryIn(CATEGORY_GROUPS.ACTIVE), isNotNull(col), own))
     .groupBy(col);
 
   return new Map(rows.filter((r): r is { id: string; n: number } => r.id !== null).map((r) => [r.id, Number(r.n)]));

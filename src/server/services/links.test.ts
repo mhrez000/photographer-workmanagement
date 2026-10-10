@@ -65,7 +65,7 @@ describe("provider derivation + URL allowlist", () => {
 
   it("addLink rejects disallowed protocols with a ValidationError", async () => {
     await expect(
-      run(ids.users.manager, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "javascript:alert(1)" })),
+      run(ids.users.coAdmin, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "javascript:alert(1)" })),
     ).rejects.toThrow(ValidationError);
   });
 });
@@ -84,7 +84,7 @@ describe("supersession chain", () => {
     expect(r2.previous).toMatchObject({ id: v1.id, supersededByLinkId: r2.link.id, supersededAt: fakeClock.now() });
 
     fakeClock.advanceMinutes(10);
-    const r3 = await run(ids.users.manager, (tx, ctx) => replaceLink(tx, ctx, { linkId: r2.link.id, url: "https://we.tl/raw-3", label: null }));
+    const r3 = await run(ids.users.coAdmin, (tx, ctx) => replaceLink(tx, ctx, { linkId: r2.link.id, url: "https://we.tl/raw-3", label: null }));
     expect(r3.link.label).toBeNull();
 
     const current = await listLinks(db, await contextFor(db, ids.users.editor1), jobId);
@@ -111,32 +111,32 @@ describe("supersession chain", () => {
   });
 
   it("a superseded or removed link cannot be replaced again (409)", async () => {
-    const v1 = await run(ids.users.manager, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://example.com/1" }));
-    await run(ids.users.manager, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/2" }));
+    const v1 = await run(ids.users.coAdmin, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://example.com/1" }));
+    await run(ids.users.coAdmin, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/2" }));
     await expect(
-      run(ids.users.manager, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/3" })),
+      run(ids.users.coAdmin, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/3" })),
     ).rejects.toThrow(ConflictError);
-    await expect(run(ids.users.manager, (tx, ctx) => removeLink(tx, ctx, { linkId: v1.id }))).rejects.toThrow(ConflictError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => removeLink(tx, ctx, { linkId: v1.id }))).rejects.toThrow(ConflictError);
   });
 
   it("the DB refuses to rewrite link content or re-fill supersession", async () => {
-    const v1 = await run(ids.users.manager, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://example.com/1" }));
+    const v1 = await run(ids.users.coAdmin, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "raw_files", url: "https://example.com/1" }));
     expect(await dbRejection(db.update(jobLinks).set({ url: "https://evil.example" }).where(eq(jobLinks.id, v1.id)))).toMatch(/link rows are immutable/);
-    await run(ids.users.manager, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/2" }));
+    await run(ids.users.coAdmin, (tx, ctx) => replaceLink(tx, ctx, { linkId: v1.id, url: "https://example.com/2" }));
     expect(
       await dbRejection(db.update(jobLinks).set({ supersededAt: "2030-01-01T00:00:00.000Z" }).where(eq(jobLinks.id, v1.id))),
     ).toMatch(/link rows are immutable/);
   });
 
   it("removeLink fills removed_* once; the slot only shows with history", async () => {
-    const v1 = await run(ids.users.manager, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "reference", url: "https://example.com/ref" }));
-    const removed = await run(ids.users.manager, (tx, ctx) => removeLink(tx, ctx, { linkId: v1.id, reason: "Wrong job" }));
-    expect(removed).toMatchObject({ removedByUserId: ids.users.manager, removeReason: "Wrong job" });
-    expect(await listLinks(db, await contextFor(db, ids.users.manager), jobId)).toHaveLength(0);
-    const hist = await listLinks(db, await contextFor(db, ids.users.manager), jobId, { history: true });
+    const v1 = await run(ids.users.coAdmin, (tx, ctx) => addLink(tx, ctx, { jobId, kind: "reference", url: "https://example.com/ref" }));
+    const removed = await run(ids.users.coAdmin, (tx, ctx) => removeLink(tx, ctx, { linkId: v1.id, reason: "Wrong job" }));
+    expect(removed).toMatchObject({ removedByUserId: ids.users.coAdmin, removeReason: "Wrong job" });
+    expect(await listLinks(db, await contextFor(db, ids.users.coAdmin), jobId)).toHaveLength(0);
+    const hist = await listLinks(db, await contextFor(db, ids.users.coAdmin), jobId, { history: true });
     expect(hist).toHaveLength(1);
     expect(hist[0].current).toBeNull();
-    expect(hist[0].history[0].removedBy?.id).toBe(ids.users.manager);
+    expect(hist[0].history[0].removedBy?.id).toBe(ids.users.coAdmin);
     const ev = await first(db.select().from(activityEvents).where(eq(activityEvents.eventType, "link.removed")).limit(1));
     expect(ev?.metadata).toMatchObject({ reason: "Wrong job" });
   });
@@ -166,7 +166,7 @@ describe("link permissions", () => {
   it("foreign link ids are 404", async () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
     const foreignJob = (await insertJobFixture(db, other, { statusKey: "in_progress" })).job.id;
-    const otherManager = await contextFor(db, other.users.manager);
+    const otherManager = await contextFor(db, other.users.coAdmin);
     const foreign = await withTx((tx) => addLink(tx, otherManager, { jobId: foreignJob, kind: "raw_files", url: "https://example.com" }), {
       db,
     });

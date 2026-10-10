@@ -65,6 +65,8 @@ export async function listSavedViews(db: DbLike, ctx: AuthContext, input: unknow
 
 /** One view (own or shared, not archived); otherwise 404. */
 export async function getSavedView(db: DbLike, ctx: AuthContext, viewId: string): Promise<SavedViewItem> {
+  // Saved views are staff-only (clients: 403, even for a view shared in the organisation).
+  if (!ctx.isSystem) assertCan(ctx, "saved_view.manage", { userId: ctx.userId ?? "", organisationId: ctx.organisationId });
   const v = await loadSavedViewInOrg(db, ctx, viewId);
   if (v.archivedAt !== null || (v.ownerUserId !== ctx.userId && !v.isShared)) throw new NotFoundError("Saved view");
   return toItem(v, ctx, (await loadUserRefs(db, ctx, [v.ownerUserId])).get(v.ownerUserId));

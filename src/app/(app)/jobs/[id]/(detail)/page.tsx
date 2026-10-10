@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { PageContainer } from "@/components/shell";
+import { JobClientAccessSection } from "@/components/sharing/sections";
 import {
   ActivityTab,
   CommentsTab,
@@ -23,13 +24,17 @@ import {
   type LinkPermissions,
   type NotePermissions,
 } from "@/components/job-detail";
-import { NOTE_KINDS, type NoteKind } from "@/lib/constants";
-import type { CommentNode, JobDetail, JobPermissionRef } from "@/lib/types";
+import { CATEGORY_GROUPS, NOTE_KINDS, type NoteKind } from "@/lib/constants";
+import type { DeliverContext } from "@/lib/sharing";
+import type { CommentNode } from "@/lib/types";
 import { allowed, load, pageContext, param } from "@/server/page";
 import { NotFoundError } from "@/server/errors";
+import { loadJobRef } from "@/server/auth/job-ref";
+import { isAdmin } from "@/server/auth/permissions";
 import { getJobDetail } from "@/server/queries/jobDetail";
 import { getJobActivity, getJobHistory, getJobTimeline } from "@/server/queries/jobHistory";
 import { getJobRowByNumber, getJobRowsByIds } from "@/server/queries/jobs";
+import { getJobClientAccess } from "@/server/queries/portal";
 
 /** "PJ-0042", "pj-42" — a human job number rather than an id. */
 const JOB_NUMBER = /^[A-Za-z]{1,8}-\d{1,8}$/;
@@ -43,22 +48,6 @@ export async function generateMetadata({ params }: PageProps<"/jobs/[id]">): Pro
   } catch {
     return { title: "Job" };
   }
-}
-
-/** Facts the permission layer needs, rebuilt from the detail bundle (no extra query). */
-function permissionRef(detail: JobDetail, organisationId: string, role: string): JobPermissionRef {
-  const { job } = detail;
-  const pastEditorIds = [...new Set(detail.assignments.filter((a) => a.role === "editor").map((a) => a.user.id))];
-  return {
-    id: job.id,
-    organisationId,
-    photographerId: job.photographer?.id ?? null,
-    editorId: job.editor?.id ?? null,
-    createdByUserId: job.createdBy.id,
-    statusCategory: job.statusCategory,
-    isPaused: job.isPaused,
-    ...(role === "editor" ? { pastEditorIds } : {}),
-  };
 }
 
 function flattenComments(nodes: readonly CommentNode[]): CommentNode[] {
@@ -92,8 +81,29 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
 
   const detail = await load(() => getJobDetail(db, ctx, id));
   const { job, actions } = detail;
-  const ref = permissionRef(detail, ctx.organisationId, ctx.role);
-  const isManagement = ctx.role === "owner" || ctx.role === "manager";
+  // The complete permission ref (draft window, past editors, project sharing) — docs/ROLES.md §2.1.
+  const { ref } = await load(() => loadJobRef(db, ctx, job.id));
+  const linkPeople = isAdmin(ctx);
+
+  // Deliver dialog (ROLES.md §7.3): only when the viewer can deliver and the client has the portal on.
+  let deliver: DeliverContext | null = null;
+  if (actions.transitions.some((t) => t.toStatus.category === "delivered" && !t.isReopen)) {
+    const access = await getJobClientAccess(db, ctx, job.id).catch(() => null);
+    if (access && access.client.portalEnabled && !access.client.archived) {
+      deliver = {
+        clientName: access.client.name,
+        visibleToClient: access.visibleToClient,
+        canShareJob: access.can.shareJob,
+        approvedAt: job.approvedAt,
+        links: access.links,
+      };
+    }
+  }
+  // A team member without "Review submissions" (ROLES.md §4.4): the review is the owner's.
+  const reviewHint =
+    ctx.role === "photographer" && !isAdmin(ctx) && !ctx.canReviewSubmissions && CATEGORY_GROUPS.REVIEWER_HOLDS.includes(job.statusCategory)
+      ? "Your studio owner reviews this job"
+      : null;
 
   // Tabs available to this viewer.
   const showTime = ctx.settings.timeTrackingEnabled || detail.sessions.length > 0;
@@ -149,7 +159,7 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
     case "comments": {
       const deletable: Record<string, boolean> = {};
       for (const c of flattenComments(detail.comments)) {
-        deletable[c.id] = c.deletedAt === null && allowed(ctx, "comment.delete", { job: ref, authorUserId: c.author.id, createdAt: c.createdAt, deletedAt: c.deletedAt });
+        deletable[c.id] = c.deletedAt === null && allowed(ctx, "comment.delete", { job: ref, authorUserId: c.author.id, createdAt: c.createdAt, deletedAt: c.deletedAt, kind: c.kind });
       }
       panel = (
         <CommentsTab
@@ -214,9 +224,11 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
         detail={detail}
         timeZone={tz}
         canOverride={allowed(ctx, "job.transition_override", ref)}
-        linkPeople={isManagement}
+        linkPeople={linkPeople}
         viewerId={ctx.userId}
         timeTrackingEnabled={ctx.settings.timeTrackingEnabled}
+        deliver={deliver}
+        reviewHint={reviewHint}
       />
       {/* Facts sit beside the tabs only at xl (≥1280); narrower, the tab column keeps the full width and the facts follow below. */}
       <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -227,6 +239,9 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
         </div>
         <aside aria-label="Job facts" className="min-w-0 xl:pt-1">
           <FactsRail detail={detail} timeZone={tz} viewerId={ctx.userId} timeTrackingEnabled={ctx.settings.timeTrackingEnabled} />
+          <div className="mt-6">
+            <JobClientAccessSection ctx={ctx} db={db} jobId={job.id} />
+          </div>
         </aside>
       </div>
     </PageContainer>

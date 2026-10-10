@@ -2,12 +2,15 @@
  * Notification centre reads (ARCHITECTURE.md §6, §10 `/notifications`).
  * Always the actor's own notifications (org-scoped); newest first; keyset
  * cursor over (created_at DESC, id DESC). Writes (mark read) live in
- * src/server/services/notifications.ts.
+ * src/server/services/notifications.ts. Staff lists never contain the client
+ * notification types; a client (portal) context gets nothing here — the
+ * portal reads `listPortalNotifications` (queries/portal.ts).
  */
-import { and, desc, eq, isNull, lt, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, notInArray, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { jobs, notifications, users } from "@/db/schema";
+import { CLIENT_NOTIFICATION_TYPES } from "@/lib/constants";
 import type { AuthContext, NotificationView, Paginated } from "@/lib/types";
 import { parseInput } from "@/server/services/_shared";
 import { unreadCount as serviceUnreadCount } from "@/server/services/notifications";
@@ -32,9 +35,13 @@ export type NotificationListInput = z.input<typeof NotificationListSchema>;
 
 export async function listNotifications(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<Paginated<NotificationView>> {
   const f = parseInput(NotificationListSchema, input ?? {});
-  if (!ctx.userId) return { items: [], nextCursor: null, total: 0 };
+  if (!ctx.userId || ctx.role === "client") return { items: [], nextCursor: null, total: 0 };
   const limit = f.limit ?? NOTIFICATIONS_DEFAULT_LIMIT;
-  const parts: (SQL | undefined)[] = [eq(notifications.organisationId, ctx.organisationId), eq(notifications.userId, ctx.userId)];
+  const parts: (SQL | undefined)[] = [
+    eq(notifications.organisationId, ctx.organisationId),
+    eq(notifications.userId, ctx.userId),
+    notInArray(notifications.type, [...CLIENT_NOTIFICATION_TYPES]),
+  ];
   if (f.unread) parts.push(isNull(notifications.readAt));
   const cursor = decodeKeysetCursor(f.cursor);
   if (cursor) {

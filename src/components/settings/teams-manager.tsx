@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type ApiError } from "@/lib/api-client";
-import { ROLE_LABELS } from "@/lib/constants";
+import { personaLabel } from "@/lib/constants";
 import { formatDate } from "@/lib/dates";
 import type { TeamDetail, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -111,7 +111,7 @@ function TeamDialog({
               <option value="">No lead</option>
               {people.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} · {ROLE_LABELS[p.role]}
+                  {p.name} · {personaLabel(p)}
                 </option>
               ))}
             </Select>
@@ -133,7 +133,7 @@ function TeamDialog({
                         <span className="flex items-center gap-2">
                           <Avatar name={p.name} colour={p.avatarColour} size="xs" />
                           <span className="truncate">{p.name}</span>
-                          <span className="text-xs text-ink-subtle">{ROLE_LABELS[p.role]}</span>
+                          <span className="text-xs text-ink-subtle">{personaLabel(p)}</span>
                         </span>
                       }
                       wrapperClassName="rounded-sm px-1.5 py-1 hover:bg-surface-muted"
@@ -271,7 +271,7 @@ function TeamCard({
                       ) : null}
                     </p>
                     <p className="text-xs text-ink-muted">
-                      {ROLE_LABELS[m.role]}
+                      {personaLabel(m)}
                       {ledger ? <span className="numeric"> · joined {formatDate(ledger.joinedAt, timeZone)}</span> : null}
                     </p>
                   </div>
@@ -293,7 +293,7 @@ function TeamCard({
             <option value="">Add a member…</option>
             {addable.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} · {ROLE_LABELS[p.role]}
+                {p.name} · {personaLabel(p)}
               </option>
             ))}
           </Select>

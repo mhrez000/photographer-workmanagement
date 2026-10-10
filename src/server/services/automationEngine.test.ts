@@ -4,6 +4,7 @@ import { setDbOverride, type Tx } from "@/db/index";
 import {
   activityEvents,
   automationRuns,
+  automations,
   jobNotes,
   jobStatusTransitions,
   jobs,
@@ -68,7 +69,7 @@ function rule(
   conditions: AutomationCondition[] = [],
   extra: Record<string, unknown> = {},
 ): Promise<Automation> {
-  return runAs("manager", (tx, ctx) => createAutomation(tx, ctx, { name: `Rule ${trigger.type}`, trigger, conditions, actions, ...extra }));
+  return runAs("coAdmin", (tx, ctx) => createAutomation(tx, ctx, { name: `Rule ${trigger.type}`, trigger, conditions, actions, ...extra }));
 }
 
 async function catchErr(fn: () => Promise<unknown>): Promise<AppError> {
@@ -97,11 +98,11 @@ describe("automation CRUD (automations.ts)", () => {
     const a = await rule({ type: "job_created" }, [{ type: "notify", target: "photographer" }]);
     expect(a).toMatchObject({ triggerType: "job_created", isEnabled: true, version: 1 });
 
-    const updated = await runAs("manager", (tx, ctx) =>
+    const updated = await runAs("coAdmin", (tx, ctx) =>
       updateAutomation(tx, ctx, { automationId: a.id, expectedVersion: 1, name: "Welcome", trigger: { type: "status_changed", toCategory: "submitted" } }),
     );
     expect(updated).toMatchObject({ name: "Welcome", triggerType: "status_changed", version: 2 });
-    const stale = await catchErr(() => runAs("manager", (tx, ctx) => updateAutomation(tx, ctx, { automationId: a.id, expectedVersion: 1, name: "x" })));
+    const stale = await catchErr(() => runAs("coAdmin", (tx, ctx) => updateAutomation(tx, ctx, { automationId: a.id, expectedVersion: 1, name: "x" })));
     expect(stale.status).toBe(409);
 
     const off = await runAs("owner", (tx, ctx) => toggleAutomation(tx, ctx, { automationId: a.id }));
@@ -120,19 +121,19 @@ describe("automation CRUD (automations.ts)", () => {
     expect(types[1]?.s).toContain("Welcome");
   });
 
-  it("rejects bad definitions, foreign ids and non-managers", async () => {
+  it("rejects bad definitions, foreign ids and non-admins", async () => {
     const workloadAssign = await catchErr(() => rule({ type: "workload_threshold", band: "overloaded" }, [{ type: "assign_editor", target: "previous_editor" }]));
     expect(workloadAssign.status).toBe(400);
     expect((await catchErr(() => rule({ type: "job_created" }, [{ type: "notify", target: "user" }]))).status).toBe(400);
     expect((await catchErr(() => rule({ type: "job_created" }, [{ type: "assign_editor", target: "user", userId: ids.users.photographer1 }]))).status).toBe(400);
     expect((await catchErr(() => rule({ type: "job_created" }, [{ type: "notify", target: "user", userId: "someone-else" }]))).status).toBe(404);
     expect(
-      (await catchErr(() => rule({ type: "job_created" }, [{ type: "notify", target: "managers" }], [{ field: "clientId", op: "in", values: ["foreign-client"] }])))
+      (await catchErr(() => rule({ type: "job_created" }, [{ type: "notify", target: "admins" }], [{ field: "clientId", op: "in", values: ["foreign-client"] }])))
         .status,
     ).toBe(404);
     for (const actor of ["editor1", "photographer1"] as const) {
       const err = await catchErr(() =>
-        runAs(actor, (tx, ctx) => createAutomation(tx, ctx, { name: "x", trigger: { type: "job_created" }, actions: [{ type: "notify", target: "managers" }] })),
+        runAs(actor, (tx, ctx) => createAutomation(tx, ctx, { name: "x", trigger: { type: "job_created" }, actions: [{ type: "notify", target: "admins" }] })),
       );
       expect(err.status).toBe(403);
     }
@@ -164,13 +165,13 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
   it("dedupes per (automation, trigger event): re-enqueueing the same event is a no-op", async () => {
     const a = await rule({ type: "job_created" }, [{ type: "notify", target: "photographer" }]);
     const { job, eventId } = await insertJobFixture(db, ids);
-    const again = await runAs("manager", (tx, ctx) => enqueueAutomations(tx, ctx, { eventId, eventType: "job.created", jobId: job.id }));
+    const again = await runAs("coAdmin", (tx, ctx) => enqueueAutomations(tx, ctx, { eventId, eventType: "job.created", jobId: job.id }));
     expect(again).toEqual([]);
     expect(await runsOf(a.id)).toHaveLength(1);
   });
 
   it("status_changed honours toCategory / fromCategory / toStatusKey filters", async () => {
-    const submitted = await rule({ type: "status_changed", toCategory: "submitted", fromCategory: "in_progress" }, [{ type: "notify", target: "managers" }]);
+    const submitted = await rule({ type: "status_changed", toCategory: "submitted", fromCategory: "in_progress" }, [{ type: "notify", target: "admins" }]);
     const byKey = await rule({ type: "status_changed", toStatusKey: "submitted" }, [{ type: "notify", target: "creator" }]);
     const approved = await rule({ type: "status_changed", toCategory: "approved" }, [{ type: "notify", target: "photographer" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
@@ -180,7 +181,7 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
     expect(await runsOf(approved.id)).toEqual([]);
     // The creator (photographer1) already got the built-in work_submitted for this
     // move, so the creator rule does not notify them a second time (§7 dedupe).
-    expect((await automationNotices()).map((n) => n.userId).sort()).toEqual([ids.users.manager, ids.users.owner].sort());
+    expect((await automationNotices()).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.owner].sort());
     expect((await runsOf(byKey.id))[0]?.actionsPerformed?.[0]).toMatchObject({ ok: true, detail: "Already notified about this by the built-in notice" });
     await expectClean();
   });
@@ -189,10 +190,10 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
     const assigned = await rule({ type: "job_assigned", role: "editor" }, [{ type: "notify", target: "editor" }]);
     const reassigned = await rule({ type: "job_reassigned", role: "editor" }, [{ type: "notify", target: "previous_editor" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "new" });
-    await runAsThenAutomations("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor1 }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor1 }));
     expect((await runsOf(assigned.id)).map((r) => r.status)).toEqual(["succeeded"]);
     expect(await runsOf(reassigned.id)).toEqual([]);
-    await runAsThenAutomations("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
     expect(await runsOf(assigned.id)).toHaveLength(1);
     expect((await runsOf(reassigned.id)).map((r) => r.status)).toEqual(["succeeded"]);
     // editor1 already got job_assigned / job_reassigned for those very events (§7 dedupe):
@@ -209,15 +210,15 @@ describe("triggers enqueue inside the human transaction (recordEvent hook)", () 
     const note = await rule({ type: "priority_changed", toPriority: "urgent" }, [{ type: "add_note", kind: "internal", body: "Escalated by rule" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     let v = await versionOf(job.id);
-    await runAsThenAutomations("manager", (tx, ctx) => setDueDate(tx, ctx, { jobId: job.id, expectedVersion: v, value: "2026-10-20" }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => setDueDate(tx, ctx, { jobId: job.id, expectedVersion: v, value: "2026-10-20" }));
     expect((await runsOf(due.id)).map((r) => r.status)).toEqual(["succeeded"]);
     expect(await runsOf(review.id)).toEqual([]);
 
     v = await versionOf(job.id);
-    await runAsThenAutomations("manager", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "high" }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "high" }));
     expect(await runsOf(note.id)).toEqual([]);
     v = await versionOf(job.id);
-    await runAsThenAutomations("manager", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "urgent" }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "urgent" }));
     const [noteRun] = await runsOf(note.id);
     expect(noteRun?.status).toBe("succeeded");
     const notes = await db.select().from(jobNotes).where(eq(jobNotes.jobId, job.id));
@@ -233,10 +234,10 @@ describe("actions", () => {
   it("assign_editor previous_editor on revision_requested (assign back)", async () => {
     const back = await rule({ type: "revision_requested" }, [{ type: "assign_editor", target: "previous_editor" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "submitted", editorId: ids.users.editor1 });
-    await runAs("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
+    await runAs("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
     expect(await jobRow(job.id)).toMatchObject({ editorId: ids.users.editor2, previousEditorId: ids.users.editor1 });
     const v = await versionOf(job.id);
-    await runAsThenAutomations("manager", (tx, ctx) =>
+    await runAsThenAutomations("coAdmin", (tx, ctx) =>
       requestRevision(tx, ctx, { jobId: job.id, expectedVersion: v, reason: "Colour", description: "Warmer please" }),
     );
     const [r] = await runsOf(back.id);
@@ -257,9 +258,9 @@ describe("actions", () => {
       [{ field: "editorId", op: "in", values: [ids.users.editor2] }],
     );
     const a = (await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 })).job;
-    await runAs("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: a.id, userId: ids.users.editor2 }));
+    await runAs("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: a.id, userId: ids.users.editor2 }));
     const b = (await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor2 })).job;
-    await bulkSetPriority(await ctxOf("manager"), { jobIds: [a.id, b.id], priority: "urgent" }, { db });
+    await bulkSetPriority(await ctxOf("coAdmin"), { jobIds: [a.id, b.id], priority: "urgent" }, { db });
 
     // bulk ran the rules post-commit (runPerJob wiring)
     expect((await jobRow(a.id)).editorId).toBe(ids.users.editor1);
@@ -275,7 +276,7 @@ describe("actions", () => {
   it("transition toCategory through the engine with the system context", async () => {
     const complete = await rule({ type: "status_changed", toCategory: "approved" }, [{ type: "transition", toCategory: "completed" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "review" });
-    await transition("manager", job.id, "approved");
+    await transition("coAdmin", job.id, "approved");
     const [r] = await runsOf(complete.id);
     expect(r?.status).toBe("succeeded");
     expect((await jobRow(job.id)).statusCategory).toBe("completed");
@@ -288,10 +289,10 @@ describe("actions", () => {
     await expectClean();
   });
 
-  it("set_priority and notify targets (managers / owner / user / creator)", async () => {
+  it("set_priority and notify targets (admins / user / creator)", async () => {
     const pr = await rule({ type: "job_created" }, [
       { type: "set_priority", priority: "urgent" },
-      { type: "notify", target: "owner" },
+      { type: "notify", target: "admins" },
       { type: "notify", target: "user", userId: ids.users.editor2, message: "FYI" },
     ]);
     const { job } = await insertJobFixture(db, ids);
@@ -300,14 +301,15 @@ describe("actions", () => {
     expect(r?.status).toBe("succeeded");
     expect((await jobRow(job.id)).priority).toBe("urgent");
     expect(await eventsOf("job.priority_changed")).toMatchObject([{ automationRunId: r?.id, actorUserId: null }]);
-    expect((await automationNotices()).map((n) => n.userId).sort()).toEqual([ids.users.editor2, ids.users.owner].sort());
+    // roles v2: the legacy "owner" target became "admins" (owner + co-admin)
+    expect((await automationNotices()).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.editor2, ids.users.owner].sort());
     await expectClean();
   });
 });
 
 describe("conditions", () => {
   it("evaluates every condition against the current job; unmet → skipped with the reason", async () => {
-    const urgentOnly = await rule({ type: "job_created" }, [{ type: "notify", target: "managers" }], [{ field: "priority", op: "in", values: ["urgent"] }]);
+    const urgentOnly = await rule({ type: "job_created" }, [{ type: "notify", target: "admins" }], [{ field: "priority", op: "in", values: ["urgent"] }]);
     const noEditor = await rule(
       { type: "job_created" },
       [{ type: "notify", target: "photographer" }],
@@ -340,7 +342,7 @@ describe("engine guarantees", () => {
     const down = await rule({ type: "priority_changed", toPriority: "urgent" }, [{ type: "set_priority", priority: "high" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     const v = await versionOf(job.id);
-    await runAsThenAutomations("manager", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "high" }));
+    await runAsThenAutomations("coAdmin", (tx, ctx) => setPriority(tx, ctx, { jobId: job.id, expectedVersion: v, priority: "high" }));
     const all = await db.select().from(automationRuns).orderBy(asc(automationRuns.depth));
     expect(all.map((r) => [r.depth, r.automationId === up.id ? "up" : r.automationId === down.id ? "down" : "?", r.status])).toEqual([
       [0, "up", "succeeded"],
@@ -389,7 +391,7 @@ describe("engine guarantees", () => {
       for (let i = 0; i < 10; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
     };
     try {
-      const ctx = await ctxOf("manager");
+      const ctx = await ctxOf("coAdmin");
       await withTx(async (tx) => {
         await withSavepoint(tx, (sp) => notify(sp, ctx, { userIds: [ids.users.editor1], type: "comment_added", title: "kept", linkPath: "/" }));
         await expect(
@@ -417,7 +419,7 @@ describe("engine guarantees", () => {
 
   it("kill switch and disabled rules skip pending runs without acting", async () => {
     const a = await rule({ type: "job_created" }, [{ type: "notify", target: "photographer" }]);
-    const b = await rule({ type: "job_created" }, [{ type: "notify", target: "managers" }]);
+    const b = await rule({ type: "job_created" }, [{ type: "notify", target: "admins" }]);
     await db.update(organisationSettings).set({ automationsEnabled: false }).where(eq(organisationSettings.organisationId, ids.organisationId));
     await insertJobFixture(db, ids);
     await drain();
@@ -426,7 +428,7 @@ describe("engine guarantees", () => {
 
     await db.update(organisationSettings).set({ automationsEnabled: true }).where(eq(organisationSettings.organisationId, ids.organisationId));
     await insertJobFixture(db, ids);
-    await runAs("manager", (tx, ctx) => toggleAutomation(tx, ctx, { automationId: b.id, isEnabled: false }));
+    await runAs("coAdmin", (tx, ctx) => toggleAutomation(tx, ctx, { automationId: b.id, isEnabled: false }));
     // b was enqueued while enabled, then disabled before execution
     await drain();
     expect((await runsOf(b.id)).map((r) => [r.status, r.error])).toEqual([
@@ -465,7 +467,7 @@ describe("dryRun", () => {
     const runsBefore = (await db.select().from(automationRuns)).length;
     const eventsBefore = (await db.select().from(activityEvents)).length;
 
-    const res = await dryRun(db, await ctxOf("manager"), { automationId: a.id, jobId: job.id });
+    const res = await dryRun(db, await ctxOf("coAdmin"), { automationId: a.id, jobId: job.id });
     expect(res.trigger).toMatchObject({ type: "status_changed", matched: true });
     expect(res.conditionsMet).toBe(true);
     expect(res.wouldRun).toBe(true);
@@ -476,18 +478,45 @@ describe("dryRun", () => {
     expect(await db.select().from(automationRuns)).toHaveLength(runsBefore);
     expect(await db.select().from(activityEvents)).toHaveLength(eventsBefore);
     const editorCtx = await ctxOf("editor1");
-    const managerCtx = await ctxOf("manager");
+    const adminCtx = await ctxOf("coAdmin");
     expect((await catchErr(() => dryRun(db, editorCtx, { automationId: a.id, jobId: job.id }))).status).toBe(403);
-    expect((await catchErr(() => dryRun(db, managerCtx, { automationId: a.id, jobId: "nope" }))).status).toBe(404);
+    expect((await catchErr(() => dryRun(db, adminCtx, { automationId: a.id, jobId: "nope" }))).status).toBe(404);
   });
 
   it("flags unmet conditions and blocked rules", async () => {
     const a = await rule({ type: "job_created" }, [{ type: "set_priority", priority: "normal" }], [{ field: "editorId", op: "is_not_null" }]);
     const { job } = await insertJobFixture(db, ids, { statusKey: "new" });
-    await runAs("manager", (tx, ctx) => toggleAutomation(tx, ctx, { automationId: a.id, isEnabled: false }));
+    await runAs("coAdmin", (tx, ctx) => toggleAutomation(tx, ctx, { automationId: a.id, isEnabled: false }));
     const res = await dryRun(db, await ctxOf("owner"), { automationId: a.id, jobId: job.id });
     expect(res.conditions).toMatchObject([{ met: false, detail: "the job has no editor" }]);
     expect(res).toMatchObject({ conditionsMet: false, wouldRun: false, blockedBy: "The rule is disabled" });
     expect(res.actions[0]?.problem).toMatch(/Already/);
+  });
+});
+
+describe("roles v2 (docs/ROLES.md §6.3)", () => {
+  it("add_note with kind delivery is rejected on write; a stored one is skipped when the rule runs", async () => {
+    expect((await catchErr(() => rule({ type: "job_created" }, [{ type: "add_note", kind: "delivery", body: "Ready!" }]))).status).toBe(400);
+    // a frozen / legacy definition holding a delivery note action (written before the rule existed)
+    const a = await rule({ type: "job_created" }, [{ type: "add_note", kind: "photographer", body: "Brief" }]);
+    await db.update(automations).set({ actions: [{ type: "add_note", kind: "delivery", body: "Ready!" }] }).where(eq(automations.id, a.id));
+    const { job } = await insertJobFixture(db, ids);
+    await drain();
+    const [r] = await runsOf(a.id);
+    expect(r?.status).toBe("succeeded");
+    expect(r?.actionsPerformed[0]?.detail).toMatch(/^Skipped/);
+    expect(await db.select().from(jobNotes).where(eq(jobNotes.jobId, job.id))).toEqual([]);
+    await expectClean();
+  });
+
+  it("legacy stored notify targets (managers / owner) run as admins; client users are never automation targets", async () => {
+    const a = await rule({ type: "job_created" }, [{ type: "notify", target: "admins" }]);
+    await db.$client.query("UPDATE automations SET actions = $1::jsonb WHERE id = $2", [JSON.stringify([{ type: "notify", target: "managers" }]), a.id]);
+    await insertJobFixture(db, ids);
+    await drain();
+    expect((await automationNotices()).map((n) => n.userId).sort()).toEqual([ids.users.coAdmin, ids.users.owner].sort());
+    expect((await catchErr(() => rule({ type: "job_created" }, [{ type: "notify", target: "user", userId: ids.users.client }]))).status).toBe(400);
+    const legacy = { type: "notify", target: "managers" } as unknown as AutomationAction;
+    expect((await catchErr(() => rule({ type: "job_created" }, [legacy]))).status).toBe(400);
   });
 });

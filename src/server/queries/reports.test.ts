@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { clients, organisationSettings, projects } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import { buildCsv, csvFileName, escapeCsvCell } from "@/lib/csv";
 import { ForbiddenError, NotFoundError, ValidationError } from "@/server/errors";
 import { resolveRangeInput } from "./metrics";
@@ -53,7 +53,7 @@ describe("csv", () => {
 
 describe("ranges", () => {
   it("resolves presets in the org timezone and passes resolved ranges through", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const week = await resolveRangeInput(ctx, { range: "this_week" });
     expect(week).toMatchObject({ preset: "this_week", from: "2026-10-04T13:00:00.000Z", to: "2026-10-11T13:00:00.000Z" });
     const last7 = await resolveRangeInput(ctx, { range: "last_7_days" });
@@ -68,7 +68,7 @@ describe("ranges", () => {
   });
 
   it("this_week honours organisation_settings.week_starts_on", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await db.update(organisationSettings).set({ weekStartsOn: 0 }).where(eq(organisationSettings.organisationId, ids.organisationId));
     const sunday = await resolveRangeInput(ctx, { range: "this_week" }, undefined, { db });
     expect(sunday.from).toBe("2026-10-03T14:00:00.000Z"); // Sun 4 Oct 00:00 AEST (DST starts 02:00 that day)
@@ -77,7 +77,7 @@ describe("ranges", () => {
   });
 
   it("rejects malformed ranges with a 400", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await expect(resolveRangeInput(ctx, { range: "forever" })).rejects.toThrow(ValidationError);
     await expect(resolveRangeInput(ctx, { from: "01/09/2026" })).rejects.toThrow(ValidationError);
     await expect(resolveRangeInput(ctx, { from: "2026-09-30", to: "2026-09-01" })).rejects.toThrow(ValidationError);
@@ -103,7 +103,7 @@ describe("getReport", () => {
 
   it("production: jobs created, approved or completed in range only", async () => {
     const s = await scenario();
-    const r = await getReport(db, await contextFor(db, ids.users.manager), "production", SEPT);
+    const r = await getReport(db, await contextFor(db, ids.users.coAdmin), "production", SEPT);
     expect(r.kind).toBe("production");
     expect(r.title).toContain("Production report");
     const numbers = r.rows.map((x) => x.jobNumber);
@@ -116,7 +116,7 @@ describe("getReport", () => {
 
   it("csv: header from labels, totals last, formula + comma + quote escaping", async () => {
     const s = await scenario();
-    const r = await getReport(db, await contextFor(db, ids.users.manager), "production", SEPT);
+    const r = await getReport(db, await contextFor(db, ids.users.coAdmin), "production", SEPT);
     const csv = toCsv(r);
     const lines = csv.split("\r\n");
     expect(lines[0]).toBe(r.columns.map((c) => c.label).join(","));
@@ -128,14 +128,14 @@ describe("getReport", () => {
   });
 
   it("csv: file name for this_month in October is the civil month", async () => {
-    const r = await getReport(db, await contextFor(db, ids.users.manager), "editors", { range: "this_month" });
+    const r = await getReport(db, await contextFor(db, ids.users.coAdmin), "editors", { range: "this_month" });
     expect(r.range.from).toBe("2026-09-30T14:00:00.000Z"); // 1 Oct 00:00 AEST
     expect(reportFileName(r, "Australia/Sydney")).toBe("editors-report-2026-10-01-2026-10-31.csv");
   });
 
   it("csv: date cells are org-local 'YYYY-MM-DD HH:mm'; deadline columns are civil dates", async () => {
     const s = await scenario();
-    const r = await getReport(db, await contextFor(db, ids.users.manager), "production", SEPT);
+    const r = await getReport(db, await contextFor(db, ids.users.coAdmin), "production", SEPT);
     const lines = toCsv(r, "Australia/Sydney").split("\r\n");
     const header = lines[0].split(",");
     const row = lines.find((l) => l.startsWith(`${s.old.jobNumber},`))?.split(",") ?? [];
@@ -190,9 +190,25 @@ describe("getReport", () => {
     await scenario();
     const other = await seedMinimalOrg(db, { slug: "other" });
     await insertJobFixture(db, other, { statusKey: "new", at: "2026-09-15T00:00:00.000Z", name: "Foreign job" });
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     await expect(getReport(db, ctx, "salaries", SEPT)).rejects.toThrow(NotFoundError);
     await expect(getReport(db, await contextFor(db, ids.users.editor1), "production", SEPT)).rejects.toThrow(ForbiddenError);
     expect(toCsv(await getReport(db, ctx, "production", SEPT))).not.toContain("Foreign job");
+    await expect(getReport(db, await contextFor(db, ids.users.client), "production", SEPT)).rejects.toThrow(ForbiddenError);
+    await expect(getReport(db, await contextFor(db, ids.users.photographer1), "production", SEPT)).rejects.toThrow(ForbiddenError);
+  });
+
+  it("an ⚑analytics member without See all jobs gets only visible jobs in job-level rows (aggregates stay org-wide)", async () => {
+    const s = await scenario();
+    const ownerJob = (await insertJobFixture(db, ids, { statusKey: "new", at: "2026-09-16T00:00:00.000Z", photographerId: ids.users.owner, createdByUserId: ids.users.owner })).job;
+    await setUserFlags(db, ids.users.photographer2, { canViewAnalytics: true });
+    const p2 = await contextFor(db, ids.users.photographer2);
+    const rows = (await getReport(db, p2, "production", SEPT)).rows.map((x) => x.jobNumber);
+    expect(rows).toEqual([]); // photographer2 manages none of these jobs
+    const all = (await getReport(db, await contextFor(db, ids.users.owner), "production", SEPT)).rows.map((x) => x.jobNumber);
+    expect(all).toEqual(expect.arrayContaining([s.old.jobNumber, s.fresh.jobNumber, ownerJob.jobNumber]));
+    // with See all jobs the rows come back
+    await setUserFlags(db, ids.users.photographer2, { canViewAllJobs: true });
+    expect((await getReport(db, await contextFor(db, ids.users.photographer2), "production", SEPT)).rows.map((x) => x.jobNumber).sort()).toEqual([...all].sort());
   });
 });

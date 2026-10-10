@@ -38,7 +38,7 @@ describe("saved views", () => {
     await expect(run(ids.users.editor1, (tx, ctx) => createSavedView(tx, ctx, { name: "Shared", scope: "all_work", config, isShared: true }))).rejects.toThrow(
       ForbiddenError,
     );
-    const shared = await run(ids.users.manager, (tx, ctx) => createSavedView(tx, ctx, { name: "Overdue", scope: "all_work", config, isShared: true }));
+    const shared = await run(ids.users.coAdmin, (tx, ctx) => createSavedView(tx, ctx, { name: "Overdue", scope: "all_work", config, isShared: true }));
 
     // editor2 sees the shared view but not editor1's private one
     const seen = (await listSavedViews(db, await contextFor(db, ids.users.editor2))).map((v) => v.id);
@@ -54,11 +54,11 @@ describe("saved views", () => {
     await expect(run(ids.users.editor1, (tx, ctx) => createSavedView(tx, ctx, { name: "Bad", scope: "everything", config }))).rejects.toThrow(ValidationError);
   });
 
-  it("only the owner edits a private view (others: 404, like GET); managers may edit shared views; others get 403 on shared", async () => {
+  it("only the owner edits a private view (others: 404, like GET); admins may edit shared views; others get 403 on shared", async () => {
     const mine = await run(ids.users.photographer1, (tx, ctx) => createSavedView(tx, ctx, { name: "Mine", scope: "jobs", config }));
     // Someone else's private view is invisible: PATCH/DELETE answer 404 (not 403, which would confirm the id exists).
     await expect(run(ids.users.photographer2, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).rejects.toThrow(NotFoundError);
-    await expect(run(ids.users.manager, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).rejects.toThrow(NotFoundError);
+    await expect(run(ids.users.coAdmin, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "X" }))).rejects.toThrow(NotFoundError);
     await expect(run(ids.users.editor1, (tx, ctx) => deleteSavedView(tx, ctx, { viewId: mine.id }))).rejects.toThrow(NotFoundError);
     const renamed = await run(ids.users.photographer1, (tx, ctx) => updateSavedView(tx, ctx, { viewId: mine.id, name: "Mine v2", expectedVersion: 1 }));
     expect(renamed).toMatchObject({ name: "Mine v2", version: 2 });
@@ -68,8 +68,8 @@ describe("saved views", () => {
     );
 
     const shared = await run(ids.users.owner, (tx, ctx) => createSavedView(tx, ctx, { name: "Team", scope: "kanban", config, isShared: true }));
-    expect((await run(ids.users.manager, (tx, ctx) => updateSavedView(tx, ctx, { viewId: shared.id, name: "Team board" }))).name).toBe("Team board");
-    // A shared view is visible to everyone, so a non-manager gets a real 403.
+    expect((await run(ids.users.coAdmin, (tx, ctx) => updateSavedView(tx, ctx, { viewId: shared.id, name: "Team board" }))).name).toBe("Team board");
+    // A shared view is visible to everyone, so a non-admin gets a real 403.
     await expect(run(ids.users.editor1, (tx, ctx) => updateSavedView(tx, ctx, { viewId: shared.id, name: "Mine now" }))).rejects.toThrow(ForbiddenError);
     await expect(run(ids.users.editor1, (tx, ctx) => deleteSavedView(tx, ctx, { viewId: shared.id }))).rejects.toThrow(ForbiddenError);
 

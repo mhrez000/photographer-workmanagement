@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ChevronRight, SearchX, UserPlus, Users } from "lucide-react";
+import { ChevronRight, SearchX, Store, UserPlus, Users } from "lucide-react";
 import { PageContainer } from "@/components/shell/page-container";
-import { UsersToolbar } from "@/components/settings/users-toolbar";
+import { PERSONA_BADGE } from "@/components/settings/permission-copy";
+import { RolesMigrationNotice } from "@/components/settings/roles-notice";
+import { TEAM_PERSONA_FILTERS, UsersToolbar, type TeamPersonaFilter } from "@/components/settings/users-toolbar";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,9 +12,12 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
-import { ROLES, ROLE_LABELS, type Role } from "@/lib/constants";
+import { STAFF_ROLES, personaLabel, personaOfUser } from "@/lib/constants";
 import { formatDateTime, formatRelative } from "@/lib/dates";
-import type { TeamRef, UserProfile, UserRef } from "@/lib/types";
+import type { ReducedUser, TeamRef, UserProfile } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { listClients } from "@/server/queries/clients";
+import { getRolesNotice } from "@/server/queries/roles-notice";
 import { getSettingsView } from "@/server/queries/settings";
 import { teamsByUser } from "@/server/queries/teams";
 import { listUsers } from "@/server/queries/users";
@@ -20,16 +25,45 @@ import { allowed, guard, load, pageContext, param } from "@/server/page";
 
 export const metadata: Metadata = { title: "Users" };
 
-function isProfile(u: UserProfile | UserRef): u is UserProfile {
+function isProfile(u: UserProfile | ReducedUser): u is UserProfile {
   return "email" in u;
 }
 
-const ROLE_BADGE: Record<Role, "solid" | "accent" | "info" | "neutral"> = {
-  owner: "solid",
-  manager: "accent",
-  photographer: "info",
-  editor: "neutral",
-};
+/** Persona badge + "Owner" marker for the primary owner (docs/ROLES.md §6.1, §11). */
+function RoleCell({ user, isPrimaryOwner, clientName }: { user: UserProfile; isPrimaryOwner: boolean; clientName?: string | null }) {
+  return (
+    <span className="flex flex-col items-start gap-0.5">
+      <span className="flex flex-wrap items-center gap-1">
+        <Badge variant={PERSONA_BADGE[personaOfUser(user)]} size="sm">
+          {personaLabel(user)}
+        </Badge>
+        {isPrimaryOwner ? (
+          <Badge variant="accent" size="sm">
+            Owner
+          </Badge>
+        ) : null}
+      </span>
+      {user.role === "client" && clientName ? <span className="text-xs text-ink-muted">{clientName}</span> : null}
+      {user.title ? <span className="text-xs text-ink-muted">{user.title}</span> : null}
+    </span>
+  );
+}
+
+function TabLink({ href, active, children, count }: { href: string; active: boolean; children: React.ReactNode; count?: number }) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "-mb-px inline-flex items-center gap-2 rounded-t-xs border-b-2 px-1 pb-2.5 text-sm font-medium focus-ring",
+        active ? "border-accent text-ink" : "border-transparent text-ink-muted hover:text-ink",
+      )}
+    >
+      {children}
+      {count !== undefined ? <span className="numeric text-xs text-ink-subtle">{count}</span> : null}
+    </Link>
+  );
+}
 
 function TeamList({ teams }: { teams: TeamRef[] }) {
   if (teams.length === 0) return <span className="text-ink-subtle">—</span>;
@@ -48,37 +82,67 @@ export default async function UsersSettingsPage({ searchParams }: PageProps<"/se
   const { ctx, db } = await pageContext();
   guard(ctx, "settings.view");
   const sp = await searchParams;
+  const tab = param(sp, "tab") === "clients" ? "clients" : "team";
   const q = param(sp, "q")?.trim() || undefined;
-  const roleParam = param(sp, "role");
-  const role = roleParam && (ROLES as readonly string[]).includes(roleParam) ? (roleParam as Role) : undefined;
+  const personaParam = param(sp, "persona");
+  const persona =
+    tab === "team" && personaParam && (TEAM_PERSONA_FILTERS as readonly string[]).includes(personaParam) ? (personaParam as TeamPersonaFilter) : undefined;
   const status = param(sp, "status") ?? "active";
   const active = status === "all" ? undefined : status === "inactive" ? "0" : "1";
 
   const tz = ctx.settings.timezone;
-  const settings = (await load(() => getSettingsView(db, ctx))).settings;
-  const users = (await load(() => listUsers(db, ctx, { q, role, active }))).filter(isProfile);
+  const view = await load(() => getSettingsView(db, ctx));
+  const settings = view.settings;
+  const primaryOwnerId = settings.primaryOwnerUserId ?? null;
+  const everyone = (await load(() => listUsers(db, ctx, { q, active }))).filter(isProfile);
+  const teamAll = everyone.filter((u) => (STAFF_ROLES as readonly string[]).includes(u.role));
+  const clientUsers = everyone.filter((u) => u.role === "client");
+  const users = tab === "clients" ? clientUsers : persona ? teamAll.filter((u) => personaOfUser(u) === persona) : teamAll;
   const teams = await teamsByUser(
     db,
     ctx,
     users.map((u) => u.id),
   );
+  const allClients = await load(() => listClients(db, ctx, { includeArchived: true }));
+  const clientNames = new Map(allClients.map((c) => [c.client.id, c.client.name]));
+  const portalClients = allClients
+    .filter((c) => c.client.portalEnabled && c.client.archivedAt === null)
+    .map((c) => ({ id: c.client.id, name: c.client.name }));
   const canInvite = allowed(ctx, "user.invite");
-  const filtered = Boolean(q || role || status !== "active");
+  // One-time post-migration card (docs/ROLES.md §1.5); null on fresh organisations.
+  const notice = await load(() => getRolesNotice(db, ctx));
+  const filtered = Boolean(q || persona || status !== "active");
   const capacityOf = (u: UserProfile) => u.capacityHoursPerWeek ?? settings.defaultCapacityHoursPerWeek;
+  const tabHref = (t: "team" | "clients") => (t === "clients" ? "/settings/users?tab=clients" : "/settings/users");
 
   return (
     <PageContainer>
       <PageHeader
         eyebrow="Settings"
         title="Users"
-        description="Everyone with access to the studio. Deactivated people keep their history; nothing is ever deleted."
+        description="Your photographers, editors and client portal users. Deactivated people keep their history; nothing is ever deleted."
         meta={
           <Badge variant="neutral" className="numeric">
             {users.length}
           </Badge>
         }
       />
-      <UsersToolbar viewerRole={ctx.role} canInvite={canInvite} defaultCapacity={settings.defaultCapacityHoursPerWeek} />
+      {notice ? <RolesMigrationNotice {...notice} /> : null}
+      <nav aria-label="User lists" className="flex gap-5 border-b border-border">
+        <TabLink href={tabHref("team")} active={tab === "team"} count={teamAll.length}>
+          <Users aria-hidden="true" className="size-4" /> Team
+        </TabLink>
+        <TabLink href={tabHref("clients")} active={tab === "clients"} count={clientUsers.length}>
+          <Store aria-hidden="true" className="size-4" /> Client portal users
+        </TabLink>
+      </nav>
+      <UsersToolbar
+        tab={tab}
+        canInvite={canInvite}
+        defaultCapacity={settings.defaultCapacityHoursPerWeek}
+        studioName={view.organisation.name}
+        portalClients={portalClients}
+      />
 
       {users.length === 0 ? (
         <Card>
@@ -88,20 +152,27 @@ export default async function UsersSettingsPage({ searchParams }: PageProps<"/se
               title="No one matches these filters"
               description="Try another name, role or status — deactivated people are under “Deactivated”."
               action={
-                <Button variant="outline" href="/settings/users">
+                <Button variant="outline" href={tabHref(tab)}>
                   Clear filters
                 </Button>
               }
             />
           ) : (
             <EmptyState
-              icon={Users}
-              title="No users yet"
-              description="Invite your photographers and editors to start assigning work."
+              icon={tab === "clients" ? Store : Users}
+              title={tab === "clients" ? "No client portal users yet" : "No users yet"}
+              description={
+                tab === "clients"
+                  ? "Turn on the portal on a client's page, then invite the people who work for them. They only see work you share."
+                  : "Invite your photographers and editors to start assigning work."
+              }
               action={
                 canInvite ? (
-                  <Button href="/settings/users?invite=1" leadingIcon={<UserPlus aria-hidden="true" />}>
-                    Invite user
+                  <Button
+                    href={tab === "clients" ? "/settings/users?tab=clients&invite=client" : "/settings/users?invite=1"}
+                    leadingIcon={<UserPlus aria-hidden="true" />}
+                  >
+                    {tab === "clients" ? "Invite client user" : "Invite someone"}
                   </Button>
                 ) : undefined
               }
@@ -139,18 +210,21 @@ export default async function UsersSettingsPage({ searchParams }: PageProps<"/se
                       </Link>
                     </TD>
                     <TD>
-                      <Badge variant={ROLE_BADGE[u.role]} size="sm">
-                        {ROLE_LABELS[u.role]}
-                      </Badge>
-                      {u.title ? <span className="mt-0.5 block text-xs text-ink-muted">{u.title}</span> : null}
+                      <RoleCell user={u} isPrimaryOwner={u.id === primaryOwnerId} clientName={u.clientId ? clientNames.get(u.clientId) : null} />
                     </TD>
                     <TD>
                       <TeamList teams={teams.get(u.id) ?? []} />
                     </TD>
                     <TD numeric>
-                      <span className="text-ink">{capacityOf(u)}</span>
-                      <span className="text-ink-subtle"> h</span>
-                      {u.capacityHoursPerWeek === null ? <span className="block text-2xs text-ink-subtle">default</span> : null}
+                      {u.role === "client" ? (
+                        <span className="text-ink-subtle">—</span>
+                      ) : (
+                        <>
+                          <span className="text-ink">{capacityOf(u)}</span>
+                          <span className="text-ink-subtle"> h</span>
+                          {u.capacityHoursPerWeek === null ? <span className="block text-2xs text-ink-subtle">default</span> : null}
+                        </>
+                      )}
                     </TD>
                     <TD>
                       {u.anonymisedAt ? (
@@ -211,7 +285,11 @@ export default async function UsersSettingsPage({ searchParams }: PageProps<"/se
                     </div>
                     <p className="truncate text-sm text-ink-muted">{u.email}</p>
                     <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-ink-muted">
-                      <span className="font-medium text-ink-secondary">{ROLE_LABELS[u.role]}</span>
+                      <span className="font-medium text-ink-secondary">
+                        {personaLabel(u)}
+                        {u.id === primaryOwnerId ? " · Owner" : ""}
+                        {u.role === "client" && u.clientId ? ` · ${clientNames.get(u.clientId) ?? ""}` : ""}
+                      </span>
                       <span aria-hidden="true">·</span>
                       <span className="numeric">{capacityOf(u)} h/wk</span>
                       <span aria-hidden="true">·</span>

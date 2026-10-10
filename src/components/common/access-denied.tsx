@@ -19,7 +19,7 @@ export interface AccessDeniedProps {
  */
 export function AccessDenied({
   title = "You don't have access to this",
-  description = "Your role doesn't include this area. If you think you need it, ask an owner or manager to update your permissions.",
+  description = "Your role doesn't include this area. If you think you need it, ask the studio owner to update your permissions.",
   action,
   compact = false,
   className,

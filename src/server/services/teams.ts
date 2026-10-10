@@ -1,18 +1,23 @@
 /**
  * Teams service (ARCHITECTURE.md §2.1 teams / team_memberships, §5 team.*).
- * `team.manage` = owner / manager. Memberships are a LEDGER: adding inserts a
- * row, removing fills `left_at` + `removed_by_user_id` once; rows are never
- * deleted. Archiving a team leaves memberships untouched — "active
- * teammates" already exclude archived teams.
+ * `team.manage` = admins (docs/ROLES.md §3.3). Memberships are a LEDGER:
+ * adding inserts a row, removing fills `left_at` + `removed_by_user_id` once;
+ * rows are never deleted. Archiving a team leaves memberships untouched —
+ * "active teammates" already exclude archived teams.
+ *
+ * Roles v2: teams only GROUP people (filters, settings); they no longer drive
+ * job visibility. Members and leads are allow-listed (§3.4): in-org, active,
+ * role ∈ STAFF_ROLES — a client user → 422.
  */
 import { and, eq, isNull } from "drizzle-orm";
 import { teamMemberships, teams } from "@/db/schema";
+import { STAFF_ROLES, type Role } from "@/lib/constants";
 import type { AuthContext, Team, TeamMembership, User } from "@/lib/types";
 import { ArchiveTeamInput, CreateTeamInput, TeamMemberInput, UpdateTeamInput } from "@/lib/validation/teams";
 import { recordEvent } from "@/server/audit";
 import { assertCan } from "@/server/auth/permissions";
 import { first, loadTeamInOrg, one, loadUserInOrg, loadUsersInOrg, parseInput, type DbLike, type Tx } from "./_shared";
-import { checkVersion, diffFields, ruleViolation } from "./_admin";
+import { UserRuleError, checkVersion, diffFields, ruleViolation } from "./_admin";
 
 async function assertNameFree(db: DbLike, ctx: AuthContext, name: string, exceptTeamId?: string): Promise<void> {
   const rows = await db.select({ id: teams.id, name: teams.name }).from(teams).where(eq(teams.organisationId, ctx.organisationId));
@@ -20,7 +25,11 @@ async function assertNameFree(db: DbLike, ctx: AuthContext, name: string, except
   if (clash) throw ruleViolation("A team with this name already exists", {}, "name");
 }
 
+/** Allow-list for members and leads (§3.4): active staff (photographer or editor) of the organisation. */
 function assertActiveUser(user: User, field: string): void {
+  if (!(STAFF_ROLES as readonly Role[]).includes(user.role)) {
+    throw new UserRuleError("not_staff", `${user.name} is a client portal user and can't join a team`, field);
+  }
   if (!user.isActive) throw ruleViolation(`${user.name} is deactivated`, {}, field);
 }
 

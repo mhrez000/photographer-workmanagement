@@ -4,24 +4,19 @@ import * as React from "react";
 import { usePathname } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  mobileTabsForRole,
-  navigationForRole,
-  quickActionsForRole,
-  resolveRouteTitle,
-  type NavGrants,
-} from "@/config/nav";
+import { mobileTabsFor, navigationFor, quickActionsFor, resolveRouteTitle, type NavGates } from "@/config/nav";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetBody, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Toaster } from "@/components/ui/toast";
+import type { ViewScope } from "@/lib/constants";
 import { Brand } from "./brand-mark";
 import { MobileTabBar } from "./mobile-tab-bar";
 import { NavList } from "./nav-list";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
-import { OPEN_SEARCH_EVENT, ROLE_LABELS, type ShellUser } from "./types";
+import { OPEN_SEARCH_EVENT, shellRoleLabel, type ShellUser } from "./types";
 import { useIsMac, useSidebarCollapsed } from "./use-shell-state";
 
 export interface AppShellProps {
@@ -37,8 +32,10 @@ export interface AppShellProps {
   title?: React.ReactNode;
   /** Toast position. */
   toasterPosition?: "bottom-right" | "bottom-center" | "top-right" | "top-center";
-  /** Per-user / org grants that reveal extra nav items (e.g. Insights for a photographer with analytics). */
-  navGrants?: NavGrants;
+  /** Navigation gates computed server-side with can() (docs/ROLES.md §10). */
+  navGates: NavGates;
+  /** Resolved "My shoots | Whole business" scope for viewers who may switch (docs/ROLES.md §8); null = no switch. */
+  viewScope?: ViewScope | null;
 }
 
 /**
@@ -54,7 +51,8 @@ export function AppShell({
   logoutAction = "/api/auth/logout",
   title,
   toasterPosition = "bottom-right",
-  navGrants,
+  navGates,
+  viewScope = null,
 }: AppShellProps) {
   const pathname = usePathname();
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
@@ -68,12 +66,9 @@ export function AppShell({
     if (mobileNavOpen) setMobileNavOpen(false);
   }
 
-  const groups = React.useMemo(() => navigationForRole(user.role, navGrants), [user.role, navGrants]);
-  const tabs = React.useMemo(() => mobileTabsForRole(user.role), [user.role]);
-  const primaryAction = React.useMemo(
-    () => quickActionsForRole(user.role).find((action) => action.primary),
-    [user.role],
-  );
+  const groups = React.useMemo(() => navigationFor(navGates), [navGates]);
+  const tabs = React.useMemo(() => mobileTabsFor(navGates), [navGates]);
+  const primaryAction = React.useMemo(() => quickActionsFor(navGates).find((action) => action.primary), [navGates]);
   const heading = React.useMemo(() => resolveRouteTitle(pathname, groups), [pathname, groups]);
 
   const openSearch = React.useCallback(() => {
@@ -141,6 +136,7 @@ export function AppShell({
           onOpenSearch={openSearch}
           primaryAction={primaryAction}
           logoutAction={logoutAction}
+          viewScope={viewScope}
         />
         <main
           id="main"
@@ -175,7 +171,7 @@ export function AppShell({
               <div className="truncate text-xs text-ink-muted">{user.email}</div>
             </div>
             <Badge variant="outline" size="sm">
-              {ROLE_LABELS[user.role]}
+              {shellRoleLabel(user)}
             </Badge>
           </div>
           <form action={logoutAction} method="post" className="mt-1">

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { organisationSettings, users } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import type { BottleneckKind } from "@/lib/constants";
 import { ForbiddenError } from "@/server/errors";
 import { computeBottlenecks, getBottlenecks } from "./bottlenecks";
@@ -40,7 +40,7 @@ afterEach(() => fakeClock.reset());
 
 /** Fixtures default to "fresh" activity so the stalled rule stays quiet unless a test wants it. */
 const job = async (o: Parameters<typeof insertJobFixture>[2]) => (await insertJobFixture(db, ids, { at: ago(H), ...o })).job;
-const alerts = async () => computeBottlenecks(db, await contextFor(db, ids.users.manager));
+const alerts = async () => computeBottlenecks(db, await contextFor(db, ids.users.coAdmin));
 const kinds = async () => (await alerts()).map((a) => a.kind);
 const alert = async (k: BottleneckKind) => (await alerts()).find((a) => a.kind === k);
 
@@ -57,7 +57,7 @@ describe("bottleneck rules fire exactly at their thresholds", () => {
     // the drill-down reproduces the 3, not every reviewer-held job (4)
     const url = new URL(a?.href ?? "", "http://x");
     expect(url.searchParams.get("statusEnteredBefore")).toBe(ago(24 * H));
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     expect((await listJobs(db, ctx, Object.fromEntries(url.searchParams))).total).toBe(a?.count);
     expect((await listJobs(db, ctx, { quick: "awaiting_review" })).total).toBe(4);
   });
@@ -83,7 +83,7 @@ describe("bottleneck rules fire exactly at their thresholds", () => {
     expect(a?.count).toBe(3);
     expect(a?.jobs).toHaveLength(3);
     const url = new URL(a?.href ?? "", "http://x");
-    expect((await listJobs(db, await contextFor(db, ids.users.manager), Object.fromEntries(url.searchParams))).total).toBe(a?.count);
+    expect((await listJobs(db, await contextFor(db, ids.users.coAdmin), Object.fromEntries(url.searchParams))).total).toBe(a?.count);
   });
 
   it("revision_spike: ≥ min revisions in the last 7 days with a zero baseline", async () => {
@@ -114,11 +114,11 @@ describe("bottleneck rules fire exactly at their thresholds", () => {
     expect(a?.jobs.map((x) => x.id).sort()).toEqual([a1.id, a2.id].sort());
     const url = new URL(a?.href ?? "", "http://x");
     expect(url.searchParams.get("revisedFrom")).toBe(ago(7 * D));
-    const list = await listJobs(db, await contextFor(db, ids.users.manager), Object.fromEntries(url.searchParams));
+    const list = await listJobs(db, await contextFor(db, ids.users.coAdmin), Object.fromEntries(url.searchParams));
     expect(list.total).toBe(a?.count);
     expect(list.rows.map((r) => r.id).sort()).toEqual([a1.id, a2.id].sort());
     // revisedTo narrows the window
-    const narrowed = await listJobs(db, await contextFor(db, ids.users.manager), { revisedFrom: ago(7 * D), revisedTo: ago(2 * D + 1) });
+    const narrowed = await listJobs(db, await contextFor(db, ids.users.coAdmin), { revisedFrom: ago(7 * D), revisedTo: ago(2 * D + 1) });
     expect(narrowed.rows.map((r) => r.id)).toEqual([a2.id]);
   });
 
@@ -217,10 +217,23 @@ describe("getBottlenecks permissions", () => {
     const dash = (await getDashboard(db, p1)).bottlenecks.find((a) => a.kind === "unassigned_backlog");
     expect(dash?.jobs.map((j) => j.id).sort()).toEqual(mine.map((j) => j.id).sort());
     expect(dash?.hiddenJobCount).toBe(3);
-    // management still gets every ref
-    const m = (await getBottlenecks(db, await contextFor(db, ids.users.manager))).find((a) => a.kind === "unassigned_backlog");
+    // admins still get every ref
+    const m = (await getBottlenecks(db, await contextFor(db, ids.users.coAdmin))).find((a) => a.kind === "unassigned_backlog");
     expect(m?.jobs).toHaveLength(5);
     expect(m?.hiddenJobCount).toBe(0);
+  });
+
+  it("clients never get bottlenecks; ⚑analytics members get job refs only for visible jobs", async () => {
+    await expect(getBottlenecks(db, await contextFor(db, ids.users.client))).rejects.toThrow(/permission/);
+    // The lead has analytics AND "See all jobs": every ref is visible.
+    for (let i = 0; i < 5; i += 1) await insertJobFixture(db, ids, { statusKey: "new", createdByUserId: ids.users.owner, photographerId: ids.users.owner });
+    const lead = (await getBottlenecks(db, await contextFor(db, ids.users.lead))).find((a) => a.kind === "unassigned_backlog");
+    expect(lead?.hiddenJobCount).toBe(0);
+    await setUserFlags(db, ids.users.lead, { canViewAllJobs: false });
+    const narrowed = (await getBottlenecks(db, await contextFor(db, ids.users.lead))).find((a) => a.kind === "unassigned_backlog");
+    expect(narrowed?.count).toBe(lead?.count);
+    expect(narrowed?.jobs).toHaveLength(0);
+    expect(narrowed?.hiddenJobCount).toBe(lead?.jobs.length);
   });
 
   it("never includes another organisation's jobs", async () => {

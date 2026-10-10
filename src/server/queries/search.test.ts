@@ -3,6 +3,7 @@ import { clients, jobComments, jobNotes, projects } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { newId } from "@/lib/ids";
 import { globalSearch } from "./search";
+import { reattribute } from "./test-history";
 
 let db: TestDb;
 let ids: SeedIds;
@@ -77,11 +78,11 @@ describe("globalSearch", () => {
     expect((await globalSearch(db, await ctxOf("owner"), "harbour")).jobs).toHaveLength(2);
   });
 
-  it("never matches internal notes for photographers / editors, archived notes or deleted comments", async () => {
+  it("internal notes: admins any job, members only jobs they manage, editors never; archived notes / deleted comments never", async () => {
     const j = await job({ statusKey: "in_progress", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
     await db
       .insert(jobNotes)
-      .values({ organisationId: ids.organisationId, jobId: j.id, kind: "internal", body: "client pays late", authorUserId: ids.users.manager });
+      .values({ organisationId: ids.organisationId, jobId: j.id, kind: "internal", body: "client pays late", authorUserId: ids.users.owner });
     await db
       .insert(jobNotes)
       .values({
@@ -104,11 +105,18 @@ describe("globalSearch", () => {
         body: "removed words",
         deletedAt: "2026-10-07T00:00:00.000Z",
       });
-    expect((await globalSearch(db, await ctxOf("manager"), "pays late")).jobs).toHaveLength(1);
+    expect((await globalSearch(db, await ctxOf("coAdmin"), "pays late")).jobs).toHaveLength(1);
     expect((await globalSearch(db, await ctxOf("editor1"), "pays late")).jobs).toHaveLength(0);
-    expect((await globalSearch(db, await ctxOf("photographer1"), "pays late")).jobs).toHaveLength(0);
-    expect((await globalSearch(db, await ctxOf("manager"), "old lut")).jobs).toHaveLength(0);
-    expect((await globalSearch(db, await ctxOf("manager"), "removed words")).jobs).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("photographer1"), "pays late")).jobs).toHaveLength(1); // manages the job
+    // a ⚑all member sees the job but gets no internal-note hit on someone else's job (no content oracle)
+    expect((await globalSearch(db, await ctxOf("lead"), j.jobNumber)).jobs).toHaveLength(1);
+    expect((await globalSearch(db, await ctxOf("lead"), "pays late")).jobs).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("coAdmin"), "old lut")).jobs).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("coAdmin"), "removed words")).jobs).toHaveLength(0);
+    // client notes: never for editors
+    await db.insert(jobNotes).values({ organisationId: ids.organisationId, jobId: j.id, kind: "client", body: "prefers email", authorUserId: ids.users.owner });
+    expect((await globalSearch(db, await ctxOf("editor1"), "prefers email")).jobs).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("photographer1"), "prefers email")).jobs).toHaveLength(1);
   });
 
   it("never returns another organisation's jobs, clients, projects or people", async () => {
@@ -130,11 +138,34 @@ describe("globalSearch", () => {
     expect((await globalSearch(db, await ctxOf("editor1"), "coastal")).projects).toEqual([]);
     expect((await globalSearch(db, await ctxOf("editor1"), "harbour")).clients.map((c) => c.id)).toEqual([ids.clientId]);
     expect((await globalSearch(db, await ctxOf("editor1"), "smith")).projects.map((p) => p.client.name)).toEqual(["Harbour Realty"]);
-    expect((await globalSearch(db, await ctxOf("photographer1"), "coastal")).clients.map((c) => c.name)).toEqual(["Coastal Homes"]);
+    expect((await globalSearch(db, await ctxOf("photographer1"), "coastal")).clients.map((c) => c.name)).toEqual(["Coastal Homes", "Coastal Key Property"]);
     expect((await globalSearch(db, await ctxOf("owner"), "Iris")).users).toEqual([]);
-    // Emails are searchable only for management.
+    // Emails are searchable only for admins; editors get no people results at all (team.view_members).
     expect((await globalSearch(db, await ctxOf("owner"), "editor01@")).users).toHaveLength(1);
-    expect((await globalSearch(db, await ctxOf("editor1"), "editor01@")).users).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("photographer1"), "editor01@")).users).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("editor1"), "Eve")).users).toHaveLength(0);
+  });
+
+  it("people search never returns client portal users to team members; admins find them", async () => {
+    expect((await globalSearch(db, await ctxOf("photographer1"), "Cleo")).users).toEqual([]);
+    expect((await globalSearch(db, await ctxOf("owner"), "Cleo")).users.map((u) => u.id)).toEqual([ids.users.client]);
+  });
+
+  it("clients (portal users) cannot search the studio (403)", async () => {
+    await job({ name: "Harbour shared", sharedWithClient: true, statusKey: "delivered" });
+    await expect(globalSearch(db, await ctxOf("client"), "harbour")).rejects.toThrow(/permission/);
+  });
+
+  it("an editor's past job only matches comments up to their cut-off (and their own)", async () => {
+    const j = await job({ statusKey: "in_progress", editorId: ids.users.editor1 });
+    await db.insert(jobComments).values({ organisationId: ids.organisationId, jobId: j.id, authorUserId: ids.users.photographer1, body: "early sunset note", createdAt: fakeClock.now() });
+    fakeClock.advanceMinutes(5);
+    await reattribute(db, ids, j.id, ids.users.editor2, fakeClock.now());
+    fakeClock.advanceMinutes(5);
+    await db.insert(jobComments).values({ organisationId: ids.organisationId, jobId: j.id, authorUserId: ids.users.photographer1, body: "late sunset note", createdAt: fakeClock.now() });
+    expect((await globalSearch(db, await ctxOf("editor1"), "early sunset")).jobs).toHaveLength(1);
+    expect((await globalSearch(db, await ctxOf("editor1"), "late sunset")).jobs).toHaveLength(0);
+    expect((await globalSearch(db, await ctxOf("editor2"), "late sunset")).jobs).toHaveLength(1);
   });
 
   it("returns empty results for a blank query", async () => {

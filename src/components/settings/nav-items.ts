@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import { Bell, Building2, CircleUser, KeyRound, LifeBuoy, Palette, Tag, Users, UsersRound, Workflow, Zap } from "lucide-react";
-import type { Role } from "@/lib/constants";
 
 export interface SettingsNavItem {
   href: string;
@@ -16,9 +15,9 @@ export interface SettingsNavSection {
 }
 
 const STUDIO: SettingsNavItem[] = [
-  { href: "/settings/organisation", label: "Organisation", icon: Building2, description: "Name, timezone, thresholds, visibility" },
-  { href: "/settings/users", label: "Users", icon: Users, description: "Invite people and manage access" },
-  { href: "/settings/roles", label: "Roles", icon: KeyRound, description: "What each role can see and do" },
+  { href: "/settings/organisation", label: "Organisation", icon: Building2, description: "Name, timezone, thresholds, default photographer" },
+  { href: "/settings/users", label: "Users", icon: Users, description: "Invite people, admins and permission switches" },
+  { href: "/settings/roles", label: "Roles", icon: KeyRound, description: "Photographer, Editor, Client: who can do what" },
   { href: "/settings/teams", label: "Teams", icon: UsersRound, description: "Groups, leads and memberships" },
   { href: "/settings/workflows", label: "Workflows", icon: Workflow, description: "Statuses and transitions" },
   { href: "/settings/job-types", label: "Job types", icon: Tag, description: "Types, workflows and default hours" },
@@ -26,17 +25,20 @@ const STUDIO: SettingsNavItem[] = [
 ];
 
 const PERSONAL: SettingsNavItem[] = [
-  { href: "/settings/profile", label: "Profile", icon: CircleUser, description: "Name, avatar and password" },
+  { href: "/settings/profile", label: "Profile", icon: CircleUser, description: "Name, avatar, password and your access" },
   { href: "/settings/notifications", label: "Notifications", icon: Bell, description: "What you're notified about" },
   { href: "/settings/appearance", label: "Appearance", icon: Palette, description: "Theme and density on this device" },
 ];
 
 const HELP: SettingsNavItem[] = [{ href: "/help", label: "Help & shortcuts", icon: LifeBuoy, description: "Shortcuts, statuses, roles" }];
 
-/** Settings sub-navigation for a role. Studio settings are owner/manager only (settings.view). */
-export function settingsNavFor(role: Role): SettingsNavSection[] {
+/**
+ * Settings sub-navigation. Studio settings are for admins only (`settings.view`,
+ * docs/ROLES.md §10): pass `showStudio = allowed(ctx, "settings.view")`.
+ */
+export function settingsNavFor(showStudio: boolean): SettingsNavSection[] {
   const sections: SettingsNavSection[] = [];
-  if (role === "owner" || role === "manager") sections.push({ id: "studio", label: "Studio", items: STUDIO });
+  if (showStudio) sections.push({ id: "studio", label: "Studio", items: STUDIO });
   sections.push({ id: "personal", label: "Personal", items: PERSONAL });
   sections.push({ id: "help", label: "Support", items: HELP });
   return sections;

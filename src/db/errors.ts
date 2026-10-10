@@ -78,3 +78,9 @@ export function isUniqueViolation(err: unknown, constraint?: string): boolean {
 export function isGuardViolation(err: unknown): boolean {
   return pgError(err)?.code === PG_CODES.raiseException;
 }
+
+/** check_violation (optionally on one named CHECK constraint, e.g. "users_role_ck"). */
+export function isCheckViolation(err: unknown, constraint?: string): boolean {
+  const pg = pgError(err);
+  return pg?.code === PG_CODES.checkViolation && (constraint === undefined || pg.constraint === constraint);
+}

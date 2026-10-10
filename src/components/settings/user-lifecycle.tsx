@@ -16,7 +16,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import type { Role } from "@/lib/constants";
 import type { UserProfile } from "@/lib/types";
 import { TempPasswordPanel } from "./temp-password-panel";
 import { useConflict } from "./use-conflict";
@@ -29,11 +28,22 @@ export interface OpenJobBrief {
   statusColour: string;
 }
 
+/** What the viewer may do to this account (computed server-side with `can()`, docs/ROLES.md §3.3–§3.4). */
+export interface LifecycleAccess {
+  resetPassword: boolean;
+  deactivate: boolean;
+  reactivate: boolean;
+  anonymise: boolean;
+  /** Why every control is locked (e.g. "Only Hannah Brooks can change their own account"). */
+  lockedReason?: string | null;
+}
+
 export interface UserLifecycleProps {
   profile: UserProfile;
-  viewerRole: Role;
-  canManage: boolean;
+  access: LifecycleAccess;
   isSelf: boolean;
+  /** Deactivating an admin also removes admin (docs/ROLES.md §3.4). */
+  targetIsAdmin?: boolean;
   editorJobs: OpenJobBrief[];
   photographerJobs: OpenJobBrief[];
   timeZone: string;
@@ -285,7 +295,7 @@ function AnonymiseDialog({ open, onOpenChange, profile, onConflict }: { open: bo
 /* ------------------------------------------------------------------ */
 
 /** Password reset, deactivate / reactivate, anonymise. */
-export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, editorJobs, photographerJobs, timeZone }: UserLifecycleProps) {
+export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = false, editorJobs, photographerJobs, timeZone }: UserLifecycleProps) {
   const run = useMutationRunner();
   const { onConflict, dialog } = useConflict("user", timeZone);
   const [resetOpen, setResetOpen] = React.useState(false);
@@ -303,15 +313,16 @@ export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, edit
           <Link href="/settings/profile" className="font-medium text-accent-ink hover:underline">
             your profile
           </Link>
-          . Another owner must deactivate or demote you.
+          . Another admin must deactivate you; nobody can deactivate the primary owner.
         </p>
       </SectionCard>
     );
   }
-  if (!canManage) {
+  const anyControl = access.resetPassword || access.deactivate || access.reactivate || access.anonymise;
+  if (!anyControl) {
     return (
       <SectionCard title="Account">
-        <p className="text-sm text-ink-muted">Only an owner can manage this person’s account.</p>
+        <p className="text-sm text-ink-muted">{access.lockedReason ?? "Only an admin can manage this person’s account."}</p>
       </SectionCard>
     );
   }
@@ -328,7 +339,7 @@ export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, edit
   return (
     <SectionCard title="Account" description="Sign-in, access and data retention." tone={profile.isActive ? "default" : "muted"}>
       <div className="flex flex-col divide-y divide-border">
-        {!anonymised ? (
+        {!anonymised && access.resetPassword ? (
           <div className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Reset password</p>
@@ -340,19 +351,20 @@ export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, edit
           </div>
         ) : null}
 
-        {profile.isActive ? (
+        {profile.isActive && access.deactivate ? (
           <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Deactivate</p>
               <p className="text-sm text-ink-muted">
                 Removes access immediately{editorJobs.length > 0 ? ` and hands over ${editorJobs.length} open job${editorJobs.length === 1 ? "" : "s"}` : ""}.
+                {targetIsAdmin ? " It also removes their admin access; reactivating brings them back as a team member." : ""}
               </p>
             </div>
             <Button variant="danger" size="sm" leadingIcon={<UserMinus aria-hidden="true" />} onClick={() => setDeactivateOpen(true)}>
               Deactivate…
             </Button>
           </div>
-        ) : !anonymised ? (
+        ) : !profile.isActive && !anonymised && access.reactivate ? (
           <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Reactivate</p>
@@ -364,7 +376,7 @@ export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, edit
           </div>
         ) : null}
 
-        {viewerRole === "owner" && !anonymised ? (
+        {!anonymised && (access.anonymise || (profile.isActive && access.deactivate)) ? (
           <div className="flex flex-col gap-3 pt-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Anonymise</p>
@@ -419,7 +431,7 @@ export function UserLifecycleCard({ profile, viewerRole, canManage, isSelf, edit
         }}
       />
 
-      {viewerRole === "owner" ? <AnonymiseDialog open={anonymiseOpen} onOpenChange={setAnonymiseOpen} profile={profile} onConflict={onConflict} /> : null}
+      {access.anonymise ? <AnonymiseDialog open={anonymiseOpen} onOpenChange={setAnonymiseOpen} profile={profile} onConflict={onConflict} /> : null}
       {dialog}
     </SectionCard>
   );

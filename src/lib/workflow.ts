@@ -6,23 +6,25 @@
  * `allowedColumns`; the workflow admin uses `validateWorkflowDefinition`.
  */
 import {
+  CANCEL_EDGE_ROLES,
   CATEGORY_GROUPS,
   KANBAN_COLUMN_META,
   LINK_KINDS,
   NOTE_KINDS,
-  ROLES,
+  REVIEW_GATED_CATEGORIES,
   STATUS_CATEGORIES,
   STATUS_CATEGORY_META,
   WORKFLOW_REQUIRED_CATEGORIES,
   type Action,
   type KanbanColumn,
   type KpiBucket,
-  type Role,
   type StatusCategory,
+  type TransitionRole,
+  TRANSITION_ROLES,
 } from "@/lib/constants";
 import type { AuthContext, JobAvailableActions, JobPermissionRef, StatusRef } from "@/lib/types";
 import { AmbiguousTargetError, NotFoundError } from "@/server/errors";
-import { can } from "@/server/auth/permissions";
+import { can, personaOf } from "@/server/auth/permissions";
 
 /* ------------------------------------------------------------------ */
 /*  Plain row shapes                                                   */
@@ -44,7 +46,8 @@ export interface EdgeLike {
   id: string;
   fromStatusId: string;
   toStatusId: string;
-  allowedRoles: readonly Role[];
+  /** roles v2: TransitionRole[] (docs/ROLES.md §5.1). */
+  allowedRoles: readonly TransitionRole[];
   requiresAssignedEditor: boolean;
   assigneeOnly: boolean;
   isReopen: boolean;
@@ -175,7 +178,7 @@ export function generateCancelEdges(statuses: readonly StatusLike[]): EdgeLike[]
       id: `generated-cancel:${s.id}`,
       fromStatusId: s.id,
       toStatusId: target.id,
-      allowedRoles: ["owner", "manager", "photographer"] as Role[],
+      allowedRoles: [...CANCEL_EDGE_ROLES],
       requiresAssignedEditor: false,
       assigneeOnly: false,
       isReopen: false,
@@ -197,60 +200,150 @@ function editorActive(job: WorkflowJobLike): boolean {
  * Role ∈ allowedRoles; photographer → own; editor → assigned (and current
  * editor when `assigneeOnly`); `requiresAssignedEditor` → active editor set.
  */
+/**
+ * Edge role match (docs/ROLES.md §5.2 step 3): editor ⇐ "editor"; admin ⇐ "admin" ∨
+ * "photographer"; team member ⇐ "photographer"; clients never.
+ */
+export function edgeRolesAllow(ctx: AuthContext, allowedRoles: readonly TransitionRole[]): boolean {
+  switch (personaOf(ctx)) {
+    case "editor":
+      return allowedRoles.includes("editor");
+    case "admin":
+      return allowedRoles.includes("admin") || allowedRoles.includes("photographer");
+    case "member":
+      return allowedRoles.includes("photographer");
+    case "client":
+      return false;
+  }
+}
+
 export function edgeDenialReason(ctx: AuthContext, job: WorkflowJobLike, edge: EdgeLike): string | null {
   if (edge.archivedAt !== null) return "This transition has been archived";
-  if (edge.requiresAssignedEditor && !editorActive(job)) return "Assign an active editor first";
-  if (ctx.isSystem) return can(ctx, "job.transition", job) ? null : "Not permitted";
-  if (!edge.allowedRoles.includes(ctx.role)) return "Your role cannot make this change";
-  if (!can(ctx, "job.transition", job)) {
-    return ctx.role === "editor" ? "Only the assigned editor can do this" : "Only the job's photographer or a manager can do this";
+  // Actor checks first (§5.2 steps 3-6): a caller without the right always learns "forbidden",
+  // never a state precondition of a job they may not move.
+  if (!ctx.isSystem) {
+    if (!edgeRolesAllow(ctx, edge.allowedRoles)) return "Your role cannot make this change";
+    if (!can(ctx, "job.transition", job)) return moveDeniedMessage(ctx);
+    if (edge.assigneeOnly && ctx.role === "editor" && job.editorId !== ctx.userId) return "Only the assigned editor can do this";
   }
-  if (edge.assigneeOnly && ctx.role === "editor" && job.editorId !== ctx.userId) return "Only the assigned editor can do this";
+  if (edge.requiresAssignedEditor && !editorActive(job)) return EDITOR_REQUIRED_REASON;
+  if (ctx.isSystem) return can(ctx, "job.transition", job) ? null : "Not permitted";
   return null;
+}
+
+/** `edgeDenialReason` text for the requires-assigned-editor precondition (the engine maps it to 422 editor_required). */
+export const EDITOR_REQUIRED_REASON = "Assign an active editor first";
+
+/** The 403 message for an actor without `job.transition` on the job. */
+export function moveDeniedMessage(ctx: Pick<AuthContext, "role">): string {
+  return ctx.role === "editor" ? "Only the assigned editor can do this" : "Only the job's photographer or an admin can do this";
 }
 
 export function actorMayTakeEdge(ctx: AuthContext, job: WorkflowJobLike, edge: EdgeLike): boolean {
   return edgeDenialReason(ctx, job, edge) === null;
 }
 
+/** The job facts `actionsForMove` needs (current editor). */
+export type MoveJobFacts = Pick<JobPermissionRef, "editorId">;
+
 /**
- * The specific matrix action that guards an edge (§3.2), on top of
- * `job.transition`. `null` = engine-internal (performed through the
- * assignment service, never offered as a button).
+ * Every matrix action that must pass `can()` for a move (docs/ROLES.md §5.2
+ * step 6), on top of the edge roles and `job.transition`. `null` =
+ * engine-internal (→ assigned: performed by the assignment service, never
+ * offered as a button).
+ *
+ * | reopen / from completed                       | job.reopen
+ * | → cancelled                                   | job.cancel
+ * | → assigned                                    | null (engine-internal)
+ * | → new/ready from assigned by the current editor | job.decline
+ * | → new/ready while the job has an editor       | job.assign_editor (the move drops the editor)
+ * | → new/ready without an editor                 | job.transition
+ * | → accepted/in_progress/submitted/resubmitted  | job.accept / job.start / job.submit / revision.resolve
+ * | → review/revision/approved/delivered/completed| job.begin_review / revision.request / job.approve / job.deliver / job.complete
+ * | anything else                                 | job.transition
+ * | from-gate: from ∈ REVIEW_GATED (not a reopen) | + job.begin_review (the review permission; self-review applies)
  */
-export function actionForMove(ctx: Pick<AuthContext, "role">, from: StatusCategory, to: StatusCategory, isReopen: boolean): Action | null {
-  if (isReopen || (from === "completed" && to !== "completed")) return "job.reopen";
+export function actionsForMove(
+  ctx: Pick<AuthContext, "role" | "userId">,
+  from: StatusCategory,
+  to: StatusCategory,
+  isReopen: boolean,
+  job: MoveJobFacts,
+): Action[] | null {
+  const reopen = isReopen || (from === "completed" && to !== "completed");
+  if (reopen) return ["job.reopen"];
+  let primary: Action;
   switch (to) {
     case "cancelled":
-      return "job.cancel";
+      primary = "job.cancel";
+      break;
     case "assigned":
       return null; // side effect of assignEditor
-    case "ready":
-      if (from === "assigned" && ctx.role === "editor") return "job.decline";
-      return isEditorHolds(from) ? null : "job.transition"; // unassign is engine-internal
     case "new":
-      return "job.transition";
+    case "ready":
+      if (job.editorId !== null && from === "assigned" && ctx.role === "editor" && ctx.userId !== null && ctx.userId === job.editorId) {
+        primary = "job.decline";
+      } else if (job.editorId !== null) {
+        primary = "job.assign_editor";
+      } else {
+        primary = "job.transition";
+      }
+      break;
     case "accepted":
-      return "job.accept";
+      primary = "job.accept";
+      break;
     case "in_progress":
-      return "job.start";
+      primary = "job.start";
+      break;
     case "submitted":
-      return "job.submit";
+      primary = "job.submit";
+      break;
     case "review":
-      return "job.begin_review";
+      primary = "job.begin_review";
+      break;
     case "revision":
-      return "revision.request";
+      primary = "revision.request";
+      break;
     case "resubmitted":
-      return "revision.resolve";
+      primary = "revision.resolve";
+      break;
     case "approved":
-      return "job.approve";
+      primary = "job.approve";
+      break;
     case "delivered":
-      return "job.deliver";
+      primary = "job.deliver";
+      break;
     case "completed":
-      return "job.complete";
+      primary = "job.complete";
+      break;
     default:
-      return "job.transition";
+      primary = "job.transition";
   }
+  const actions: Action[] = [primary];
+  if (REVIEW_GATED_CATEGORIES.includes(from) && primary !== "job.begin_review") actions.push("job.begin_review");
+  return actions;
+}
+
+/** True when every action of the move passes `can()` (an engine-internal move never does). */
+export function canMakeMove(ctx: AuthContext, job: WorkflowJobLike, from: StatusCategory, to: StatusCategory, isReopen: boolean): boolean {
+  const actions = actionsForMove(ctx, from, to, isReopen, job);
+  return actions !== null && actions.every((a) => can(ctx, a, job));
+}
+
+/** The first action of the move the actor fails (403 code), or null when all pass / engine-internal. */
+export function deniedMoveAction(ctx: AuthContext, job: WorkflowJobLike, from: StatusCategory, to: StatusCategory, isReopen: boolean): Action | null {
+  const actions = actionsForMove(ctx, from, to, isReopen, job);
+  if (actions === null) return null;
+  return actions.find((a) => !can(ctx, a, job)) ?? null;
+}
+
+/**
+ * @deprecated roles-v2: use `actionsForMove` (every action must pass). Returns
+ * the primary action only; kept for callers that only need "is this move
+ * engine-internal".
+ */
+export function actionForMove(ctx: Pick<AuthContext, "role" | "userId">, from: StatusCategory, to: StatusCategory, isReopen: boolean, job: MoveJobFacts = { editorId: null }): Action | null {
+  return actionsForMove(ctx, from, to, isReopen, job)?.[0] ?? null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,6 +395,13 @@ const TARGET_LABELS: Record<StatusCategory, string> = {
   cancelled: "Cancel",
 };
 
+/** Button label for the actor: an unassign by someone other than the editor is never called "Decline". */
+function moveLabel(ctx: AuthContext, job: WorkflowJobLike, from: StatusCategory, to: StatusCategory, isReopen: boolean): string {
+  const label = transitionLabel(from, to, isReopen);
+  if (label === "Decline" && !(ctx.role === "editor" && job.editorId !== null && job.editorId === ctx.userId)) return "Unassign editor";
+  return label;
+}
+
 export function transitionLabel(from: StatusCategory, to: StatusCategory, isReopen: boolean): string {
   if (from === "cancelled") return TRANSITION_LABELS["cancelled>*"];
   const exact = TRANSITION_LABELS[`${from}>${to}`];
@@ -336,8 +436,7 @@ function mayEnterCategory(ctx: AuthContext, job: WorkflowJobLike, category: Stat
     if (!ids.has(e.toStatusId)) return false;
     const from = statuses.find((s) => s.id === e.fromStatusId);
     if (!from || from.category === category) return false;
-    const action = actionForMove(ctx, from.category, category, e.isReopen);
-    return action !== null && actorMayTakeEdge(ctx, job, e) && can(ctx, action, job);
+    return actorMayTakeEdge(ctx, job, e) && canMakeMove(ctx, job, from.category, category, e.isReopen);
   });
 }
 
@@ -365,14 +464,13 @@ export function allowedMoves(ctx: AuthContext, job: WorkflowJobLike, statuses: r
     if (edge.fromStatusId !== current.id) continue;
     const to = statusById.get(edge.toStatusId);
     if (!to || to.archivedAt !== null || seen.has(to.id)) continue;
-    const action = actionForMove(ctx, current.category, to.category, edge.isReopen);
-    if (action === null || !actorMayTakeEdge(ctx, job, edge) || !can(ctx, action, job)) continue;
+    if (!actorMayTakeEdge(ctx, job, edge) || !canMakeMove(ctx, job, current.category, to.category, edge.isReopen)) continue;
     const isReopen = edge.isReopen || (current.category === "completed" && to.category !== "completed");
     seen.add(to.id);
     moves.push({
       toStatus: to,
       edge,
-      label: isLateral(current, to) ? `Move to ${to.name}` : transitionLabel(current.category, to.category, isReopen),
+      label: isLateral(current, to) ? `Move to ${to.name}` : moveLabel(ctx, job, current.category, to.category, isReopen),
       isReopen,
       isRestore: false,
       isLateral: isLateral(current, to),
@@ -382,7 +480,7 @@ export function allowedMoves(ctx: AuthContext, job: WorkflowJobLike, statuses: r
 
   // Generated cancel edge (when the workflow has no explicit one from here).
   const cancel = cancelTargetOf(statuses);
-  if (cancel && !seen.has(cancel.id) && isActiveCategory(current.category) && can(ctx, "job.cancel", job)) {
+  if (cancel && !seen.has(cancel.id) && isActiveCategory(current.category) && canMakeMove(ctx, job, current.category, "cancelled", false)) {
     seen.add(cancel.id);
     moves.push({ toStatus: cancel, edge: null, label: "Cancel", isReopen: false, isRestore: false, isLateral: false, ...moveFlags(cancel, false) });
   }
@@ -512,9 +610,8 @@ function explainNoMove(
     const reason = edgeDenialReason(ctx, job, edge);
     if (reason) return reason;
     if (current) {
-      const action = actionForMove(ctx, current.category, t.category, edge.isReopen);
-      if (action === null) return `${t.name} is set by assigning or unassigning an editor`;
-      if (!can(ctx, action, job)) return "You do not have permission to make this change";
+      if (actionsForMove(ctx, current.category, t.category, edge.isReopen, job) === null) return `${t.name} is set by assigning or unassigning an editor`;
+      if (deniedMoveAction(ctx, job, current.category, t.category, edge.isReopen) !== null) return "You do not have permission to make this change";
     }
   }
   return `Cannot move from "${currentName}" to ${columnLabel}`;
@@ -583,7 +680,7 @@ export function validateWorkflowDefinition(statuses: readonly StatusLike[], edge
     if (from.id === to.id) problems.push(`Transition "${from.name}" → itself is not allowed`);
     if (e.allowedRoles.length === 0) problems.push(`Transition "${from.name}" → "${to.name}" must allow at least one role`);
     for (const r of e.allowedRoles) {
-      if (!(ROLES as readonly string[]).includes(r)) problems.push(`Transition "${from.name}" → "${to.name}" has unknown role "${r}"`);
+      if (!(TRANSITION_ROLES as readonly string[]).includes(r)) problems.push(`Transition "${from.name}" → "${to.name}" has unknown role "${r}"`);
     }
     const pair = `${from.id}>${to.id}`;
     if (pairs.has(pair)) problems.push(`Duplicate transition "${from.name}" → "${to.name}"`);

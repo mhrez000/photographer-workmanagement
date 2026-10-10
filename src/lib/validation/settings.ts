@@ -1,6 +1,6 @@
-/** Zod inputs for the organisation settings service (ARCHITECTURE.md §2.1). */
+/** Zod inputs for the organisation settings service (ARCHITECTURE.md §2.1, docs/ROLES.md §1.2, §4.3). */
 import { z } from "zod";
-import { ExpectedVersionSchema, NameSchema } from "./admin-shared";
+import { ExpectedVersionSchema, IdSchema, NameSchema } from "./admin-shared";
 
 function isValidTimeZone(tz: string): boolean {
   try {
@@ -39,12 +39,16 @@ export const SettingsFieldSchemas = {
   revisionSpikeMinCount: int(1, 10000),
   revisionSpikeMultiplier: num(1, 20),
   reviewSlaHours: int(1, 24 * 30),
-  photographersSeeAllJobs: z.boolean(),
-  photographersSeeTeamJobs: z.boolean(),
-  editorsSeeTeamJobs: z.boolean(),
-  editorsSeeTeamWorkloads: z.boolean(),
+  // Roles v2: the four org-wide visibility switches (photographersSeeAllJobs, photographersSeeTeamJobs,
+  // editorsSeeTeamJobs, editorsSeeTeamWorkloads) are deprecated columns replaced by per-user switches;
+  // they are no longer editable (unknown key → 400).
   automationsEnabled: z.boolean(),
   auditNotifications: z.boolean(),
+  /**
+   * Photographer pre-filled on jobs editors create (§4.3); null = the primary
+   * owner. The service requires an active photographer of the organisation.
+   */
+  defaultPhotographerUserId: IdSchema.nullable(),
 } as const;
 
 export type SettingsField = keyof typeof SettingsFieldSchemas;
@@ -63,3 +67,7 @@ export const UpdateSettingsInput = z
   })
   .strict();
 export type UpdateSettingsInput = z.infer<typeof UpdateSettingsInput>;
+
+/** POST /api/settings/roles-notice/dismiss { expectedVersion? } (§1.5). */
+export const DismissRolesNoticeInput = z.strictObject({ expectedVersion: ExpectedVersionSchema });
+export type DismissRolesNoticeInput = z.infer<typeof DismissRolesNoticeInput>;

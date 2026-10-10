@@ -4,7 +4,9 @@ import { OrganisationSettingsForm } from "@/components/settings/organisation-for
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { formatDateTime } from "@/lib/dates";
+import type { ReducedUser, UserProfile } from "@/lib/types";
 import { getSettingsView } from "@/server/queries/settings";
+import { listUsers } from "@/server/queries/users";
 import { guard, load, pageContext } from "@/server/page";
 
 export const metadata: Metadata = { title: "Organisation settings" };
@@ -24,19 +26,24 @@ export default async function OrganisationSettingsPage() {
   const { ctx, db } = await pageContext();
   guard(ctx, "settings.view");
   const view = await load(() => getSettingsView(db, ctx));
+  const photographers = ((await load(() => listUsers(db, ctx, { role: "photographer", active: "1" }))) as (UserProfile | ReducedUser)[]).map((p) => ({
+    id: p.id,
+    name: p.name,
+    isPrimaryOwner: p.id === view.settings.primaryOwnerUserId,
+  }));
   return (
     <PageContainer width="narrow">
       <PageHeader
         eyebrow="Settings"
         title="Organisation"
-        description="Studio-wide defaults: timezone, job numbers, thresholds, visibility and the automations switch."
+        description="Studio-wide defaults: timezone, job numbers, thresholds, the default photographer for editor-created jobs and the automations switch."
         meta={view.canManage ? null : <Badge variant="outline">Read-only</Badge>}
       >
         <p className="text-xs text-ink-subtle">
           Last changed <span className="numeric">{formatDateTime(view.settings.updatedAt, ctx.settings.timezone)}</span> · every change is recorded in the activity log.
         </p>
       </PageHeader>
-      <OrganisationSettingsForm view={view} timeZones={timeZones(view.settings.timezone)} />
+      <OrganisationSettingsForm view={view} timeZones={timeZones(view.settings.timezone)} photographers={photographers} />
     </PageContainer>
   );
 }

@@ -3,21 +3,26 @@
 import * as React from "react";
 import { TriangleAlert } from "lucide-react";
 import { WorkloadBand } from "@/components/jobs";
-import { ROLE_LABELS } from "@/components/shell/types";
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { api, errorMessage } from "@/lib/api-client";
-import { WORKLOAD_BAND_META } from "@/lib/constants";
+import { WORKLOAD_BAND_META, displayRoleLabel } from "@/lib/constants";
 import type { UserOption } from "@/lib/types";
 import { cn, pluralise } from "@/lib/utils";
 import { Combobox, type ComboboxOption } from "./combobox";
 
 export type PersonPickerKind = "editor" | "photographer";
 
-/** Roles that may be a job's photographer (assign_photographer targets). */
+/** Role filter per picker kind (roles v2: admins are photographers too, docs/ROLES.md §3.4). */
 const ROLE_QUERY: Record<PersonPickerKind, string> = {
   editor: "editor",
-  photographer: "photographer,manager,owner",
+  photographer: "photographer",
 };
+
+/** "Owner / Photographer · Studio Director" — persona + title (docs/ROLES.md §6.1). */
+export function personDescription(p: UserOption): string {
+  return displayRoleLabel(p);
+}
 
 /** Loads `/api/users/options` for a picker kind once on mount. */
 export function usePeopleOptions(kind: PersonPickerKind, enabled = true) {
@@ -66,9 +71,16 @@ export function PersonPicker({ kind, people, loading, value, onChange, disabled,
           kind === "editor"
             ? p.workload
               ? `${pluralise(p.workload.active, "active job")}${p.workload.overdue > 0 ? ` · ${p.workload.overdue} overdue` : ""}`
-              : undefined
-            : ROLE_LABELS[p.role],
-        trailing: kind === "editor" && p.workload ? <WorkloadBand band={p.workload.band} showLabel={false} /> : undefined,
+              : (p.title ?? undefined)
+            : personDescription(p),
+        trailing:
+          kind === "editor" && p.workload ? (
+            <WorkloadBand band={p.workload.band} showLabel={false} />
+          ) : kind === "photographer" && p.isPrimaryOwner ? (
+            <Badge variant="solid" size="sm">
+              Owner
+            </Badge>
+          ) : undefined,
       })),
     [people, kind],
   );

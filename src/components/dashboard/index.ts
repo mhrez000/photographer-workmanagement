@@ -17,6 +17,13 @@ export {
   type MyPerformanceWidgetProps,
 } from "./performance-widgets";
 export { MyWorkloadWidget, type MyWorkloadWidgetProps } from "./my-workload-widget";
+export {
+  MoreInBusinessLink,
+  QuestionsWidget,
+  TurnaroundWidget,
+  UpcomingDeadlinesWidget,
+  type QuestionsWidgetProps,
+} from "./role-widgets";
 export { CalendarMini, bucketCalendar, type CalendarDay, type CalendarMiniProps } from "./calendar-mini";
 export { DashboardBoard, orderWidgets, packWidgets, type DashboardBoardProps, type DashboardWidget } from "./dashboard-board";
 export { WIDGET_META, WIDGET_WIDTHS, widgetSpanClass, type WidgetMeta } from "./widget-meta";

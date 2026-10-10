@@ -29,8 +29,9 @@ import {
   DEFAULT_WORKFLOW_TRANSITIONS,
   STATUS_CATEGORY_META,
   WORKFLOW_REQUIRED_CATEGORIES,
-  type Role,
+  CANCEL_EDGE_ROLES,
   type StatusCategory,
+  type TransitionRole,
 } from "@/lib/constants";
 import type { AuthContext, Workflow, WorkflowStatus, WorkflowTransition } from "@/lib/types";
 import {
@@ -246,13 +247,14 @@ interface EdgeSeed {
   from: string;
   to: string;
   label: string | null;
-  allowedRoles: Role[];
+  allowedRoles: TransitionRole[];
   requiresAssignedEditor: boolean;
   assigneeOnly: boolean;
   isReopen: boolean;
 }
 
-const OMP: Role[] = ["owner", "manager", "photographer"];
+/** Generated `→ cancelled` edges (roles v2 §5.1). */
+const OMP: TransitionRole[] = [...CANCEL_EDGE_ROLES];
 
 function defaultTemplate(): { statuses: StatusSeed[]; edges: EdgeSeed[] } {
   const statuses = DEFAULT_WORKFLOW_STATUSES.map((s) => ({ ...s }));

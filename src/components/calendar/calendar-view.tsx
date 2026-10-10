@@ -630,7 +630,7 @@ function FloatingPanel({ state, onClose, onOpenDay }: { state: PanelState; onClo
       tabIndex={-1}
       style={style ?? undefined}
       className={cn(
-        "fixed z-50 max-h-[min(70vh,28rem)] overflow-y-auto rounded-lg border border-border bg-surface-raised p-4 text-ink shadow-pop outline-none scrollbar-thin",
+        "fixed z-(--z-popover) max-h-[min(70vh,28rem)] overflow-y-auto rounded-lg border border-border bg-surface-raised p-4 text-ink shadow-pop outline-none scrollbar-thin",
         style ? "animate-scale-in" : "inset-x-3 bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px)+0.75rem)] animate-slide-in-bottom",
       )}
     >

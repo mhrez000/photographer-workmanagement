@@ -77,10 +77,10 @@ describe("logout", () => {
   });
 
   it("only revokes the signed-out user's sessions", async () => {
-    const managerToken = await signSessionToken({ sub: ids.users.manager, sv: (await sessionVersion(ids.users.manager)) ?? 1 });
+    const coAdminToken = await signSessionToken({ sub: ids.users.coAdmin, sv: (await sessionVersion(ids.users.coAdmin)) ?? 1 });
     await logout(await contextFor(db, ids.users.editor1));
-    jar.set(SESSION_COOKIE_NAME, managerToken);
-    await expect(requireContext()).resolves.toMatchObject({ userId: ids.users.manager });
+    jar.set(SESSION_COOKIE_NAME, coAdminToken);
+    await expect(requireContext()).resolves.toMatchObject({ userId: ids.users.coAdmin });
   });
 
   it("without a session it just clears the cookie", async () => {

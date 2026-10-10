@@ -1,23 +1,38 @@
 /**
  * Lightweight picker lists for client islands (assign dialogs, @mention
- * autocomplete, create-job client → project cascade). Read-only; every list
- * goes through the same permission-checked queries as the full pages, then
- * projects down to a few fields.
+ * autocomplete, the create-job client → project cascade; docs/ROLES.md §3.4).
+ * Read-only. The job-creation options are SEPARATE queries, never built on
+ * the list queries, and project only the fields a picker needs:
  *
  *   GET /api/users/options?role=editor&jobId=&includeInactive=1&excludeSelf=1
- *   GET /api/clients/options?q=
- *   GET /api/projects/options?clientId=&q=
+ *     - reduced projection (`id, name, title, role, isAdmin, isPrimaryOwner,
+ *       avatarColour, isActive`); client portal users never appear for
+ *       non-admins (`role=client` → 400 for them);
+ *     - `role=photographer` (active photographers) is open to anyone who can
+ *       `job.create` (an editor picks the photographer of a job they create);
+ *     - `jobId` reveals who can view a job, so it requires `comment.mention`
+ *       on that job (404 when the job is not visible, else 403).
+ *   GET /api/clients/options?q=           → `{ id, name, colour }` of non-archived clients
+ *   GET /api/projects/options?clientId=&q= → `{ id, name, clientId, clientName }` of non-archived projects
+ *     - to anyone who can `job.create` (every client: an editor creates jobs
+ *       for clients they have never worked for); otherwise the `client.view` /
+ *       `project.view` scope (editors: clients / projects of visible jobs).
+ * Clients (portal users) get 403 everywhere.
  */
+import { and, asc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
-import { ROLES } from "@/lib/constants";
-import type { AuthContext, ClientOption, ProjectOption, UserOption, UserRef } from "@/lib/types";
+import { clients, projects, users } from "@/db/schema";
+import { ROLES, STAFF_ROLES } from "@/lib/constants";
+import type { AuthContext, ClientOption, ProjectOption, UserOption } from "@/lib/types";
+import { assertCan, can, isAdmin } from "@/server/auth/permissions";
+import { ForbiddenError } from "@/server/errors";
 import { userCanViewJob } from "@/server/services/_collab";
 import { parseInput } from "@/server/services/_shared";
-import { loadVisibleJob } from "@/server/services/workflow";
-import { listClients } from "./clients";
-import { listProjects } from "./projects";
-import { listUsers } from "./users";
+import { binaryAsc } from "./metrics";
+import { hasVisibleJobSql } from "./projects";
+import { assertStaffRead, likeSql, loadVisibleJob } from "./scope";
+import { primaryOwnerIdOf, reducedUser } from "./users";
 import { canViewTeamWorkloads, computeWorkloads } from "./workloads";
 
 const toList = (v: unknown) =>
@@ -30,38 +45,58 @@ const bool = z.preprocess((v) => {
   return s === undefined ? undefined : ["1", "true", "yes"].includes(String(s).toLowerCase());
 }, z.boolean().optional());
 
-export const UserOptionsQuerySchema = z.object({
-  /** One or more roles (`role=editor`, `role=editor,manager`, `role=a&role=b`). */
-  role: z.preprocess(toList, z.array(z.enum(ROLES)).optional()),
-  /** Only people who may view this job (mention autocomplete). */
+const userOptionFields = {
+  /** Only people who may view this job (mention autocomplete; needs comment.mention on it). */
   jobId: z.preprocess(one, z.string().trim().min(1).max(64).optional()),
   /** Include deactivated people (default: active only). */
   includeInactive: bool,
   /** Leave the actor out (mentions). */
   excludeSelf: bool,
   q: z.preprocess(one, z.string().trim().min(1).max(200).optional()),
-});
+};
 
-/** People picker (`user.view`; reduced projection; editors carry workload when the actor may see team workloads). */
+/** Admin query: any role (`role=editor`, `role=photographer,editor`, `role=a&role=b`). */
+export const UserOptionsQuerySchema = z.object({ role: z.preprocess(toList, z.array(z.enum(ROLES)).optional()), ...userOptionFields });
+
+/** Team members / editors: staff roles only (`role=client` → 400, §3.4). */
+export const StaffUserOptionsQuerySchema = z.object({ role: z.preprocess(toList, z.array(z.enum(STAFF_ROLES)).optional()), ...userOptionFields });
+
+/** People picker (reduced projection; editors carry workload when the actor may see team workloads). */
 export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<UserOption[]> {
-  const f = parseInput(UserOptionsQuerySchema, input ?? {});
-  const roles = f.role && f.role.length > 0 ? new Set(f.role) : null;
-  let people: UserRef[] = (
-    await listUsers(db, ctx, {
-      role: roles && roles.size === 1 ? [...roles][0] : undefined,
-      active: f.includeInactive ? undefined : "1",
-      q: f.q,
-    })
-  ).map((u) => ({ id: u.id, name: u.name, role: u.role, avatarColour: u.avatarColour, isActive: u.isActive }));
-  if (roles) people = people.filter((u) => roles.has(u.role));
-  if (f.excludeSelf && ctx.userId) people = people.filter((u) => u.id !== ctx.userId);
+  assertStaffRead(ctx);
+  const admin = isAdmin(ctx);
+  const f = admin ? parseInput(UserOptionsQuerySchema, input ?? {}) : parseInput(StaffUserOptionsQuerySchema, input ?? {});
+  const roles = f.role && f.role.length > 0 ? [...new Set(f.role)] : null;
+  const photographersOnly = roles !== null && roles.length === 1 && roles[0] === "photographer";
+  // The job-create photographer picker is open to creators; every other list needs user.view.
+  if (!(photographersOnly && can(ctx, "job.create"))) assertCan(ctx, "user.view");
 
+  let jobRef = null;
   if (f.jobId) {
-    // 404 when the actor cannot see the job (existence never leaks).
-    const { ref } = await loadVisibleJob(db, ctx, f.jobId);
-    const viewers: UserRef[] = [];
+    // 404 when the actor cannot see the job (existence never leaks); 403 without comment.mention.
+    jobRef = (await loadVisibleJob(db, ctx, f.jobId)).ref;
+    if (!can(ctx, "comment.mention", jobRef)) throw new ForbiddenError("comment.mention");
+  }
+
+  const parts: (SQL | undefined)[] = [eq(users.organisationId, ctx.organisationId), isNull(users.anonymisedAt)];
+  parts.push(inArray(users.role, roles ?? (admin ? [...ROLES] : [...STAFF_ROLES])));
+  if (!admin) parts.push(inArray(users.role, [...STAFF_ROLES]));
+  if (!f.includeInactive || photographersOnly) parts.push(eq(users.isActive, true));
+  if (f.q) parts.push(admin ? or(likeSql(users.name, f.q), likeSql(users.email, f.q)) : likeSql(users.name, f.q));
+  const rows = (
+    await db
+      .select()
+      .from(users)
+      .where(and(...parts))
+      .orderBy(binaryAsc(users.name), asc(users.id))
+  ).filter((u) => !(f.excludeSelf && u.id === ctx.userId));
+
+  const primary = await primaryOwnerIdOf(db, ctx);
+  let people = rows.map((u) => reducedUser(u, primary));
+  if (jobRef) {
+    const viewers = [];
     for (const u of people) {
-      if (u.isActive && (await userCanViewJob(db, ctx, u.id, ref))) viewers.push(u);
+      if (u.isActive && (await userCanViewJob(db, ctx, u.id, jobRef))) viewers.push(u);
     }
     people = viewers;
   }
@@ -76,20 +111,50 @@ export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknow
   return people.map((u) => ({ ...u, workload: workloads.get(u.id) ?? null }));
 }
 
-/** Non-archived clients the actor can see (`client.view`; editors: clients of visible jobs). */
+/** Client picker: `{ id, name, colour }` of non-archived clients (see file header for the scope). */
 export async function getClientOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<ClientOption[]> {
-  const q = input && typeof input === "object" ? (input as Record<string, unknown>).q : undefined;
-  return (await listClients(db, ctx, { q })).map((c) => ({ id: c.client.id, name: c.client.name, colour: c.client.colour }));
+  assertStaffRead(ctx);
+  const q = z.preprocess(one, z.string().trim().max(200).optional()).parse(input && typeof input === "object" ? (input as Record<string, unknown>).q : undefined);
+  const creator = can(ctx, "job.create");
+  if (!creator) assertCan(ctx, "client.view");
+  const rows = await db
+    .select({ id: clients.id, name: clients.name, colour: clients.colour })
+    .from(clients)
+    .where(
+      and(
+        eq(clients.organisationId, ctx.organisationId),
+        isNull(clients.archivedAt),
+        q ? likeSql(clients.name, q) : undefined,
+        !creator && ctx.role === "editor" ? hasVisibleJobSql(ctx, "clientId", clients.id) : undefined,
+      ),
+    )
+    .orderBy(binaryAsc(clients.name), asc(clients.id));
+  return rows.map((c) => ({ id: c.id, name: c.name, colour: c.colour }));
 }
 
-/** Non-archived projects (optionally of one client) the actor can see (`project.view`). */
+/** Project picker: `{ id, name, clientId, clientName }` of non-archived projects (optionally of one client). */
 export async function getProjectOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<ProjectOption[]> {
+  assertStaffRead(ctx);
   const o = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-  return (await listProjects(db, ctx, { clientId: o.clientId, q: o.q })).map((p) => ({
-
-    id: p.project.id,
-    name: p.project.name,
-    clientId: p.project.clientId,
-    clientName: p.client.name,
-  }));
+  const text = z.preprocess(one, z.string().trim().max(200).optional());
+  const clientId = text.parse(o.clientId);
+  const q = text.parse(o.q);
+  const creator = can(ctx, "job.create");
+  if (!creator) assertCan(ctx, "project.view");
+  const rows = await db
+    .select({ id: projects.id, name: projects.name, clientId: projects.clientId, clientName: clients.name })
+    .from(projects)
+    .innerJoin(clients, eq(clients.id, projects.clientId))
+    .where(
+      and(
+        eq(projects.organisationId, ctx.organisationId),
+        isNull(projects.archivedAt),
+        isNull(clients.archivedAt),
+        clientId ? eq(projects.clientId, clientId) : undefined,
+        q ? or(likeSql(projects.name, q), likeSql(projects.address, q)) : undefined,
+        !creator && ctx.role === "editor" ? hasVisibleJobSql(ctx, "projectId", projects.id) : undefined,
+      ),
+    )
+    .orderBy(binaryAsc(projects.name), asc(projects.id));
+  return rows.map((p) => ({ id: p.id, name: p.name, clientId: p.clientId, clientName: p.clientName }));
 }

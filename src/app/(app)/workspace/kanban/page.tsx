@@ -4,12 +4,13 @@ import { FilterBar } from "@/components/filters/filter-bar";
 import { KanbanBoard } from "@/components/kanban/kanban-board";
 import { kanbanLimitKey } from "@/components/kanban/shared";
 import { ShowCancelledToggle } from "@/components/kanban/kanban-controls";
-import { PageContainer } from "@/components/shell";
+import { PageContainer, ScopeNotice } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { KANBAN_COLUMNS, type QuickFilter } from "@/lib/constants";
 import { allowed, load, pageContext, param, params } from "@/server/page";
+import { pageScope } from "@/server/page-scope";
 import { getKanbanBoard, KANBAN_MAX_PER_COLUMN } from "@/server/queries/kanban";
 
 export const metadata: Metadata = { title: "Kanban" };
@@ -47,7 +48,11 @@ export default async function KanbanPage({ searchParams }: PageProps<"/workspace
     jobTypeId: params(sp, "jobTypeId"),
     priority: params(sp, "priority"),
   };
-  const board = await load(() => getKanbanBoard(db, ctx, { ...filters, includeCancelled, perColumnLimit: maxLimit }));
+  // Personal vs business view (docs/ROLES.md §8): `?scope=` wins over the cookie.
+  const { scopeCookie } = await pageScope(ctx, param(sp, "scope"));
+  const board = await load(() =>
+    getKanbanBoard(db, ctx, { ...filters, scope: param(sp, "scope"), includeCancelled, perColumnLimit: maxLimit }, { scopeCookie }),
+  );
 
   // One query at the largest requested limit; each column is trimmed back to its own limit.
   const columns = board.columns.map((c) => ({ ...c, cards: c.cards.slice(0, limits[c.column]) }));
@@ -63,6 +68,7 @@ export default async function KanbanPage({ searchParams }: PageProps<"/workspace
         eyebrow="Workspace"
         title="Kanban"
         description="Drag a job to move it through the workflow. Every move is checked against your permissions and recorded in the job history."
+        meta={<ScopeNotice scope={board.scope} />}
         actions={
           canCreate ? (
             <Button href="/jobs/new" leadingIcon={<Plus aria-hidden="true" className="size-4" />}>

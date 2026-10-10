@@ -49,10 +49,13 @@ export function Tooltip({ content, side = "top", align = "center", children, dis
         role="tooltip"
         id={id}
         className={cn(
-          "pointer-events-none absolute z-50 w-max max-w-64 rounded-sm bg-ink px-2 py-1 text-xs font-medium leading-4 text-ink-inverse shadow-md",
-          "opacity-0 scale-95 transition-[opacity,transform] duration-(--motion-fast) ease-out-soft",
-          "group-hover/tooltip:opacity-100 group-hover/tooltip:scale-100 group-hover/tooltip:delay-300",
-          "group-has-[:focus-visible]/tooltip:opacity-100 group-has-[:focus-visible]/tooltip:scale-100",
+          "pointer-events-none absolute z-(--z-popover) w-max max-w-64 rounded-sm bg-ink px-2 py-1 text-xs font-medium leading-4 text-ink-inverse shadow-md",
+          // Closed = invisible, not just transparent: a transparent tooltip still counts as shown for
+          // assistive tech and hit-testing (two "visible" tooltips at once). `visibility` is in the
+          // transition so it flips after the fade-out.
+          "invisible opacity-0 scale-95 transition-[opacity,transform,visibility] duration-(--motion-fast) ease-out-soft",
+          "group-hover/tooltip:visible group-hover/tooltip:opacity-100 group-hover/tooltip:scale-100 group-hover/tooltip:delay-300",
+          "group-has-[:focus-visible]/tooltip:visible group-has-[:focus-visible]/tooltip:opacity-100 group-has-[:focus-visible]/tooltip:scale-100",
           placements[side],
           side === "top" || side === "bottom" ? alignments[align] : null,
           className,

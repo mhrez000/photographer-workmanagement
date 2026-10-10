@@ -7,6 +7,8 @@
  */
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import type { Role } from "@/lib/constants";
+import { loginRedirectTarget } from "@/server/auth/redirect";
 import { getOptionalContext } from "@/server/auth/session";
 import { clientIp } from "@/server/http";
 import { isAppError, RateLimitedError } from "@/server/errors";
@@ -23,12 +25,6 @@ export interface LoginFormState {
   retryAfterSeconds: number | null;
 }
 
-/** Only same-site relative paths are honoured for `next` (no open redirects). */
-function safeNext(value: FormDataEntryValue | null): string {
-  if (typeof value !== "string") return "/dashboard";
-  if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\") || value.startsWith("/login")) return "/dashboard";
-  return value;
-}
 
 function minutes(seconds: number): string {
   const m = Math.ceil(seconds / 60);
@@ -39,8 +35,9 @@ export async function loginAction(_prev: LoginFormState, formData: FormData): Pr
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
   const h = await headers();
+  let role: Role;
   try {
-    await login({ email, password, ip: clientIp(h), userAgent: h.get("user-agent") });
+    role = (await login({ email, password, ip: clientIp(h), userAgent: h.get("user-agent") })).role;
   } catch (err) {
     if (err instanceof RateLimitedError) {
       return {
@@ -63,7 +60,7 @@ export async function loginAction(_prev: LoginFormState, formData: FormData): Pr
     console.error("[login] unexpected error", err);
     return { error: "Something went wrong. Please try again.", fieldErrors: {}, email, retryAfterSeconds: null };
   }
-  redirect(safeNext(formData.get("next")));
+  redirect(loginRedirectTarget(role, formData.get("next")));
 }
 
 export async function logoutAction(): Promise<void> {

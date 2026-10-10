@@ -23,7 +23,12 @@ const GROUPS: { id: string; title: string; description: string; types: Notificat
     description: "Hand-offs between editing and review.",
     types: ["revision_requested", "work_submitted", "work_resubmitted", "work_approved"],
   },
-  { id: "conversation", title: "Conversation", description: "Comments and mentions on jobs you're part of.", types: ["mentioned", "comment_added"] },
+  {
+    id: "conversation",
+    title: "Conversation",
+    description: "Comments, questions, mentions and client feedback on jobs you're part of.",
+    types: ["mentioned", "comment_added", "client_feedback"],
+  },
   {
     id: "deadlines",
     title: "Deadlines & priority",
@@ -34,7 +39,7 @@ const GROUPS: { id: string; title: string; description: string; types: Notificat
   {
     id: "team",
     title: "Team & automations",
-    description: "Mostly for owners and managers.",
+    description: "Mostly for the studio owner and admins.",
     types: ["workload_threshold", "editor_unavailable", "automation"],
   },
 ];
@@ -53,7 +58,10 @@ export function NotificationPrefsForm({ userId, prefs }: { userId: string; prefs
   const [overrides, setOverrides] = React.useState<Partial<Record<NotificationType, boolean>>>({});
   const [pending, setPending] = React.useState<NotificationType | null>(null);
   const byType = new Map(prefs.map((p) => [p.type, p]));
-  const enabledCount = prefs.filter((p) => overrides[p.type] ?? p.enabled).length;
+  // Only the types shown below (client-portal types never reach staff, docs/ROLES.md §6.2).
+  const shown = new Set<NotificationType>(GROUPS.flatMap((g) => g.types));
+  const enabledCount = prefs.filter((p) => shown.has(p.type) && (overrides[p.type] ?? p.enabled)).length;
+  const shownCount = prefs.filter((p) => shown.has(p.type)).length;
 
   const toggle = async (type: NotificationType, next: boolean) => {
     setOverrides((o) => ({ ...o, [type]: next }));
@@ -74,7 +82,7 @@ export function NotificationPrefsForm({ userId, prefs }: { userId: string; prefs
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-ink-muted" aria-live="polite">
-        <span className="numeric font-medium text-ink">{enabledCount}</span> of <span className="numeric">{prefs.length}</span> notification types on.
+        <span className="numeric font-medium text-ink">{enabledCount}</span> of <span className="numeric">{shownCount}</span> notification types on.
       </p>
       {GROUPS.map((group) => {
         const items = group.types.map((t) => byType.get(t)).filter((p): p is NotificationPrefView => Boolean(p));

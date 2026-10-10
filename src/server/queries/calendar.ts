@@ -21,8 +21,8 @@ import { addCivilDays, civilDate, endOfCivilDayIso, startOfCivilDayIso, todayCiv
 import { isPastDue } from "@/lib/metrics";
 import type { AuthContext, CalendarEvent, CalendarEventKind } from "@/lib/types";
 import { parseInput } from "@/server/services/_shared";
-import { jobFiltersWhere, JobListFiltersSchema } from "./jobs";
-import { loadOrgSettingsRow, orgDayBounds, selectRawJobs, type RawJobRow } from "./scope";
+import { jobFiltersWhere, JobListFiltersSchema, listViewScope, type ListScopeOptions } from "./jobs";
+import { loadOrgSettingsRow, orgDayBounds, redactOtherEditor, selectRawJobs, type RawJobRow } from "./scope";
 
 export const CALENDAR_EVENT_KINDS: readonly CalendarEventKind[] = ["shoot", "due", "review_due", "delivery_due", "revision_due"];
 const MAX_JOBS = 2000;
@@ -53,7 +53,7 @@ function rangeOf(ctx: AuthContext, from: string | undefined, to: string | undefi
   return { from: fromIso, to: toIso };
 }
 
-function jobPart(raw: RawJobRow): CalendarEvent["job"] {
+function jobPart(ctx: AuthContext, raw: RawJobRow): CalendarEvent["job"] {
   const j = raw.job;
   return {
     id: j.id,
@@ -62,16 +62,17 @@ function jobPart(raw: RawJobRow): CalendarEvent["job"] {
     priority: j.priority,
     statusCategory: j.statusCategory,
     status: { ...raw.status },
-    editor: raw.editor ? { ...raw.editor } : null,
+    editor: redactOtherEditor(ctx, raw.editor ? { ...raw.editor } : null),
     photographer: raw.photographer ? { ...raw.photographer } : null,
   };
 }
 
 /**
- * Calendar events between `from` and `to` (civil days inclusive, org tz).
+ * Calendar events between `from` and `to` (civil days inclusive, org tz),
+ * narrowed to "My shoots" when the view scope resolves to "mine" (§8).
  * Every date kind is an end-of-day instant, so the instant window is (from, to].
  */
-export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<CalendarEvent[]> {
+export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unknown = {}, opts: ListScopeOptions = {}): Promise<CalendarEvent[]> {
   const q = parseInput(CalendarQuerySchema, input ?? {});
   const now = ctx.now();
   const range = rangeOf(ctx, q.from, q.to, now);
@@ -87,7 +88,8 @@ export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unk
   if (kinds.has("review_due")) dateParts.push(inRangeDeadline(jobs.reviewDueDate));
   if (kinds.has("delivery_due")) dateParts.push(inRangeDeadline(jobs.deliveryDueDate));
 
-  const filterWhere = jobFiltersWhere(ctx, q, bounds);
+  // `?scope=` / the pwm_scope cookie: "mine" narrows to My shoots (§8).
+  const filterWhere = jobFiltersWhere(ctx, q, bounds, { viewScope: listViewScope(ctx, q, opts) });
   const base = and(filterWhere, ne(jobs.statusCategory, "cancelled"));
 
   const events: CalendarEvent[] = [];
@@ -97,7 +99,7 @@ export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unk
     const raws = await selectRawJobs(db, ctx, { where: and(base, or(...dateParts)), limit: MAX_JOBS });
     for (const raw of raws) {
       const j = raw.job;
-      const job = jobPart(raw);
+      const job = jobPart(ctx, raw);
       if (kinds.has("shoot") && inWindow(j.shootDate)) {
         events.push({ id: `${j.id}:shoot`, kind: "shoot", at: j.shootDate, job, isOverdue: false });
       }
@@ -143,7 +145,7 @@ export async function getCalendarEvents(db: DbLike, ctx: AuthContext, input: unk
           id: `${r.id}:revision_due`,
           kind: "revision_due",
           at: r.dueDate,
-          job: jobPart(raw),
+          job: jobPart(ctx, raw),
           isOverdue: isPastDue(r.dueDate, now),
           revisionNumber: r.revisionNumber,
         });

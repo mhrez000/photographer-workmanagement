@@ -41,13 +41,13 @@ afterEach(() => fakeClock.reset());
 
 describe("per-editor attribution follows reattribution", () => {
   it("credits the approval to the editor holding the job at approval", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const approved = await approvedJobsInRange(db, ctx, { from: T0, to: NOW }, { scope: "org" });
     expect(approved.find((j) => j.id === reassignedId)?.approvingEditorId).toBe(ids.users.editor2);
   });
 
   it("splits editing time between the two editors and computes turnaround from first entry", async () => {
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const e2 = await getEditorAnalytics(db, ctx, ids.users.editor2, RANGE);
     expect(e2.performance).toMatchObject({ approved: 1, avgEditingSeconds: 6 * 3600, avgTurnaroundSeconds: 20 * 3600, avgReviewSeconds: 4 * 3600 });
     expect(e2.stageAverages.find((s) => s.category === "in_progress")).toMatchObject({ avgSeconds: 6 * 3600, count: 1 });
@@ -103,7 +103,20 @@ describe("analytics access", () => {
     expect((await getEditorAnalytics(db, editor1, ids.users.editor1, RANGE)).editor.id).toBe(ids.users.editor1);
     await expect(getEditorAnalytics(db, editor1, ids.users.editor2, RANGE)).rejects.toThrow(ForbiddenError);
     const other = await seedMinimalOrg(db, { slug: "other" });
-    await expect(getEditorAnalytics(db, await contextFor(db, ids.users.manager), other.users.editor1, RANGE)).rejects.toThrow(NotFoundError);
+    await expect(getEditorAnalytics(db, await contextFor(db, ids.users.coAdmin), other.users.editor1, RANGE)).rejects.toThrow(NotFoundError);
+  });
+
+  it("person-page rule: ⚑analytics members open editor pages, clients and other editors never", async () => {
+    const p1 = await contextFor(db, ids.users.photographer1);
+    await expect(getEditorAnalytics(db, p1, ids.users.editor1, RANGE)).rejects.toThrow(ForbiddenError);
+    await db.update(users).set({ canViewAnalytics: true }).where(eq(users.id, ids.users.photographer1));
+    expect((await getEditorAnalytics(db, await contextFor(db, ids.users.photographer1), ids.users.editor1, RANGE)).editor.id).toBe(ids.users.editor1);
+    // The lead (every switch on) and admins too; clients never — not even for analytics overviews.
+    expect((await getEditorAnalytics(db, await contextFor(db, ids.users.lead), ids.users.editor2, RANGE)).editor.id).toBe(ids.users.editor2);
+    const client = await contextFor(db, ids.users.client);
+    await expect(getEditorAnalytics(db, client, ids.users.editor1, RANGE)).rejects.toThrow(ForbiddenError);
+    await expect(getAnalyticsOverview(db, client, RANGE)).rejects.toThrow(ForbiddenError);
+    await expect(getMyAnalytics(db, client, RANGE)).rejects.toThrow(ForbiddenError);
   });
 
   it("trend buckets: daily up to 31 days, weekly beyond", () => {

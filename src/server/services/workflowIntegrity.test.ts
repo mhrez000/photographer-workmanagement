@@ -83,7 +83,7 @@ async function expectClean() {
 const revisionPayload = { reason: "Colour", description: "Kitchen too cold", instructions: "Warm it up" };
 async function jobInRevision(): Promise<{ job: Job; revisionId: string }> {
   const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" });
-  const res = await as("manager", (tx, ctx) => requestRevision(tx, ctx, { jobId: job.id, expectedVersion: job.version, ...revisionPayload }));
+  const res = await as("coAdmin", (tx, ctx) => requestRevision(tx, ctx, { jobId: job.id, expectedVersion: job.version, ...revisionPayload }));
   return { job: await jobRow(job.id), revisionId: res.revision.id };
 }
 
@@ -95,7 +95,7 @@ describe("updateRevision: a new assignee takes over the job", () => {
   it("reassigns the job, keeps it visible to the new editor and notifies only people who can open it", async () => {
     const { job, revisionId } = await jobInRevision();
     const before = new Set((await db.select({ id: notifications.id }).from(notifications)).map((n) => n.id));
-    const res = await as("manager", (tx, ctx) => updateRevision(tx, ctx, { revisionId, assigneeUserId: ids.users.editor2 }));
+    const res = await as("coAdmin", (tx, ctx) => updateRevision(tx, ctx, { revisionId, assigneeUserId: ids.users.editor2 }));
     expect(res.changed).toContain("assigneeUserId");
     expect(res.revision.assigneeUserId).toBe(ids.users.editor2);
     expect(await jobRow(job.id)).toMatchObject({ editorId: ids.users.editor2, previousEditorId: ids.users.editor1, statusCategory: "revision" });
@@ -131,7 +131,7 @@ describe("updateRevision: a new assignee takes over the job", () => {
   it("still rejects inactive users and non-editors", async () => {
     const { revisionId } = await jobInRevision();
     for (const userId of [ids.users.inactiveEditor, ids.users.photographer2]) {
-      const err = await catchErr(as("manager", (tx, ctx) => updateRevision(tx, ctx, { revisionId, assigneeUserId: userId })));
+      const err = await catchErr(as("coAdmin", (tx, ctx) => updateRevision(tx, ctx, { revisionId, assigneeUserId: userId })));
       expect([400, 422]).toContain(err.status);
     }
   });
@@ -144,7 +144,7 @@ describe("updateRevision: a new assignee takes over the job", () => {
 describe("assignEditor with an open revision", () => {
   it("sends the new editor revision_requested (not a generic job_assigned)", async () => {
     const { job } = await jobInRevision();
-    await as("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2, reason: "Rebalance" }));
+    await as("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2, reason: "Rebalance" }));
     const toNew = (await noticesOn(job.id)).filter((n) => n.userId === ids.users.editor2);
     expect(toNew.map((n) => n.type)).toEqual(["revision_requested"]);
     expect(toNew[0].body).toContain("Colour");
@@ -162,7 +162,7 @@ describe("assignEditor with an open revision", () => {
   });
 
   it("covers the 'repeat revision: back to the original editor' automation", async () => {
-    await as("manager", (tx, ctx) =>
+    await as("coAdmin", (tx, ctx) =>
       createAutomation(tx, ctx, {
         name: "Repeat revision",
         trigger: { type: "revision_requested" },
@@ -171,11 +171,11 @@ describe("assignEditor with an open revision", () => {
       }),
     );
     const { job, revisionId } = await jobInRevision();
-    await as("manager", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
+    await as("coAdmin", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2 }));
     let expectedVersion = await v(job.id);
     await as("editor2", (tx, ctx) => resolveRevision(tx, ctx, { revisionId, expectedVersion }));
     expectedVersion = await v(job.id);
-    await as("manager", (tx, ctx) => requestRevision(tx, ctx, { jobId: job.id, expectedVersion, ...revisionPayload, reason: "Cropping" }));
+    await as("coAdmin", (tx, ctx) => requestRevision(tx, ctx, { jobId: job.id, expectedVersion, ...revisionPayload, reason: "Cropping" }));
     await runPendingAutomations(db, ids.organisationId);
     expect((await jobRow(job.id)).editorId).toBe(ids.users.editor1);
     const rev2 = await first(db.select().from(jobRevisions).where(and(eq(jobRevisions.jobId, job.id), eq(jobRevisions.revisionNumber, 2))));
@@ -211,9 +211,9 @@ describe("restore / reopen after the editor was deactivated", () => {
 
   it.each(["submitted", "approved"])("restore into %s releases the inactive editor (0 structural issues)", async (statusKey) => {
     const { job } = await insertJobFixture(db, ids, { statusKey });
-    await as("manager", (tx, ctx) => cancelJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Client paused" }));
+    await as("coAdmin", (tx, ctx) => cancelJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Client paused" }));
     await deactivateEditor1();
-    const res = await act("manager", restoreJob, job.id);
+    const res = await act("coAdmin", restoreJob, job.id);
     expect(res.toStatus.category).toBe(statusKey);
     await expectReleased(job.id, statusKey);
     const restored = await first(db.select().from(activityEvents).where(and(eq(activityEvents.jobId, job.id), eq(activityEvents.eventType, "job.restored"))));
@@ -223,14 +223,14 @@ describe("restore / reopen after the editor was deactivated", () => {
   it("reopen into approved releases the inactive editor (0 structural issues)", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "completed" });
     await deactivateEditor1();
-    await as("manager", (tx, ctx) => reopenJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Wrong gallery", toCategory: "approved" }));
+    await as("coAdmin", (tx, ctx) => reopenJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Wrong gallery", toCategory: "approved" }));
     await expectReleased(job.id, "approved");
   });
 
   it("a reopen (override) into submitted applies the same rule", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "completed" });
     await deactivateEditor1();
-    await as("manager", (tx, ctx) =>
+    await as("coAdmin", (tx, ctx) =>
       transitionJobStatus(tx, ctx, { jobId: job.id, toStatusId: ids.statuses.submitted, override: true, reason: "Back to review", expectedVersion: job.version }),
     );
     await expectReleased(job.id, "submitted");
@@ -239,7 +239,7 @@ describe("restore / reopen after the editor was deactivated", () => {
   it("reopen into an editor stage still needs an active editor (422)", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "completed" });
     await deactivateEditor1();
-    const err = await catchErr(as("manager", (tx, ctx) => reopenJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "More edits" })));
+    const err = await catchErr(as("coAdmin", (tx, ctx) => reopenJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "More edits" })));
     expect(err.status).toBe(422);
     expect(await jobRow(job.id)).toMatchObject({ statusCategory: "completed", editorId: ids.users.editor1 });
   });
@@ -250,29 +250,29 @@ describe("restore / reopen after the editor was deactivated", () => {
 /* ------------------------------------------------------------------ */
 
 describe("automation notify dedupe", () => {
-  const rule = (input: Record<string, unknown>) => as("manager", (tx, ctx) => createAutomation(tx, ctx, input));
+  const rule = (input: Record<string, unknown>) => as("coAdmin", (tx, ctx) => createAutomation(tx, ctx, input));
 
   it("submit: the photographer gets exactly one notification, even with a rule targeting them", async () => {
     // the pre-fix seed rule (worst case) and the new seed rule
     await rule({ name: "Submitted: photographer", trigger: { type: "status_changed", toCategory: "submitted" }, actions: [{ type: "notify", target: "photographer", message: "Edits ready" }] });
-    await rule({ name: "Submitted: managers", trigger: { type: "status_changed", toCategory: "submitted" }, actions: [{ type: "notify", target: "managers", message: "Edits ready" }] });
+    await rule({ name: "Submitted: admins", trigger: { type: "status_changed", toCategory: "submitted" }, actions: [{ type: "notify", target: "admins", message: "Edits ready" }] });
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", createdByUserId: ids.users.photographer1 });
     await as("editor1", (tx, ctx) => submitJob(tx, ctx, { jobId: job.id, expectedVersion: job.version }));
     await runPendingAutomations(db, ids.organisationId);
     const notices = await noticesOn(job.id);
     const perUser = (userId: string) => notices.filter((n) => n.userId === userId).map((n) => n.type);
     expect(perUser(ids.users.photographer1)).toEqual(["work_submitted"]);
-    expect(perUser(ids.users.manager)).toEqual(["automation"]);
+    expect(perUser(ids.users.coAdmin)).toEqual(["automation"]);
     expect(perUser(ids.users.owner)).toEqual(["automation"]);
   });
 
   it("overdue: one notification per recipient", async () => {
     await rule({
-      name: "Overdue: editor and managers",
+      name: "Overdue: editor and admins",
       trigger: { type: "job_overdue" },
       actions: [
         { type: "notify", target: "editor", message: "Overdue" },
-        { type: "notify", target: "managers", message: "Overdue" },
+        { type: "notify", target: "admins", message: "Overdue" },
       ],
     });
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", dueDate: "2026-10-07T00:00:00.000Z" });
@@ -283,7 +283,7 @@ describe("automation notify dedupe", () => {
     expect(Object.fromEntries(counts)).toEqual({
       [ids.users.editor1]: 1,
       [ids.users.photographer1]: 1,
-      [ids.users.manager]: 1,
+      [ids.users.coAdmin]: 1,
       [ids.users.owner]: 1,
     });
   });
@@ -311,11 +311,11 @@ describe("milestone events carry the matching action", () => {
     await act("editor1", acceptJob, job.id);
     await act("editor1", startJob, job.id);
     await act("editor1", submitJob, job.id);
-    await act("manager", beginReview, job.id);
-    await act("manager", approveJob, job.id);
-    await act("manager", deliverJob, job.id);
-    await act("manager", completeJob, job.id);
-    await act("manager", reopenJob, job.id, { reason: "Fix delivery", toCategory: "approved" });
+    await act("coAdmin", beginReview, job.id);
+    await act("coAdmin", approveJob, job.id);
+    await act("coAdmin", deliverJob, job.id);
+    await act("coAdmin", completeJob, job.id);
+    await act("coAdmin", reopenJob, job.id, { reason: "Fix delivery", toCategory: "approved" });
     const types = ["job.accepted", "job.work_started", "job.submitted", "job.review_started", "job.approved", "job.delivered", "job.completed", "job.reopened"];
     const actions: [string, string | undefined][] = [];
     for (const t of types) actions.push([t, await actionOf(job.id, t)]);
@@ -335,8 +335,8 @@ describe("milestone events carry the matching action", () => {
     const a = (await insertJobFixture(db, ids, { statusKey: "assigned" })).job;
     await as("editor1", (tx, ctx) => declineJob(tx, ctx, { jobId: a.id, expectedVersion: a.version }));
     const b = (await insertJobFixture(db, ids, { statusKey: "in_progress" })).job;
-    await as("manager", (tx, ctx) => cancelJob(tx, ctx, { jobId: b.id, expectedVersion: b.version, reason: "Client cancelled" }));
-    await act("manager", restoreJob, b.id);
+    await as("coAdmin", (tx, ctx) => cancelJob(tx, ctx, { jobId: b.id, expectedVersion: b.version, reason: "Client cancelled" }));
+    await act("coAdmin", restoreJob, b.id);
     expect([await actionOf(a.id, "job.declined"), await actionOf(b.id, "job.cancelled"), await actionOf(b.id, "job.restored")]).toEqual(["declined", "cancelled", "restored"]);
   });
 });
@@ -358,7 +358,7 @@ describe("notification channels", () => {
     // the post-commit dispatcher reads through getDb(); point it at the test db
     setDbOverride(db);
     try {
-      const ctx = await ctxOf("manager");
+      const ctx = await ctxOf("coAdmin");
       const sent = await run(async (tx) => {
         const r = await notify(tx, ctx, { userIds: [ids.users.editor1], type: "automation", title: "Hello", linkPath: "/" });
         expect(received).toEqual([]); // nothing is delivered inside the transaction

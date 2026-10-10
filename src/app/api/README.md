@@ -1,6 +1,6 @@
 # REST API contract (`src/app/api/**`)
 
-The contract page agents code against. Every route is a thin handler: `requireContext()` → one service (mutations) or query (reads) → `{ data }`. **Permissions and validation live in the services/queries** (ARCHITECTURE.md §3, §9); handlers never check either. Shared factories: `src/app/api/_lib/route.ts` (`read`, `readBy`, `mutate`, `mutateById`).
+The contract page agents code against. Every staff route is a thin handler: `requireContext()` (staff only — a client session gets **403** "This area is for studio staff") → one service (mutations) or query (reads) → `{ data }`. **Permissions and validation live in the services/queries** (ARCHITECTURE.md §3, §9); handlers never check either. Shared factories: `src/app/api/_lib/route.ts` (`read`, `readBy`, `mutate`, `mutateById`).
 
 Call it from client islands with `api` from `src/lib/api-client.ts` (`api.get/post/patch/put/delete`), then `router.refresh()`.
 
@@ -19,7 +19,7 @@ Call it from client islands with `api` from `src/lib/api-client.ts` (`api.get/po
 | Automations | Every mutation runs in one transaction and then executes pending automation runs (`withTxThenAutomations`), so rule side effects are visible on the next read. |
 | Ranges | Analytics/reports take `?range=<RANGE_PRESETS>` or `?from=YYYY-MM-DD&to=YYYY-MM-DD`. |
 
-Roles: **O** owner · **M** manager · **P** photographer · **E** editor. "own" = photographer or creator of the job; "assigned" = current editor (past editors are read-only).
+Who (roles v2; `docs/ROLES.md` §3.3 is authoritative): **A** admin (Owner / Photographer) · **M** photographer team member (⚑ = needs that permission switch: ⚑create, ⚑assign, ⚑review, ⚑workloads, ⚑analytics, ⚑all) · **E** editor (⚑teamJobs) · **C** client (portal routes only). "managed" = the member is the job's photographer or created it as a photographer; "controls" = created it, or managed ∧ ⚑review; "assigned" = current editor (past editors are read-only); "draft" = an editor's own unstarted job (ROLES.md §4.3); "staff" = A, M, E.
 
 ---
 
@@ -27,42 +27,43 @@ Roles: **O** owner · **M** manager · **P** photographer · **E** editor. "own"
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| POST | `/api/auth/login` | `{ email, password }` | `{ user }` + cookie | public (rate-limited) |
+| POST | `/api/auth/login` | `{ email, password, next? }` | `{ user, redirectTo }` + cookie (`redirectTo` = `/portal` for clients, else `next` or `/dashboard`). Wrong password, inactive account and a client whose portal is off all get the same 401 | public (rate-limited) |
 | POST | `/api/auth/logout` | — | `{ ok }` (HTML form → 303 `/login`) | any |
-| GET | `/api/auth/me` | — | `{ user, organisation, settings, unreadCount }` | signed in |
+| GET | `/api/auth/me` | — | staff: `{ kind: "staff", user (+ persona, personaLabel, isAdmin, isPrimaryOwner, 7 effective switches), organisation, settings, unreadCount }` · client: `{ kind: "client", name, email, clientName, studioName, unreadCount }` only | signed in (`requireAnyContext`) |
 | POST | `/api/auth/change-password` | `{ current, next }` | ok; other sessions revoked | self |
 
 ## Jobs
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| GET | `/api/jobs` | `q, quick, statusCategory[], statusId[], editorId[], photographerId[], clientId[], projectId[], jobTypeId[], priority[], dueFrom, dueTo, sort, groupBy, viewId, cursor, limit` | `JobListResult` (`rows: JobRow[]`, …) | all, row-scoped |
-| POST | `/api/jobs` | `CreateJobInput { name, projectId, jobTypeId, clientId?, description?, priority?, photographerId?, editorId?, shootDate?, dueDate?, reviewDueDate?, deliveryDueDate?, estimatedHours? }` | `CreateJobResult` (`{ job, … }`) | O M P (P defaults to self) |
+| GET | `/api/jobs` | `scope=mine\|business` (scope-switch holders only; ignored for others), `q, quick, statusCategory[], statusId[], editorId[], photographerId[], clientId[], projectId[], jobTypeId[], priority[], dueFrom, dueTo, sort, groupBy, viewId, cursor, limit` | `JobListResult` (`rows: JobRow[]`, …) | all, row-scoped |
+| POST | `/api/jobs` | `CreateJobInput` (strict) `{ name, projectId \| (clientId + newProject: { name, address? }), jobTypeId, clientId?, description?, priority?, photographerId?, editorId?, shootDate?, dueDate?, reviewDueDate?, deliveryDueDate?, estimatedHours? }` | `CreateJobResult` (`{ job, … }`) | A (any photographer); M ⚑create (photographer = self); E ⚑create (photographer required, default photographer; editor = self or none) |
 | GET | `/api/jobs/:id` | — | `JobDetail` (incl. `actions: JobAvailableActions`) | job.view |
 | PATCH | `/api/jobs/:id` | `{ expectedVersion, name?, description?, clientId?, projectId?, jobTypeId?, shootDate?, estimatedHours?, priority?, dueDate?, reviewDueDate?, deliveryDueDate?, completionPercent? }` | `UpdateJobResult` | per field (edit_fields / set_* / edit_completion_percent) |
 | GET | `/api/jobs/by-number/:jobNumber` | e.g. `PJ-0142` | `JobRow` | job.view (404 otherwise) |
 | GET | `/api/jobs/:id/transitions` | — | `{ transitions[], allowedColumns: KanbanColumn[], actions: JobAvailableActions }` | job.view |
-| POST | `/api/jobs/:id/transition` | `{ toStatusId \| toCategory, expectedVersion, reason?, override?, revision?, startTimer? }` | `TransitionResult { job, fromStatus, toStatus, warnings[], revisionId, … }` | per edge (§4.2); override O M + reason |
-| POST | `/api/jobs/:id/accept` | `{ expectedVersion, toStatusId? }` | `TransitionResult` | assigned E; O M on behalf |
+| POST | `/api/jobs/:id/transition` | `{ toStatusId \| toCategory, expectedVersion, reason?, override?, revision?, startTimer? }` (+ `delivery?: { shareJob?, shareLinkIds? }` on a delivering move only, else 422) | `TransitionResult { job, fromStatus, toStatus, warnings[], revisionId, delivery?, … }` | per edge (ROLES.md §5.2: edge roles, then every action of `actionsForMove`); override A + reason |
+| POST | `/api/jobs/:id/accept` | `{ expectedVersion, toStatusId? }` | `TransitionResult` | assigned E; A on behalf |
+| POST | `/api/jobs/:id/claim` | `{ expectedVersion }` | `{ job, … }` | E: an unassigned job they created, while its draft window is open |
 | POST | `/api/jobs/:id/decline` | `{ expectedVersion, reason? }` | `TransitionResult` | assigned E |
-| POST | `/api/jobs/:id/start` | `{ expectedVersion, startTimer?, toStatusId? }` | `TransitionResult` | assigned E; O M on behalf |
-| POST | `/api/jobs/:id/submit` | `{ expectedVersion }` (in_progress → submitted; a revision is resubmitted via `/api/revisions/:id/resolve`) | `TransitionResult` (+ `warnings` when no finished-work link) | assigned E; O M |
-| POST | `/api/jobs/:id/begin-review` | `{ expectedVersion }` | `TransitionResult` | O M, own P |
-| POST | `/api/jobs/:id/approve` | `{ expectedVersion }` | `TransitionResult` | O M, own P |
-| POST | `/api/jobs/:id/deliver` | `{ expectedVersion }` | `TransitionResult` | O M, own P |
-| POST | `/api/jobs/:id/complete` | `{ expectedVersion }` | `TransitionResult` | O M, own P |
-| POST | `/api/jobs/:id/cancel` | `{ expectedVersion, reason }` | `TransitionResult` | O M, own P (not completed) |
-| POST | `/api/jobs/:id/reopen` | `{ expectedVersion, reason, toCategory?: in_progress\|revision\|approved, revision? }` | `TransitionResult` (422 `editor_required` when no active editor) | O M, own P |
-| POST | `/api/jobs/:id/restore` | `{ expectedVersion, reason? }` | `TransitionResult` | O M, own P |
-| POST | `/api/jobs/:id/pause` | `{ expectedVersion, reason? }` | `PauseResult` | assigned E in EDITOR_WORKING; O M |
+| POST | `/api/jobs/:id/start` | `{ expectedVersion, startTimer?, toStatusId? }` | `TransitionResult` | assigned E; A on behalf |
+| POST | `/api/jobs/:id/submit` | `{ expectedVersion }` (in_progress → submitted; a revision is resubmitted via `/api/revisions/:id/resolve`) | `TransitionResult` (+ `warnings` when no finished-work link) | assigned E; A on behalf |
+| POST | `/api/jobs/:id/begin-review` | `{ expectedVersion }` | `TransitionResult` | A; M managed ∧ ⚑review (never on a job they edited) |
+| POST | `/api/jobs/:id/approve` | `{ expectedVersion }` | `TransitionResult` | A; M managed ∧ ⚑review (never on a job they edited) |
+| POST | `/api/jobs/:id/deliver` | `{ expectedVersion }` | `TransitionResult` | A; M managed ∧ ⚑review (never on a job they edited) |
+| POST | `/api/jobs/:id/complete` | `{ expectedVersion }` | `TransitionResult` | A; M managed ∧ ⚑review (never on a job they edited) |
+| POST | `/api/jobs/:id/cancel` | `{ expectedVersion, reason }` | `TransitionResult` | A; M controls (created it, or managed ∧ ⚑review), not completed |
+| POST | `/api/jobs/:id/reopen` | `{ expectedVersion, reason, toCategory?: in_progress\|revision\|approved, revision? }` | `TransitionResult` (422 `editor_required` when no active editor) | A; M managed ∧ ⚑review |
+| POST | `/api/jobs/:id/restore` | `{ expectedVersion, reason? }` | `TransitionResult` | A; M controls |
+| POST | `/api/jobs/:id/pause` | `{ expectedVersion, reason? }` | `PauseResult` | assigned E in EDITOR_WORKING; A on behalf |
 | POST | `/api/jobs/:id/resume` | `{ expectedVersion }` | `PauseResult` | same |
-| POST | `/api/jobs/:id/assign` | `{ role: "editor"\|"photographer", userId \| null, reason?, expectedVersion? }` | `AssignEditorResult \| AssignPhotographerResult` (`{ job, changed, … }`) | editor: O M, own P · photographer: O M, P createdBy self |
-| POST | `/api/jobs/:id/migrate-workflow` | `{ workflowId, toStatusId, expectedVersion, reason? }` | `{ job, transitionId, eventId }` | O M |
-| POST | `/api/jobs/:id/recompute` | — | `RecomputeResult { job, changes[] }` | O (system.integrity) |
+| POST | `/api/jobs/:id/assign` | `{ role: "editor"\|"photographer", userId \| null, reason?, expectedVersion? }` | `AssignEditorResult \| AssignPhotographerResult` (`{ job, changed, … }`) | editor: A, M managed ∧ ⚑assign · photographer: A; E in its draft window |
+| POST | `/api/jobs/:id/migrate-workflow` | `{ workflowId, toStatusId, expectedVersion, reason? }` | `{ job, transitionId, eventId }` | A |
+| POST | `/api/jobs/:id/recompute` | — | `RecomputeResult { job, changes[] }` | A (system.integrity) |
 | GET | `/api/jobs/:id/history` | — | `HistoryEntry[]` (stages + events, oldest first) | job.view_history |
 | GET | `/api/jobs/:id/activity` | `cursor, limit, eventType[]` | `Paginated<ActivityFeedItem>` | job.view |
 | GET | `/api/jobs/:id/timeline` | — | `TimelineRow` | job.view |
-| POST | `/api/jobs/bulk/reassign` | `{ jobIds[≤200], userId \| null, reason? }` | `BulkResult { ok[], failed[{id,code,message}], batchId }` (200 even with failures) | O M |
+| POST | `/api/jobs/bulk/reassign` | `{ jobIds[≤200], userId \| null, reason? }` | `BulkResult { ok[], failed[{id,code,message}], batchId }` (200 even with failures) | A |
 | POST | `/api/jobs/bulk/priority` | `{ jobIds[], priority }` | `BulkResult` | per job set_priority |
 | POST | `/api/jobs/bulk/transition` | `{ jobIds[], toStatusId \| toCategory, reason?, override? }` | `BulkResult` | per job edge |
 
@@ -71,27 +72,27 @@ Roles: **O** owner · **M** manager · **P** photographer · **E** editor. "own"
 | Method | Path | Body | Response | Who |
 |---|---|---|---|---|
 | GET | `/api/jobs/:id/revisions` | — | `{ revisions: RevisionView[], openRevision: RevisionView \| null }` | job.view |
-| POST | `/api/jobs/:id/revisions` | `{ expectedVersion, reason, description, instructions?, priority?, dueDate?, assigneeUserId?, toStatusId? }` (= transition → revision) | `RevisionTransitionResult` (`{ revision, job, … }`) | O M, own P |
-| PATCH | `/api/revisions/:id` | `{ assigneeUserId?, instructions?, priority?, dueDate? }` (open revisions only) | `UpdateRevisionResult` | O M, own P |
-| POST | `/api/revisions/:id/resolve` | `{ expectedVersion (JOB version), note?, toStatusId? }` (→ resubmitted) | `RevisionTransitionResult` | assigned E; O M on behalf |
-| POST | `/api/revisions/:id/withdraw` | `{ expectedVersion (JOB version), reason? }` | `RevisionTransitionResult` | O M, own P |
+| POST | `/api/jobs/:id/revisions` | `{ expectedVersion, reason, description, instructions?, priority?, dueDate?, assigneeUserId?, toStatusId? }` (= transition → revision) | `RevisionTransitionResult` (`{ revision, job, … }`) | A; M managed ∧ ⚑review |
+| PATCH | `/api/revisions/:id` | `{ assigneeUserId?, instructions?, priority?, dueDate? }` (open revisions only) | `UpdateRevisionResult` | A; M managed ∧ ⚑review |
+| POST | `/api/revisions/:id/resolve` | `{ expectedVersion (JOB version), note?, toStatusId? }` (→ resubmitted) | `RevisionTransitionResult` | assigned E; A on behalf |
+| POST | `/api/revisions/:id/withdraw` | `{ expectedVersion (JOB version), reason? }` | `RevisionTransitionResult` | A; M managed ∧ ⚑review |
 
 ## Comments · Notes · Links
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
 | GET | `/api/jobs/:id/comments` | — | `CommentNode[]` (threads) | job.view |
-| POST | `/api/jobs/:id/comments` | `{ body, kind?: comment\|question\|clarification_request\|revision_response, parentCommentId?, revisionId?, mentionUserIds[] }` | `AddCommentResult` | job.view (E: current editor only). Mentions of people who cannot view the job → **422** naming them |
+| POST | `/api/jobs/:id/comments` | `{ body, kind?: comment\|question\|clarification_request\|revision_response\|client_feedback, parentCommentId?, revisionId?, mentionUserIds[] }` | `AddCommentResult` | staff on visible jobs (E: assigned or draft). Mentions of people who cannot view the job → **422** naming them. `client_feedback` = a reply inside a client thread only (`client_feedback.reply`: A; M managed ∧ ⚑review); starting a client thread or @mentioning in one → **422** |
 | PATCH | `/api/comments/:id` | `{ body }` | `JobComment` | author, within the edit window |
-| DELETE | `/api/comments/:id` | — | `JobComment` (soft-deleted) | author; O M |
-| GET | `/api/jobs/:id/notes` | `?includeArchived=1` | `NoteView[]` | note.read (internal notes: O M, own P) |
-| POST | `/api/jobs/:id/notes` | `{ kind: photographer\|editor\|internal\|revision\|client, body, revisionId?, isPinned? }` | `JobNote` | O M; own P (no internal); assigned E (editor/revision) |
+| DELETE | `/api/comments/:id` | — | `JobComment` (soft-deleted) | author; A |
+| GET | `/api/jobs/:id/notes` | `?includeArchived=1` | `NoteView[]` | note.read (internal: A, M on managed jobs; editors never internal/client notes) |
+| POST | `/api/jobs/:id/notes` | `{ kind: photographer\|editor\|internal\|revision\|client\|delivery, body, revisionId?, isPinned? }` | `JobNote` | A all kinds; M managed (photographer/client/revision; `delivery` needs ⚑review); E assigned or draft (editor/revision) |
 | PATCH | `/api/notes/:id` | `{ expectedVersion, body?, isPinned? }` (at least one) | `JobNote` | note.edit |
 | POST | `/api/notes/:id/archive` · `/restore` | `{ expectedVersion? }` | `JobNote` | note.archive |
 | GET | `/api/notes/:id/history` | — | `NoteHistoryEntry[]` | note.read |
 | GET | `/api/jobs/:id/links` | `?history=1` (include replaced/removed) | `LinkSlot[]` | job.view |
-| POST | `/api/jobs/:id/links` | `{ kind: LINK_KINDS, url (http/https), label? }` | `JobLink` | O M, own P; assigned E (`EDITOR_LINK_KINDS`) |
-| POST | `/api/links/:id/replace` | `{ url, label? }` (omit label = keep) | `{ link, previous }` | O M, own P; E who added it |
+| POST | `/api/jobs/:id/links` | `{ kind: LINK_KINDS, url (http/https), label? }` | `JobLink` | A; M managed (client-facing kinds once in review need ⚑review); E working (`EDITOR_LINK_KINDS`) or draft (+ `raw_files`) |
+| POST | `/api/links/:id/replace` | `{ url, label? }` (omit label = keep) | `{ link, previous }` | A; M managed; E who added it, while working or in draft, unshared links only |
 | POST | `/api/links/:id/remove` | `{ reason? }` | `JobLink` | same |
 
 ## Time tracking
@@ -108,57 +109,60 @@ Roles: **O** owner · **M** manager · **P** photographer · **E** editor. "own"
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
 | GET | `/api/clients` | `q, includeArchived` | `ClientListItem[]` | client.view (E: clients of visible jobs) |
-| POST | `/api/clients` | `CreateClientInput { name, contactName?, email?, phone?, colour?, notes? }` | `Client` | O M P |
-| GET | `/api/clients/options` | `q` | `ClientOption[] { id, name, colour }` (non-archived) | client.view |
+| POST | `/api/clients` | `CreateClientInput { name, contactName?, email?, phone?, colour?, notes? }` | `Client` | A; M ⚑create |
+| GET | `/api/clients/options` | `q` | `ClientOption[] { id, name, colour }` (non-archived) | anyone who can `job.create` (every non-archived client) |
 | GET | `/api/clients/:id` | — | `ClientDetail` | client.view |
-| PATCH | `/api/clients/:id` | `{ expectedVersion, ...fields }` | `Client` | O M; P createdBy self |
-| POST | `/api/clients/:id/archive` · `/restore` | `{ expectedVersion }` | `Client` | O M |
+| PATCH | `/api/clients/:id` | `{ expectedVersion, ...fields }` | `Client` | A; M createdBy self (never portal columns) |
+| POST | `/api/clients/:id/archive` · `/restore` | `{ expectedVersion }` | `Client` | A |
 | GET | `/api/projects` | `clientId, q, includeArchived` | `ProjectListItem[]` | project.view |
-| POST | `/api/projects` | `CreateProjectInput { clientId, name, address?, description?, startDate?, endDate? }` | `Project` | O M P |
-| GET | `/api/projects/options` | `clientId, q` | `ProjectOption[] { id, name, clientId, clientName }` (non-archived) | project.view |
+| POST | `/api/projects` | `CreateProjectInput { clientId, name, address?, description?, startDate?, endDate? }` | `Project` | A; M ⚑create (E: only inline from `POST /api/jobs` `newProject`) |
+| GET | `/api/projects/options` | `clientId, q` | `ProjectOption[] { id, name, clientId, clientName }` (non-archived) | anyone who can `job.create` |
 | GET | `/api/projects/:id` | — | `ProjectDetail` | project.view |
-| PATCH | `/api/projects/:id` | `{ expectedVersion, ...fields }` | `Project` | O M; P createdBy self |
-| POST | `/api/projects/:id/archive` · `/restore` | `{ expectedVersion }` | `Project` | O M |
+| PATCH | `/api/projects/:id` | `{ expectedVersion, ...fields }` | `Project` | A; M createdBy self (never `sharedWithClient`) |
+| POST | `/api/projects/:id/archive` · `/restore` | `{ expectedVersion }` | `Project` | A |
 
 ## Users · Teams
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| GET | `/api/users` | `role, active (1/0), q` | `(UserProfile \| UserRef)[]` — reduced `UserRef` for P/E | user.view |
-| POST | `/api/users` | `InviteUserInput { email, name, role, title?, avatarColour?, capacityHoursPerWeek?, canViewTeamWorkloads?, canViewAnalytics? }` | `{ user, tempPassword }` (show once) | O; M (P/E targets) |
+| GET | `/api/users` | `role, active (1/0), q` | `(UserProfile \| ReducedUser)[]` — reduced projection (no email; never client users; `role=client` → 400) for M/E | user.view |
+| POST | `/api/users` | `InviteUserInput` (strict, by `role`): photographer `{ email, name, title?, capacityHoursPerWeek?, isAdmin?, flags?: {member switches} }` (omitted switches = invite defaults: review off) · editor `{ …, flags?: { canCreateJobs?, canViewTeamJobs? } }` · client `{ email, name, clientId }` (portal must be on, else 422). Email used anywhere → 409 | `{ user, tempPassword }` (show once) | A |
 | GET | `/api/users/options` | `role` (one, comma list or repeated), `jobId` (only people who may view that job — @mentions), `includeInactive=1`, `excludeSelf=1`, `q` | `UserOption[] { id, name, role, avatarColour, isActive, workload: { band, active, overdue } \| null }` — workload only for editors and only when the actor may view team workloads | user.view (`jobId` not visible → 404) |
-| GET | `/api/users/:id` | — | `UserDetailView` | user.view (reduced for P/E) |
-| PATCH | `/api/users/:id` | `{ expectedVersion, name?, title?, avatarColour?, email? }` | `SafeUser` | O; M (P/E); self (name/title/avatar) |
-| POST | `/api/users/:id/role` | `{ role, expectedVersion }` | `SafeUser` | O; M (P ⇄ E only) |
-| POST | `/api/users/:id/deactivate` | `{ expectedVersion, reassignTo? \| unassign?, reason? }` | `DeactivateResult` | O; M (P/E) |
-| POST | `/api/users/:id/reactivate` | `{ expectedVersion }` | `SafeUser` | O; M (P/E) |
-| POST | `/api/users/:id/reset-password` | — | `{ userId, tempPassword }` (sessions revoked) | O; M (P/E); self |
-| POST | `/api/users/:id/anonymise` | `{ expectedVersion }` | `SafeUser` | O (deactivated target) |
-| POST | `/api/users/:id/capacity` | `{ capacityHoursPerWeek \| null, expectedVersion }` | `SafeUser` | O; M (P/E) |
-| POST | `/api/users/:id/visibility` | `{ canViewTeamWorkloads?, canViewAnalytics?, expectedVersion }` | `SafeUser` | O; M (P/E) |
+| GET | `/api/users/:id` | — | `UserDetailView` | user.view (reduced for M/E; a client user's id → 404 for non-admins) |
+| PATCH | `/api/users/:id` | `{ expectedVersion, name?, title?, avatarColour?, email? }` | `SafeUser` | A (email: `user.change_email`; never the primary owner unless self); self (name/title/avatar) |
+| POST | `/api/users/:id/role` | `{ role, expectedVersion }` | `SafeUser` | A (photographer ⇄ editor only; never self; never the primary owner) |
+| POST | `/api/users/:id/deactivate` | `{ expectedVersion, reassignTo? \| unassign?, reason? }` | `DeactivateResult` | A (not self, not the primary owner, last-admin guard) |
+| POST | `/api/users/:id/reactivate` | `{ expectedVersion }` | `SafeUser` | A |
+| POST | `/api/users/:id/reset-password` | — | `{ userId, tempPassword }` (sessions revoked) | A (staff and client users; not the primary owner); self |
+| POST | `/api/users/:id/anonymise` | `{ expectedVersion }` | `SafeUser` | A (deactivated target) |
+| POST | `/api/users/:id/capacity` | `{ capacityHoursPerWeek \| null, expectedVersion }` | `SafeUser` | A |
+| POST | `/api/users/:id/permissions` | `{ canCreateJobs?, canViewAllJobs?, canAssignEditors?, canReviewSubmissions?, canViewTeamWorkloads?, canViewAnalytics?, canViewTeamJobs?, expectedVersion }` (member switches on non-admin photographers, editor switches on editors; admin target → 422) | `SafeUser` | A (`/visibility` was removed) |
+| POST | `/api/users/:id/admin` | `{ isAdmin, expectedVersion }` | `SafeUser` | A (active photographer, not self; last-admin / primary-owner guards → 422) |
+| POST | `/api/organisation/primary-owner` | `{ userId, expectedVersion (settings version) }` | `PrimaryOwnerResult` | the primary owner only (target: another active admin) |
+| POST | `/api/settings/roles-notice/dismiss` | — | ok (idempotent) | A |
 | GET | `/api/users/:id/notification-prefs` | — | `NotificationPrefView[]` | self only |
 | PUT | `/api/users/:id/notification-prefs` | `{ prefs: { [NotificationType]: boolean } }` | `NotificationPrefView[]` | self only (mandatory types stay on) |
 | GET | `/api/teams` | `includeArchived` | `TeamView[]` | team.view_members |
-| POST | `/api/teams` | `{ name, description?, leadUserId?, memberIds? }` | `TeamWithMembers` | O M |
+| POST | `/api/teams` | `{ name, description?, leadUserId?, memberIds? }` | `TeamWithMembers` | A |
 | GET | `/api/teams/:id` | — | `TeamDetail` | team.view_members |
-| PATCH | `/api/teams/:id` | `{ expectedVersion, name?, description?, leadUserId? }` | `Team` | O M |
-| POST | `/api/teams/:id/archive` | `{ expectedVersion }` | `Team` | O M |
-| POST | `/api/teams/:id/members` | `{ userId }` | `TeamMembership` | O M |
-| POST | `/api/teams/:id/members/:userId/remove` | — | `TeamMembership` | O M |
+| PATCH | `/api/teams/:id` | `{ expectedVersion, name?, description?, leadUserId? }` | `Team` | A |
+| POST | `/api/teams/:id/archive` | `{ expectedVersion }` | `Team` | A |
+| POST | `/api/teams/:id/members` | `{ userId }` | `TeamMembership` | A |
+| POST | `/api/teams/:id/members/:userId/remove` | — | `TeamMembership` | A |
 
 ## Workloads · Analytics · Reports
 
 | Method | Path | Query | Response | Who |
 |---|---|---|---|---|
 | GET | `/api/workloads` | — | `WorkloadRow[]` (all editors with workloads.view_team, else own row / empty) | all |
-| GET | `/api/workloads/:userId` | — | `WorkloadDetail` (incl. history series) | workloads.view_team; self |
-| GET | `/api/analytics/overview` | `range \| from,to` | `AnalyticsOverview` | analytics.view (O M, P with flag) |
+| GET | `/api/workloads/:userId` | — | `WorkloadDetail` (incl. history series) | person-page rule (ROLES.md §3.4): A; self; M ⚑workloads/⚑analytics on editors, ⚑analytics on photographers |
+| GET | `/api/analytics/overview` | `range \| from,to` | `AnalyticsOverview` | analytics.view (A; M ⚑analytics) |
 | GET | `/api/analytics/editors` | range | `{ range, editors: PerformanceRow[] }` | analytics.view |
-| GET | `/api/analytics/editors/:userId` | range | `EditorAnalytics` | analytics.view; the editor themself |
+| GET | `/api/analytics/editors/:userId` | range | `EditorAnalytics` | person-page rule (performance); the editor themself |
 | GET | `/api/analytics/photographers` | range | `{ range, photographers: PhotographerPerformanceRow[] }` | analytics.view |
 | GET | `/api/analytics/business` | range | `Report` (kind `business`) | reports.view |
 | GET | `/api/analytics/me` | range | `MyAnalytics` | all (analytics.view_self) |
-| GET | `/api/performance` | range | `PerformanceReport` | performance.view (O M) |
+| GET | `/api/performance` | range | `PerformanceReport` | performance.view (A; M ⚑analytics) |
 | GET | `/api/bottlenecks` | — | `BottleneckAlert[]` | bottlenecks.view |
 | GET | `/api/reports/:kind` | `range \| from,to`, `format=json\|csv` | `Report`; `format=csv` → `text/csv` attachment (`Content-Disposition` filename from `reportFileName`). Unknown kind → 404 | reports.view / export.csv |
 
@@ -168,15 +172,15 @@ Kinds: `production | editors | photographers | business`. The query-string form 
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| GET | `/api/dashboard` | — | `DashboardData` | all (role variant) |
+| GET | `/api/dashboard` | — | `DashboardData` | staff (persona variant; `?scope=mine\|business` for scope-switch holders) |
 | GET | `/api/dashboard/layout` | — | `DashboardLayoutView` (`version` 0 = role default) | self |
 | PUT | `/api/dashboard/layout` | `{ layout: DashboardLayout, expectedVersion? }` | `DashboardLayoutView` | self (dashboard.customise) |
 | POST | `/api/dashboard/layout/reset` | — | `DashboardLayoutView` | self |
-| GET | `/api/kanban` | job filters (as `/api/jobs`), board options | `KanbanBoard` | all, row-scoped |
+| GET | `/api/kanban` | job filters (as `/api/jobs`, incl. `scope`), board options | `KanbanBoard` | all, row-scoped |
 | POST | `/api/kanban/drop` | `{ jobId, column: KanbanColumn, expectedVersion, toStatusId?, reason?, revision?, startTimer? }` | `KanbanDropResponse` — see below | per edge |
 | GET | `/api/calendar` | `CalendarQuerySchema` (`from, to`, filters) | `CalendarEvent[]` | all, row-scoped |
 | GET | `/api/timeline` | `TimelineQuerySchema` (`from, to, groupBy, editorId` = bars held by, `jobId`, plus `q, currentEditorId[], photographerId[], priority[]` applied in SQL before the 500-row cap) | `TimelineRow[]` | row-scoped |
-| GET | `/api/team-work` | `TeamWorkQuerySchema` | `TeamWorkGroup[]` | O M; P/E with team-jobs visibility |
+| GET | `/api/team-work` | `TeamWorkQuerySchema` | `TeamWorkGroup[]` | Team Work gate: A; M ⚑all; E ⚑teamJobs (rows visibility-scoped) |
 
 **Kanban drop** (ARCHITECTURE §4.6). Send the drop; act on `data.kind`:
 
@@ -196,13 +200,13 @@ Kinds: `production | editors | photographers | business`. The query-string form 
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| GET | `/api/activity` | `userId, jobId, eventType[], entityType[], from, to, cursor, limit` | `Paginated<ActivityFeedItem>` | activity.view_global (scoped; management events O M only) |
+| GET | `/api/activity` | `userId, jobId, eventType[], entityType[], from, to, cursor, limit` | `Paginated<ActivityFeedItem>` | activity.view_global (scoped; management events A only) |
 | GET | `/api/notifications` | `unread=1, cursor, limit` | `Paginated<NotificationView>` | self |
 | POST | `/api/notifications/:id/read` | — | `{ id, readAt }` (idempotent) | self |
 | POST | `/api/notifications/read-all` | — | `{ updated }` | self |
 | GET | `/api/search` | `q, limit` | `SearchResults` (grouped) | search.global (scoped) |
 | GET | `/api/views` | `scope` | `SavedViewItem[]` (own + shared) | self |
-| POST | `/api/views` | `{ name, scope, config: { filters, sort, columns, … }, isShared?, isDefault? }` | `SavedView` | self; `isShared` O M |
+| POST | `/api/views` | `{ name, scope, config: { filters, sort, columns, … }, isShared?, isDefault? }` | `SavedView` | self; `isShared` A |
 | GET | `/api/views/:id` | — | `SavedViewItem` | owner of the view, or shared |
 | PATCH | `/api/views/:id` | `{ expectedVersion, name?, config?, isShared?, isDefault? }` | `SavedView` | owner of the view |
 | DELETE | `/api/views/:id?expectedVersion=N` | (version in the query: `api.delete` sends no body) | `SavedView` (archived) | owner of the view |
@@ -211,41 +215,74 @@ Kinds: `production | editors | photographers | business`. The query-string form 
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| GET | `/api/settings` | — | `SettingsView` | O M |
-| PATCH | `/api/settings` | `{ expectedVersion, organisationName?, …any settings field }` | `UpdateSettingsResult { …, changedFields[] }` (no change → 200, empty list) | O |
-| GET | `/api/settings/permissions` | — | `PermissionMatrixRow[]` | O M |
-| GET | `/api/workflows` | — | `WorkflowListItem[]` | O M |
-| POST | `/api/workflows` | `{ name, description?, from?: default\|workflow\|blank, sourceWorkflowId?, isDefault? }` | `WorkflowGraph` | O |
-| GET | `/api/workflows/:id` | — | `WorkflowGraph` | O M |
-| PATCH | `/api/workflows/:id` | `{ expectedVersion, name?, description?, isDefault?: true }` | `WorkflowGraph` | O |
-| POST | `/api/workflows/:id/archive` | `{ expectedVersion }` | `Workflow` | O |
-| POST | `/api/workflows/:id/statuses` | `{ name, category, key?, colour?, description?, sortOrder?, isInitial? }` | `{ status, graph }` | O |
-| POST | `/api/workflows/:id/reorder` | `{ statusIds[] }` (every live status, new order) | `WorkflowGraph` | O |
-| POST | `/api/workflows/:id/transitions` | `{ fromStatusId, toStatusId, allowedRoles[], label?, requiresAssignedEditor?, assigneeOnly?, isReopen? }` | `{ transition, graph }` | O |
-| PATCH | `/api/statuses/:id` | `{ expectedVersion, name?, category?, colour?, description?, isInitial?: true }` | `UpdateStatusResult` | O |
-| POST | `/api/statuses/:id/archive` | `{ expectedVersion }` (blocked while jobs sit in it) | `{ status, graph }` | O |
-| PATCH | `/api/transitions/:id` | `{ label?, allowedRoles?, requiresAssignedEditor?, assigneeOnly?, isReopen? }` | `{ transition, graph }` | O |
-| POST | `/api/transitions/:id/archive` | — | `{ transition, graph }` | O |
-| GET | `/api/job-types` | `includeArchived=1` | `JobTypeView[]` | all (create-job form) |
-| POST | `/api/job-types` | `{ name, colour?, workflowId?, defaultEstimatedHours?, sortOrder? }` | `JobType` | O M |
-| PATCH | `/api/job-types/:id` | `{ expectedVersion, name?, colour?, workflowId?, defaultEstimatedHours?, sortOrder? }` | `JobType` | O M |
-| POST | `/api/job-types/:id/archive` · `/restore` | `{ expectedVersion }` | `JobType` | O M |
-| GET | `/api/automations` | `includeArchived=1` | `AutomationListItem[]` | O M |
-| POST | `/api/automations` | `CreateAutomationInput { name, description?, trigger, conditions?, actions, isEnabled?, sortOrder? }` | `Automation` | O M |
-| GET | `/api/automations/:id` | — | `AutomationDetail` | O M |
-| PATCH | `/api/automations/:id` | `{ expectedVersion, …fields }` | `Automation` | O M |
-| POST | `/api/automations/:id/toggle` | `{ expectedVersion, isEnabled? }` (omitted = flip) | `Automation` | O M |
-| POST | `/api/automations/:id/archive` | `{ expectedVersion }` | `Automation` | O M |
-| POST | `/api/automations/:id/dry-run` | `{ jobId, triggerEventId? }` | `AutomationDryRunResult` (no writes) | O M |
-| GET | `/api/automations/:id/runs` | `status, jobId, cursor, limit` | `Paginated<AutomationRunView>` | O M |
-| GET | `/api/automation-runs` | `automationId, status, jobId, cursor, limit` | `Paginated<AutomationRunView>` | O M |
+| GET | `/api/settings` | — | `SettingsView` | A |
+| PATCH | `/api/settings` | `{ expectedVersion, organisationName?, …any settings field }` | `UpdateSettingsResult { …, changedFields[] }` (no change → 200, empty list) | A |
+| GET | `/api/settings/permissions` | — | `PermissionMatrixRow[]` | A |
+| GET | `/api/workflows` | — | `WorkflowListItem[]` | A |
+| POST | `/api/workflows` | `{ name, description?, from?: default\|workflow\|blank, sourceWorkflowId?, isDefault? }` | `WorkflowGraph` | A |
+| GET | `/api/workflows/:id` | — | `WorkflowGraph` | A |
+| PATCH | `/api/workflows/:id` | `{ expectedVersion, name?, description?, isDefault?: true }` | `WorkflowGraph` | A |
+| POST | `/api/workflows/:id/archive` | `{ expectedVersion }` | `Workflow` | A |
+| POST | `/api/workflows/:id/statuses` | `{ name, category, key?, colour?, description?, sortOrder?, isInitial? }` | `{ status, graph }` | A |
+| POST | `/api/workflows/:id/reorder` | `{ statusIds[] }` (every live status, new order) | `WorkflowGraph` | A |
+| POST | `/api/workflows/:id/transitions` | `{ fromStatusId, toStatusId, allowedRoles[], label?, requiresAssignedEditor?, assigneeOnly?, isReopen? }` | `{ transition, graph }` | A |
+| PATCH | `/api/statuses/:id` | `{ expectedVersion, name?, category?, colour?, description?, isInitial?: true }` | `UpdateStatusResult` | A |
+| POST | `/api/statuses/:id/archive` | `{ expectedVersion }` (blocked while jobs sit in it) | `{ status, graph }` | A |
+| PATCH | `/api/transitions/:id` | `{ label?, allowedRoles?, requiresAssignedEditor?, assigneeOnly?, isReopen? }` | `{ transition, graph }` | A |
+| POST | `/api/transitions/:id/archive` | — | `{ transition, graph }` | A |
+| GET | `/api/job-types` | `includeArchived=1` | `JobTypeView[]` | staff (create-job form) |
+| POST | `/api/job-types` | `{ name, colour?, workflowId?, defaultEstimatedHours?, sortOrder? }` | `JobType` | A |
+| PATCH | `/api/job-types/:id` | `{ expectedVersion, name?, colour?, workflowId?, defaultEstimatedHours?, sortOrder? }` | `JobType` | A |
+| POST | `/api/job-types/:id/archive` · `/restore` | `{ expectedVersion }` | `JobType` | A |
+| GET | `/api/automations` | `includeArchived=1` | `AutomationListItem[]` | A |
+| POST | `/api/automations` | `CreateAutomationInput { name, description?, trigger, conditions?, actions, isEnabled?, sortOrder? }` | `Automation` | A |
+| GET | `/api/automations/:id` | — | `AutomationDetail` | A |
+| PATCH | `/api/automations/:id` | `{ expectedVersion, …fields }` | `Automation` | A |
+| POST | `/api/automations/:id/toggle` | `{ expectedVersion, isEnabled? }` (omitted = flip) | `Automation` | A |
+| POST | `/api/automations/:id/archive` | `{ expectedVersion }` | `Automation` | A |
+| POST | `/api/automations/:id/dry-run` | `{ jobId, triggerEventId? }` | `AutomationDryRunResult` (no writes) | A |
+| GET | `/api/automations/:id/runs` | `status, jobId, cursor, limit` | `Paginated<AutomationRunView>` | A |
+| GET | `/api/automation-runs` | `automationId, status, jobId, cursor, limit` | `Paginated<AutomationRunView>` | A |
+
+## Sharing with clients (staff; ROLES.md §7.1–§7.3)
+
+Sharing and portal columns are written only by these routes (and the delivery step of `POST /api/jobs/:id/transition`); every generic schema rejects them with 400.
+
+| Method | Path | Body | Response | Who |
+|---|---|---|---|---|
+| POST | `/api/jobs/:id/share` | `{ shared, expectedVersion }` | `{ job, changed, eventId, notifiedUserIds }` (client users get "Work shared with you") | A; M managed ∧ ⚑review |
+| POST | `/api/projects/:id/share` | `{ shared, expectedVersion }` (covers current and future jobs) | `{ project, changed, eventId, jobCount, notifiedUserIds }` | A |
+| POST | `/api/links/:id/share` | `{ shared }` (current links only) | `{ link, changed, eventId }` | A; M managed ∧ ⚑review |
+| POST | `/api/clients/:id/portal` | `{ portalEnabled?, feedbackEnabled?, expectedVersion }` (portal off signs its users out) | `{ client, changed, eventId }` | A |
+| GET | `/api/clients/:id/portal-users` | — | `ClientPortalUser[]` | A |
+| POST | `/api/me/scope` | `{ scope: "mine" \| "business" }` → `pwm_scope` cookie (not audited) | ok | A; M ⚑all (others 403) |
+
+Client users are invited with `POST /api/users { role: "client", clientId, name, email }`; reset / deactivate / reactivate use the normal user routes.
+
+## Client portal (`/api/portal/**`, `requirePortalContext()`; staff sessions get 403)
+
+Every read starts from `portalJobsWhere` (jobs of the user's own client, shared directly or through their project; cancelled ones for 30 days) and returns the whitelisted projection of ROLES.md §7.4 — never editors, statuses, priorities, internal notes or staff comments. Anything outside it is **404**. Bodies are strict (no `kind`, mentions or revision ids).
+
+| Method | Path | Body / query | Response | Who |
+|---|---|---|---|---|
+| GET | `/api/portal/me` | — | `PortalViewer` | C |
+| PATCH | `/api/portal/me` | `{ name, expectedVersion? }` | `PortalViewer` | C (self) |
+| GET | `/api/portal/jobs` | `sort=progress\|delivered` | `PortalProjectGroup[]` (with `sort`: a flat, sorted `PortalJob[]`) | C |
+| GET | `/api/portal/jobs/:id` | — | `PortalJobDetail` (milestone, dates, shared links, delivery notes, feedback threads, `canGiveFeedback`) | C, shared jobs only |
+| GET | `/api/portal/projects/:id` | — | `PortalProjectGroup` | C, shared jobs only |
+| POST | `/api/portal/jobs/:id/feedback` | `{ body, parentCommentId? }` | the new message | C, `portal.give_feedback` (feedback on and job not cancelled, else 403) |
+| PATCH | `/api/portal/comments/:id` | `{ body }` | message | C, own feedback within 15 min |
+| DELETE | `/api/portal/comments/:id` | — | message (soft-deleted) | C, own feedback |
+| GET | `/api/portal/notifications` | `cursor, limit` | `{ items, nextCursor }` (client types only) | C |
+| POST | `/api/portal/notifications/:id/read` · `/read-all` | — | ok | C |
+| GET / PUT | `/api/portal/notification-prefs` | `{ prefs: { client_work_shared?, client_work_delivered?, client_feedback_reply? } }` | `NotificationPrefView[]` | C |
 
 ## System (existing)
 
 | Method | Path | Response | Who |
 |---|---|---|---|
-| POST | `/api/system/sweep` | `SweepResult` | O M |
-| GET | `/api/system/integrity` | `IntegrityReport { ok, drift[], structural[] }` | O |
+| POST | `/api/system/sweep` | `SweepResult` | A |
+| GET | `/api/system/integrity` | `IntegrityReport { ok, drift[], structural[] }` | A |
 
 There are no hard deletes: `DELETE` exists only for the soft comment delete and saved views (archive).
 

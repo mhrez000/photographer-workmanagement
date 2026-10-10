@@ -26,8 +26,9 @@ function todayLabel(timeZone: string): string {
 
 /**
  * My Work (spec §2 editor workspace, §7, ARCHITECTURE §10): the viewer's
- * focused queue. Editors see the jobs they hold; photographers / managers /
- * owners see their own jobs, with the Review queue first.
+ * focused queue. Editors see the jobs they hold; photographers (the owner
+ * included) see their own jobs, with the Review queue first. My Work is always
+ * personal — the My shoots | Whole business switch does not apply (docs/ROLES.md §8).
  */
 export default async function MyWorkPage() {
   const { ctx, db } = await pageContext();

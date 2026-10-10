@@ -122,17 +122,61 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
   check("revision jobs present", (byCat.get("revision") ?? 0) > 0, String(byCat.get("revision") ?? 0), true);
   check("awaiting review present", awaitingReview > 0, String(awaitingReview), true);
 
-  /* ---------------- §12 scenario checks ---------------- */
+  /* ---------------- roles v2 (docs/ROLES.md §13) — hard ---------------- */
+  const legacyRoles = await one("SELECT COUNT(*) FROM users WHERE role NOT IN ('photographer', 'editor', 'client')");
+  check("0 users with legacy roles (owner / manager)", legacyRoles === 0, String(legacyRoles), true);
+  const badPrimary = await one(
+    "SELECT COUNT(*) FROM organisation_settings s WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.primary_owner_user_id AND u.organisation_id = s.organisation_id AND u.role = 'photographer' AND u.is_admin AND u.is_active)",
+  );
+  check("exactly one primary owner per org, an active admin", badPrimary === 0, `${badPrimary} org(s) without a valid primary owner`, true);
+  const editorCreated = await one("SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND created_by_role = 'editor'", org);
+  check("≥ 6 editor-created jobs", editorCreated >= 6, String(editorCreated), true);
+  const cancelledCutoff = new Date(nowMs - 30 * 86_400_000).toISOString();
+  const bestPortalUser = await one(
+    `SELECT COALESCE(MAX(n), 0) FROM (
+       SELECT u.id, COUNT(j.id) AS n FROM users u
+         JOIN clients c ON c.id = u.client_id AND c.portal_enabled AND c.archived_at IS NULL
+         JOIN jobs j ON j.organisation_id = u.organisation_id AND j.client_id = u.client_id
+        WHERE u.organisation_id = ? AND u.role = 'client' AND u.is_active
+          AND (j.status_category <> 'cancelled' OR j.cancelled_at >= ?)
+          AND (j.shared_with_client OR EXISTS (SELECT 1 FROM projects p WHERE p.id = j.project_id AND p.shared_with_client))
+        GROUP BY u.id) x`,
+    org,
+    cancelledCutoff,
+  );
+  check("≥ 1 portal user with ≥ 2 visible jobs", bestPortalUser >= 2, String(bestPortalUser), true);
+  const sharedWithoutLinks = await one(
+    `SELECT COUNT(*) FROM jobs j WHERE j.status_category IN ('delivered', 'completed')
+       AND (j.shared_with_client OR EXISTS (SELECT 1 FROM projects p WHERE p.id = j.project_id AND p.shared_with_client))
+       AND NOT EXISTS (SELECT 1 FROM job_links l WHERE l.job_id = j.id AND l.shared_with_client AND l.superseded_at IS NULL AND l.removed_at IS NULL)`,
+  );
+  check("every delivered shared job has ≥ 1 client-visible link", sharedWithoutLinks === 0, `${sharedWithoutLinks} without`, true);
+  const portalUsers = await one("SELECT COUNT(*) FROM users WHERE organisation_id = ? AND role = 'client'", org);
+  lines.push(`Roles v2: editor-created jobs=${editorCreated}, portal users=${portalUsers}, best portal user sees ${bestPortalUser} jobs`);
+
+  /* ---------------- §12 scenario checks (planned jobs only) ---------------- */
+  // The roles-v2 portal story (Harbourline Realty) and the editor-created jobs are scripted
+  // on top of the 160 planned jobs (./portal.ts); the scenario targets describe the plan.
+  const planned = (alias = "") =>
+    `${alias}created_by_role = 'photographer' AND ${alias}client_id NOT IN (SELECT hc.id FROM clients hc WHERE hc.name = 'Harbourline Realty')`;
+  const plannedByCat = new Map<string, number>(
+    (
+      await rows<{ c: string; n: number }>(
+        `SELECT status_category AS c, COUNT(*) AS n FROM jobs WHERE organisation_id = ? AND ${planned()} GROUP BY status_category`,
+        org,
+      )
+    ).map((r) => [r.c, r.n]),
+  );
   const expect: [string, number][] = [
-    ["new+ready", (byCat.get("new") ?? 0) + (byCat.get("ready") ?? 0)],
-    ["assigned+accepted", (byCat.get("assigned") ?? 0) + (byCat.get("accepted") ?? 0)],
-    ["in_progress", byCat.get("in_progress") ?? 0],
-    ["submitted+review", (byCat.get("submitted") ?? 0) + (byCat.get("review") ?? 0)],
-    ["revision", byCat.get("revision") ?? 0],
-    ["resubmitted", byCat.get("resubmitted") ?? 0],
-    ["approved+delivered", (byCat.get("approved") ?? 0) + (byCat.get("delivered") ?? 0)],
-    ["completed", byCat.get("completed") ?? 0],
-    ["cancelled", byCat.get("cancelled") ?? 0],
+    ["new+ready", (plannedByCat.get("new") ?? 0) + (plannedByCat.get("ready") ?? 0)],
+    ["assigned+accepted", (plannedByCat.get("assigned") ?? 0) + (plannedByCat.get("accepted") ?? 0)],
+    ["in_progress", plannedByCat.get("in_progress") ?? 0],
+    ["submitted+review", (plannedByCat.get("submitted") ?? 0) + (plannedByCat.get("review") ?? 0)],
+    ["revision", plannedByCat.get("revision") ?? 0],
+    ["resubmitted", plannedByCat.get("resubmitted") ?? 0],
+    ["approved+delivered", (plannedByCat.get("approved") ?? 0) + (plannedByCat.get("delivered") ?? 0)],
+    ["completed", plannedByCat.get("completed") ?? 0],
+    ["cancelled", plannedByCat.get("cancelled") ?? 0],
   ];
   const target: Record<string, number> = {
     "new+ready": 12,
@@ -169,7 +213,7 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
   const rev3 = await one("SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'revision' AND revision_count = 3", org);
   check("revision bucket: 4 at #2, 1 at #3", rev2 === 4 && rev3 === 1, `#2=${rev2} #3=${rev3}`);
   const [comp = { z: 0, o: 0, t: 0, late: 0 }] = await rows<{ z: number; o: number; t: number; late: number }>(
-    "SELECT COUNT(*) FILTER (WHERE revision_count = 0) AS z, COUNT(*) FILTER (WHERE revision_count = 1) AS o, COUNT(*) FILTER (WHERE revision_count >= 2) AS t, COUNT(*) FILTER (WHERE was_on_time = false) AS late FROM jobs WHERE organisation_id = ? AND status_category = 'completed'",
+    `SELECT COUNT(*) FILTER (WHERE revision_count = 0) AS z, COUNT(*) FILTER (WHERE revision_count = 1) AS o, COUNT(*) FILTER (WHERE revision_count >= 2) AS t, COUNT(*) FILTER (WHERE was_on_time = false) AS late FROM jobs WHERE organisation_id = ? AND status_category = 'completed' AND ${planned()}`,
     org,
   );
   check("completed: 30×0 / 16×1 / 6×2+ revisions", comp.z === 30 && comp.o === 16 && comp.t === 6, `${comp.z}/${comp.o}/${comp.t}`);
@@ -180,9 +224,9 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
   const monday = addCivilDays(today, -((dow + 6) % 7));
   const weekStart = startOfCivilDayIso(monday, tz);
   const lastWeekStart = startOfCivilDayIso(addCivilDays(monday, -7), tz);
-  const thisWeek = await one("SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'completed' AND completed_at >= ?", org, weekStart);
+  const thisWeek = await one(`SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'completed' AND completed_at >= ? AND ${planned()}`, org, weekStart);
   const lastWeek = await one(
-    "SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'completed' AND completed_at >= ? AND completed_at < ?",
+    `SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'completed' AND completed_at >= ? AND completed_at < ? AND ${planned()}`,
     org,
     lastWeekStart,
     weekStart,
@@ -213,10 +257,10 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
   const sessionJobs = await one("SELECT COUNT(DISTINCT s.job_id) FROM work_sessions s JOIN jobs j ON j.id = s.job_id WHERE s.organisation_id = ? AND j.status_category = 'in_progress'", org);
   check("in_progress: 6 with sessions incl. 1 running", running === 1 && sessionJobs === 6, `with sessions=${sessionJobs} running=${running}`);
   const noRaw = await one(
-    "SELECT COUNT(*) FROM jobs j WHERE j.organisation_id = ? AND NOT EXISTS (SELECT 1 FROM job_links l WHERE l.job_id = j.id AND l.kind = 'raw_files')",
+    `SELECT COUNT(*) FROM jobs j WHERE j.organisation_id = ? AND ${planned("j.")} AND NOT EXISTS (SELECT 1 FROM job_links l WHERE l.job_id = j.id AND l.kind = 'raw_files')`,
     org,
   );
-  check("every job has raw_files", noRaw === 0, `${noRaw} without`);
+  check("every planned job has raw_files", noRaw === 0, `${noRaw} without`);
   const heldByInactive = await one(
     "SELECT COUNT(*) FROM jobs j JOIN users u ON u.id = j.editor_id WHERE j.organisation_id = ? AND u.is_active = false AND j.status_category NOT IN ('completed','cancelled')",
     org,
@@ -236,7 +280,8 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
   );
   lines.push(`Revisions requested: last 7 days=${revThisWeek}, previous 4 weeks=${revPrev4} (≈${(revPrev4 / 4).toFixed(1)}/week)`);
 
-  const ownerId = await one<string>("SELECT id FROM users WHERE organisation_id = ? AND role = 'owner' ORDER BY created_at LIMIT 1", org);
+  // The primary owner (roles v2: an admin photographer).
+  const ownerId = await one<string>("SELECT primary_owner_user_id FROM organisation_settings WHERE organisation_id = ?", org);
   const ctx = await buildContextFromDb(db, ownerId, { now: () => nowIso });
   if (ctx) {
     const workloads = await computeWorkloads(db, ctx, { now: nowIso });

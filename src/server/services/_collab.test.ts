@@ -38,7 +38,7 @@ describe("collaboration loaders: no existence oracle", () => {
 
   it("the job's own editor and management still load it", async () => {
     expect(await listNotes(db, await contextFor(db, ids.users.editor2), hiddenJobId)).toEqual([]);
-    expect(await listComments(db, await contextFor(db, ids.users.manager), hiddenJobId)).toEqual([]);
+    expect(await listComments(db, await contextFor(db, ids.users.coAdmin), hiddenJobId)).toEqual([]);
   });
 
   it("a VISIBLE job where the specific action is denied stays a 403", async () => {

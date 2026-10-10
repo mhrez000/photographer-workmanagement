@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Briefcase, FilterX, Info, Plus } from "lucide-react";
 import { FilterBar, QUICK_FILTER_LABELS, QUICK_FILTER_TONES } from "@/components/filters";
-import { PageContainer } from "@/components/shell";
+import { PageContainer, ScopeNotice } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
@@ -9,6 +9,7 @@ import { JOBS_LIST_COLUMNS, QuickTabs, WorkTable, appliedSortOf, DEFAULT_WORK_SO
 import { safeListJobs } from "@/components/work-table/server";
 import { QUICK_FILTERS, type QuickFilter } from "@/lib/constants";
 import { allowed, pageContext } from "@/server/page";
+import { pageScope } from "@/server/page-scope";
 import { listJobs } from "@/server/queries/jobs";
 
 export const metadata: Metadata = { title: "Jobs" };
@@ -34,7 +35,9 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
 
   const requested = toJobListInput(sp, { quick: activeTab === "all" ? undefined : activeTab });
   if (!requested.sort && !requested.viewId) requested.sort = DEFAULT_WORK_SORT;
-  const { result, input, notice } = await safeListJobs(db, ctx, requested);
+  // Personal vs business view (docs/ROLES.md §8): `?scope=` wins over the cookie.
+  const { scope, scopeCookie } = await pageScope(ctx, typeof sp.scope === "string" ? sp.scope : null);
+  const { result, input, notice } = await safeListJobs(db, ctx, requested, { scopeCookie });
 
   // Counts per tab share every other filter (search, facets).
   const base: Record<string, string> = { ...input };
@@ -45,7 +48,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
   const counts = await Promise.all(
     TABS.map(async (tab): Promise<number | null> => {
       try {
-        return (await listJobs(db, ctx, { ...base, ...(tab === "all" ? {} : { quick: tab }), limit: "1" })).total;
+        return (await listJobs(db, ctx, { ...base, ...(tab === "all" ? {} : { quick: tab }), limit: "1" }, { scopeCookie })).total;
       } catch {
         return null;
       }
@@ -79,6 +82,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
         eyebrow="Production"
         title="Jobs"
         description="Every job you can see, filtered the way you work."
+        meta={<ScopeNotice scope={scope} />}
         actions={
           canCreate ? (
             <Button href="/jobs/new" leadingIcon={<Plus aria-hidden="true" />}>

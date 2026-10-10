@@ -22,12 +22,12 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
   {
     id: "overdue-notify",
     name: "Chase overdue jobs",
-    description: "When a job becomes overdue, notify the editor and the managers.",
+    description: "When a job becomes overdue, notify the editor and the owner / admins.",
     trigger: { type: "job_overdue" },
     conditions: [],
     actions: [
       { type: "notify", target: "editor", message: "This job is now overdue." },
-      { type: "notify", target: "managers", message: "A job just became overdue." },
+      { type: "notify", target: "admins", message: "A job just became overdue." },
     ],
   },
   {
@@ -47,11 +47,11 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     actions: [{ type: "transition", toCategory: "completed", reason: "Auto-completed on approval" }],
   },
   {
-    id: "workload-notify-managers",
-    name: "Warn managers about overloaded editors",
-    description: "When an editor crosses the overloaded threshold, notify managers.",
+    id: "workload-notify-admins",
+    name: "Warn admins about overloaded editors",
+    description: "When an editor crosses the overloaded threshold, notify the owner and admins.",
     trigger: { type: "workload_threshold", band: "overloaded" },
     conditions: [],
-    actions: [{ type: "notify", target: "managers", message: "An editor is overloaded — consider reassigning work." }],
+    actions: [{ type: "notify", target: "admins", message: "An editor is overloaded — consider reassigning work." }],
   },
 ];

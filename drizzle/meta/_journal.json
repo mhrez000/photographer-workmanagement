@@ -15,6 +15,20 @@
       "when": 1791586623956,
       "tag": "0001_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791633993918,
+      "tag": "0002_roles_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791633999831,
+      "tag": "0003_roles_v2_data",
+      "breakpoints": true
     }
   ]
 }

@@ -1,11 +1,12 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { commentMentions, jobComments, jobLinks, jobNotes, organisationSettings, workSessions } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import { newId } from "@/lib/ids";
 import { NotFoundError } from "@/server/errors";
 import { getJobHistory } from "./jobHistory";
 import { getJobDetail } from "./jobDetail";
+import { reattribute } from "./test-history";
 
 const NOW = "2026-10-08T00:00:00.000Z";
 
@@ -44,7 +45,7 @@ describe("getJobDetail redaction", () => {
   it("hides internal notes from editors (and from photographers on others' jobs)", async () => {
     const job = await inProgressJob();
     for (const [kind, author] of [
-      ["internal", ids.users.manager],
+      ["internal", ids.users.coAdmin],
       ["editor", ids.users.editor1],
       ["photographer", ids.users.photographer1],
     ] as const) {
@@ -52,7 +53,7 @@ describe("getJobDetail redaction", () => {
     }
     const kinds = async (key: keyof SeedIds["users"]) => (await getJobDetail(db, await ctxOf(key), job.id)).notes.map((n) => n.kind).sort();
     expect(await kinds("owner")).toEqual(["editor", "internal", "photographer"]);
-    expect(await kinds("manager")).toEqual(["editor", "internal", "photographer"]);
+    expect(await kinds("coAdmin")).toEqual(["editor", "internal", "photographer"]);
     expect(await kinds("photographer1")).toEqual(["editor", "internal", "photographer"]);
     expect(await kinds("editor1")).toEqual(["editor", "photographer"]);
   });
@@ -76,7 +77,7 @@ describe("getJobDetail redaction", () => {
     expect(asEditor.metrics.activeEditingSeconds).toBe(1800);
     expect(asEditor.stages[0].activeSeconds).toBe(1800);
     expect(asEditor.actions.canUseTimer).toBe(true);
-    expect((await getJobDetail(db, await ctxOf("manager"), fx.job.id)).sessions).toHaveLength(1);
+    expect((await getJobDetail(db, await ctxOf("coAdmin"), fx.job.id)).sessions).toHaveLength(1);
     // The job's photographer (own job → timer.view_others) sees it too.
     expect((await getJobDetail(db, await ctxOf("photographer1"), fx.job.id)).sessions).toHaveLength(1);
   });
@@ -203,9 +204,9 @@ describe("getJobDetail links, actions, metrics", () => {
     expect(photographer).toMatchObject({ canAssignEditor: true, canCancel: true, canEditFields: true, canPause: false });
     expect(photographer.canAddNoteKinds).not.toContain("internal");
 
-    const manager = (await getJobDetail(db, await ctxOf("manager"), job.id)).actions;
-    expect(manager.transitions.map((t) => t.toStatus.key)).toContain("submitted");
-    expect(manager.canAddNoteKinds).toContain("internal");
+    const coAdmin = (await getJobDetail(db, await ctxOf("coAdmin"), job.id)).actions;
+    expect(coAdmin.transitions.map((t) => t.toStatus.key)).toContain("submitted");
+    expect(coAdmin.canAddNoteKinds).toContain("internal");
   });
 
   it("returns workflow statuses, stages and live metrics", async () => {
@@ -229,5 +230,65 @@ describe("getJobDetail links, actions, metrics", () => {
     const history = await getJobHistory(db, await ctxOf("owner"), job.id);
     expect(history.map((h) => h.kind)).toEqual(["stage", "event"]);
     expect(history[1].event?.eventType).toBe("job.created");
+  });
+});
+
+describe("getJobDetail — roles v2 privacy (§2.3, §2.4)", () => {
+  it("note kinds per persona: editors never internal/client, ⚑all members internal only on managed jobs, delivery notes for all staff", async () => {
+    const job = await inProgressJob();
+    for (const [kind, author] of [
+      ["internal", ids.users.owner],
+      ["client", ids.users.owner],
+      ["delivery", ids.users.owner],
+      ["editor", ids.users.editor1],
+    ] as const) {
+      await db.insert(jobNotes).values({ organisationId: ids.organisationId, jobId: job.id, kind, body: `${kind} note`, authorUserId: author });
+    }
+    const kinds = async (key: keyof SeedIds["users"]) => (await getJobDetail(db, await ctxOf(key), job.id)).notes.map((n) => n.kind).sort();
+    expect(await kinds("owner")).toEqual(["client", "delivery", "editor", "internal"]);
+    expect(await kinds("photographer1")).toEqual(["client", "delivery", "editor", "internal"]); // manages the job
+    expect(await kinds("lead")).toEqual(["client", "delivery", "editor"]); // sees all jobs, does not manage this one
+    expect(await kinds("editor1")).toEqual(["delivery", "editor"]);
+  });
+
+  it("clients never open a staff job detail (404), not even a job shared with them", async () => {
+    const shared = (await insertJobFixture(db, ids, { statusKey: "delivered", sharedWithClient: true })).job;
+    await expect(getJobDetail(db, await ctxOf("client"), shared.id)).rejects.toThrow(NotFoundError);
+    await expect(getJobHistory(db, await ctxOf("client"), shared.id)).rejects.toThrow(NotFoundError);
+    const detail = await getJobDetail(db, await ctxOf("owner"), shared.id);
+    expect(detail.job).toMatchObject({ sharedWithClient: true, projectSharedWithClient: false, createdByRole: "photographer" });
+  });
+
+  it("a past editor sees the job up to their cut-off: later comments, notes, links and the new holder are hidden", async () => {
+    const job = await inProgressJob();
+    await db.insert(jobComments).values({ organisationId: ids.organisationId, jobId: job.id, authorUserId: ids.users.photographer1, body: "before", createdAt: NOW });
+    await db.insert(jobNotes).values({ organisationId: ids.organisationId, jobId: job.id, kind: "editor", body: "mine", authorUserId: ids.users.editor1, createdAt: NOW, updatedAt: NOW });
+    fakeClock.advanceMinutes(5);
+    await reattribute(db, ids, job.id, ids.users.editor2, fakeClock.now());
+    fakeClock.advanceMinutes(5);
+    await db.insert(jobComments).values({ organisationId: ids.organisationId, jobId: job.id, authorUserId: ids.users.photographer1, body: "after", createdAt: fakeClock.now() });
+    await db.insert(jobNotes).values({ organisationId: ids.organisationId, jobId: job.id, kind: "editor", body: "theirs", authorUserId: ids.users.editor2, createdAt: fakeClock.now(), updatedAt: fakeClock.now() });
+    await db.insert(jobLinks).values({ organisationId: ids.organisationId, jobId: job.id, kind: "finished_files", url: "https://x.example/new", addedByUserId: ids.users.editor2, createdAt: fakeClock.now() });
+
+    const past = await getJobDetail(db, await ctxOf("editor1"), job.id);
+    expect(past.comments.map((c) => c.body)).toEqual(["before"]);
+    expect(past.notes.map((n) => n.body)).toEqual(["mine"]);
+    expect(past.links).toEqual([]);
+    expect(past.job.editor?.name).toBe("Another editor");
+    expect(past.assignments.some((a) => a.user.id === ids.users.editor2)).toBe(false);
+    expect(past.assignments.every((a) => a.reason === null || a.user.id === ids.users.editor1)).toBe(true);
+    // the current holder sees everything
+    const holder = await getJobDetail(db, await ctxOf("editor2"), job.id);
+    expect(holder.comments.map((c) => c.body)).toEqual(["before", "after"]);
+    expect(holder.job.editor?.id).toBe(ids.users.editor2);
+    // an editor with "See other editors' jobs" sees the full job (minus §2.4)
+    await setUserFlags(db, ids.users.editor1, { canViewTeamJobs: true });
+    expect((await getJobDetail(db, await ctxOf("editor1"), job.id)).job.editor?.id).toBe(ids.users.editor2);
+    // history stages after the cut-off hide the actor for the past editor
+    await setUserFlags(db, ids.users.editor1, { canViewTeamJobs: false });
+    const history = await getJobHistory(db, await ctxOf("editor1"), job.id);
+    const lastStage = history.filter((h) => h.kind === "stage").at(-1)?.stage;
+    expect(lastStage?.editorAtEntry?.name).toBe("Another editor");
+    expect(lastStage?.actor).toBeNull();
   });
 });

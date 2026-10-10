@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { StatusCategory } from "@/lib/constants";
+import type { DeliverContext } from "@/lib/sharing";
 import type { JobAvailableActions, StatusRef, WorkSessionView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -101,6 +102,8 @@ interface PlanInput {
   job: ActionJobSummary;
   controller: JobActionController;
   canOverride: boolean;
+  /** Moves into Delivered open the Deliver dialog (label gets "…"). */
+  deliverDialog?: boolean;
 }
 
 function toMove(t: JobAvailableActions["transitions"][number]): JobMove {
@@ -115,7 +118,7 @@ function toMove(t: JobAvailableActions["transitions"][number]): JobMove {
 }
 
 /** Decide which actions are primary and which go to the overflow menu. */
-export function planJobActions({ actions, job, controller, canOverride }: PlanInput): ActionPlan {
+export function planJobActions({ actions, job, controller, canOverride, deliverDialog = false }: PlanInput): ActionPlan {
   const current = job.statusCategory;
   const moves = actions.transitions.map(toMove).filter((m) => {
     const to = moveTargetCategory(m);
@@ -133,7 +136,7 @@ export function planJobActions({ actions, job, controller, canOverride }: PlanIn
     const restore = current === "cancelled";
     return {
       key: moveKey(m),
-      label: m.label,
+      label: deliverDialog && to === "delivered" && !m.isReopen ? `${m.label}…` : m.label,
       icon: restore ? ArchiveRestore : m.isReopen ? RotateCcw : (to && TARGET_ICONS[to]) || ArrowRight,
       run: () => controller.startMove(m),
       destructive: to === "cancelled",
@@ -210,8 +213,10 @@ export interface JobActionBarProps {
   timeZone?: string;
   /** Workflow statuses — enables the manager "Move to any status" override. */
   workflowStatuses?: StatusRef[];
-  /** Actor may use `job.transition_override` (owners / managers). */
+  /** Actor may use `job.transition_override` (admins). */
   canOverride?: boolean;
+  /** Client sharing facts: moves into Delivered open the Deliver dialog (ROLES.md §7.3). */
+  deliver?: DeliverContext | null;
   className?: string;
 }
 
@@ -231,6 +236,7 @@ export function JobActionBar({
   timeZone,
   workflowStatuses,
   canOverride = false,
+  deliver = null,
   className,
 }: JobActionBarProps) {
   const controller = useJobActionController({
@@ -242,8 +248,9 @@ export function JobActionBar({
     canAssignEditor: actions.canAssignEditor,
     timeZone,
     workflowStatuses: canOverride ? workflowStatuses : undefined,
+    deliver,
   });
-  const plan = planJobActions({ actions, job, controller, canOverride: canOverride && Boolean(workflowStatuses?.length) });
+  const plan = planJobActions({ actions, job, controller, canOverride: canOverride && Boolean(workflowStatuses?.length), deliverDialog: Boolean(deliver) });
   const compact = layout === "compact";
 
   const shownPrimary = compact ? plan.primary.slice(0, 1) : plan.primary.slice(0, 2);

@@ -1,16 +1,21 @@
 /**
  * Sessions (ARCHITECTURE.md §3.3).
  *
- * Stateless jose HS256 cookie `pwm_session` carrying only `{ sub, sv }`
- * (user id + session version). Every request re-reads the user row:
- * inactive users and stale `sessionVersion`s (bumped on deactivate, role
- * change, password change) get no context → 401. `SESSION_SECRET` (≥ 32
+ * Stateless jose HS256 cookie `pwm_session` carrying `{ sub, sv, k }`
+ * (user id + session version + kind "staff" | "client", docs/ROLES.md §7.8;
+ * `k` is a routing hint for the proxy only). Every request re-reads the user
+ * row: inactive users, stale `sessionVersion`s (bumped on deactivate, role
+ * change, password change) and client users whose client is archived or has
+ * the portal off get no context → 401. `SESSION_SECRET` (≥ 32
  * chars) is required in production; the module throws at load time without
  * it. Local dev falls back to a generated data/.session-secret (devSecret).
  *
  * Context builders:
  *   - `await buildContextFromDb(db, userId, opts)` — pure DB → AuthContext (tests use it)
- *   - `requireContext()` / `getOptionalContext()` — cookie → AuthContext, cached per request
+ *   - `requireContext()` — STAFF only (asserts `app.access`: a client gets 403)
+ *   - `requirePortalContext()` — clients only (asserts `portal.access`)
+ *   - `requireAnyContext()` — any signed-in user (/api/auth/me|logout|change-password only)
+ *   - `getOptionalContext()` — cookie → AuthContext or null, cached per request
  *   - `await systemContext(orgId, { db: tx, … })` — automations / sweep / seed (isSystem, userId null);
  *     inside a transaction ALWAYS pass `db: tx` (it reads organisation_settings)
  */
@@ -23,10 +28,19 @@ import { SignJWT, jwtVerify } from "jose";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { getDb, type DbLike } from "@/db/index";
-import { organisationSettings, organisations, teamMemberships, teams, users } from "@/db/schema";
-import { DEFAULT_TIMEZONE, SESSION_COOKIE_NAME, SESSION_TTL_DAYS, type EventCause, type Role } from "@/lib/constants";
-import type { AuthContext, ContextSettings, OrganisationSettings, SessionPayload, User } from "@/lib/types";
-import { UnauthorizedError } from "@/server/errors";
+import { clients, organisationSettings, organisations, teamMemberships, teams, users } from "@/db/schema";
+import {
+  DEFAULT_TIMEZONE,
+  PERSONA_LABELS,
+  SESSION_COOKIE_NAME,
+  SESSION_TTL_DAYS,
+  personaOfUser,
+  type EventCause,
+  type Persona,
+  type Role,
+} from "@/lib/constants";
+import type { AuthContext, ContextSettings, OrganisationSettings, SessionKind, SessionPayload, User } from "@/lib/types";
+import { ForbiddenError, UnauthorizedError } from "@/server/errors";
 import { nowIso } from "@/server/clock";
 import { currentRequestId, newRequestId } from "@/server/request-scope";
 
@@ -90,8 +104,13 @@ const SESSION_TTL_SECONDS = SESSION_TTL_DAYS * 24 * 60 * 60;
 /*  Tokens (pure; testable without a request)                          */
 /* ------------------------------------------------------------------ */
 
+/** Session kind for a role (claim `k`). */
+export function sessionKindForRole(role: Role): SessionKind {
+  return role === "client" ? "client" : "staff";
+}
+
 export async function signSessionToken(payload: SessionPayload): Promise<string> {
-  return new SignJWT({ sv: payload.sv })
+  return new SignJWT(payload.k ? { sv: payload.sv, k: payload.k } : { sv: payload.sv })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(payload.sub)
     .setIssuedAt()
@@ -107,7 +126,8 @@ export async function verifySessionToken(token: string | null | undefined): Prom
     const sv = payload.sv;
     if (typeof payload.sub !== "string" || payload.sub.length === 0) return null;
     if (typeof sv !== "number" || !Number.isInteger(sv)) return null;
-    return { sub: payload.sub, sv };
+    const k = payload.k === "client" ? "client" : "staff";
+    return { sub: payload.sub, sv, k };
   } catch {
     return null;
   }
@@ -127,9 +147,9 @@ function cookieOptions(maxAge: number) {
   };
 }
 
-/** Sets the session cookie (route handlers / server actions only). */
-export async function createSession(userId: string, sessionVersion: number): Promise<void> {
-  const token = await signSessionToken({ sub: userId, sv: sessionVersion });
+/** Sets the session cookie (route handlers / server actions only). `kind` defaults to staff. */
+export async function createSession(userId: string, sessionVersion: number, kind: SessionKind = "staff"): Promise<void> {
+  const token = await signSessionToken({ sub: userId, sv: sessionVersion, k: kind });
   const jar = await cookies();
   jar.set(SESSION_COOKIE_NAME, token, cookieOptions(SESSION_TTL_SECONDS));
 }
@@ -153,31 +173,88 @@ export async function readSessionToken(): Promise<SessionPayload | null> {
 const DEFAULT_SETTINGS: ContextSettings = {
   timezone: DEFAULT_TIMEZONE,
   timeTrackingEnabled: false,
-  photographersSeeAllJobs: false,
-  photographersSeeTeamJobs: true,
-  editorsSeeTeamJobs: false,
-  editorsSeeTeamWorkloads: false,
   automationsEnabled: true,
   auditNotifications: false,
 };
 
+/** The context's copy of organisation_settings (roles v2: no org-wide visibility switches). */
 export function settingsToContext(row: OrganisationSettings | undefined): ContextSettings {
   if (!row) return { ...DEFAULT_SETTINGS };
   return {
     timezone: row.timezone,
     timeTrackingEnabled: row.timeTrackingEnabled,
-    photographersSeeAllJobs: row.photographersSeeAllJobs,
-    photographersSeeTeamJobs: row.photographersSeeTeamJobs,
-    editorsSeeTeamJobs: row.editorsSeeTeamJobs,
-    editorsSeeTeamWorkloads: row.editorsSeeTeamWorkloads,
     automationsEnabled: row.automationsEnabled,
     auditNotifications: row.auditNotifications,
   };
 }
 
-async function loadSettings(db: DbLike, organisationId: string): Promise<ContextSettings> {
+async function loadSettingsRow(db: DbLike, organisationId: string): Promise<OrganisationSettings | undefined> {
   const [row] = await db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, organisationId)).limit(1);
-  return settingsToContext(row);
+  return row;
+}
+
+async function loadSettings(db: DbLike, organisationId: string): Promise<ContextSettings> {
+  return settingsToContext(await loadSettingsRow(db, organisationId));
+}
+
+/** The switches a context carries: EFFECTIVE values (docs/ROLES.md §2.1). */
+export type EffectiveFlags = Pick<
+  AuthContext,
+  | "canCreateJobs"
+  | "canViewAllJobs"
+  | "canAssignEditors"
+  | "canReviewSubmissions"
+  | "canViewTeamWorkloads"
+  | "canViewAnalytics"
+  | "canViewTeamJobs"
+>;
+
+/**
+ * Raw user columns → effective switches. Admin ⇒ every member switch; a switch
+ * outside its role is false; clients have none. Admins keep their stored member
+ * switches in the row (revoking admin restores them) but they are ignored here.
+ */
+export function effectiveFlags(user: Pick<
+  User,
+  | "role"
+  | "isAdmin"
+  | "canCreateJobs"
+  | "canViewAllJobs"
+  | "canAssignEditors"
+  | "canReviewSubmissions"
+  | "canViewTeamWorkloads"
+  | "canViewAnalytics"
+  | "canViewTeamJobs"
+>): EffectiveFlags {
+  const admin = user.role === "photographer" && user.isAdmin;
+  const member = user.role === "photographer" && !user.isAdmin;
+  const editor = user.role === "editor";
+  return {
+    canCreateJobs: admin || ((member || editor) && user.canCreateJobs),
+    canViewAllJobs: admin || (member && user.canViewAllJobs),
+    canAssignEditors: admin || (member && user.canAssignEditors),
+    canReviewSubmissions: admin || (member && user.canReviewSubmissions),
+    canViewTeamWorkloads: admin || (member && user.canViewTeamWorkloads),
+    canViewAnalytics: admin || (member && user.canViewAnalytics),
+    canViewTeamJobs: editor && user.canViewTeamJobs,
+  };
+}
+
+interface ClientAccess {
+  clientName: string;
+  feedbackEnabled: boolean;
+}
+
+/** A client user's client, when it still grants portal access (in org, not archived, portal on). */
+async function loadClientAccess(db: DbLike, user: User): Promise<ClientAccess | null> {
+  if (user.role !== "client" || !user.clientId) return null;
+  const [row] = await db
+    .select({ name: clients.name, portalEnabled: clients.portalEnabled, feedbackEnabled: clients.feedbackEnabled, archivedAt: clients.archivedAt })
+    .from(clients)
+    .where(and(eq(clients.id, user.clientId), eq(clients.organisationId, user.organisationId)))
+    .limit(1);
+  if (!row || !row.portalEnabled || row.archivedAt !== null) return null;
+  return { clientName: row.name, feedbackEnabled: row.feedbackEnabled };
 }
 
 /**
@@ -211,36 +288,52 @@ export interface BuildContextOptions {
   cause?: EventCause;
 }
 
-async function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): Promise<AuthContext> {
+interface UserContext {
+  ctx: AuthContext;
+  client: ClientAccess | null;
+}
+
+/** Null for a client user whose client no longer grants portal access (like a deactivated user). */
+async function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions): Promise<UserContext | null> {
   // Sequential on purpose: `db` may be a transaction (one connection).
-  const teamUserIds = await loadTeamUserIds(db, user.organisationId, user.id);
-  const settings = await loadSettings(db, user.organisationId);
+  const client = await loadClientAccess(db, user);
+  if (user.role === "client" && !client) return null;
+  const teamUserIds = user.role === "client" ? new Set<string>() : await loadTeamUserIds(db, user.organisationId, user.id);
+  const settingsRow = await loadSettingsRow(db, user.organisationId);
+  const isAdmin = user.role === "photographer" && user.isAdmin;
   return {
-    userId: user.id,
-    organisationId: user.organisationId,
-    role: user.role,
-    isActive: user.isActive,
-    canViewTeamWorkloads: user.canViewTeamWorkloads,
-    canViewAnalytics: user.canViewAnalytics,
-    teamUserIds,
-    settings,
-    isSystem: false,
-    now: opts.now ?? nowIso,
-    requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
-    ...(opts.cause ? { cause: opts.cause } : {}),
+    client,
+    ctx: {
+      userId: user.id,
+      organisationId: user.organisationId,
+      role: user.role,
+      isAdmin,
+      isPrimaryOwner: isAdmin && settingsRow?.primaryOwnerUserId === user.id,
+      isActive: user.isActive,
+      ...effectiveFlags(user),
+      clientId: user.role === "client" ? user.clientId : null,
+      clientFeedbackEnabled: client?.feedbackEnabled ?? false,
+      teamUserIds,
+      settings: settingsToContext(settingsRow),
+      isSystem: false,
+      now: opts.now ?? nowIso,
+      requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
+      ...(opts.cause ? { cause: opts.cause } : {}),
+    },
   };
 }
 
 /**
- * Loads the fresh user row + organisation settings + active teammates.
- * Returns null when the user is missing, inactive, anonymised, or the
- * session version does not match.
+ * Loads the fresh user row + organisation settings + active teammates (+ the
+ * client of a client user). Returns null when the user is missing, inactive,
+ * anonymised, the session version does not match, or a client user's client
+ * is archived / has the portal off.
  */
 export async function buildContextFromDb(db: DbLike, userId: string, opts: BuildContextOptions = {}): Promise<AuthContext | null> {
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user || !user.isActive || user.anonymisedAt) return null;
   if (opts.sessionVersion !== undefined && user.sessionVersion !== opts.sessionVersion) return null;
-  return contextFromUser(db, user, opts);
+  return (await contextFromUser(db, user, opts))?.ctx ?? null;
 }
 
 /** `buildContextFromDb` against the app database (`getDb()`). */
@@ -260,20 +353,30 @@ export interface SystemContextOptions {
 
 /**
  * Context for automations / sweep / seed: `isSystem = true`, `userId = null`,
- * owner-equivalent role. permissions.ts restricts it to the automation
- * action allowlist; events it writes have `actor_user_id = null`.
+ * admin-equivalent (role photographer, isAdmin, every switch). permissions.ts
+ * restricts it to the automation action allowlist; events it writes have
+ * `actor_user_id = null`.
  */
 export async function systemContext(organisationId: string, opts: SystemContextOptions = {}): Promise<AuthContext> {
   const db = opts.db ?? getDb();
-  const role: Role = "owner";
+  const role: Role = "photographer";
   const settings = await loadSettings(db, organisationId);
   return {
     userId: null,
     organisationId,
     role,
+    isAdmin: true,
+    isPrimaryOwner: false,
     isActive: true,
+    canCreateJobs: true,
+    canViewAllJobs: true,
+    canAssignEditors: true,
+    canReviewSubmissions: true,
     canViewTeamWorkloads: true,
     canViewAnalytics: true,
+    canViewTeamJobs: false,
+    clientId: null,
+    clientFeedbackEnabled: false,
     teamUserIds: new Set<string>(),
     settings,
     isSystem: true,
@@ -288,16 +391,24 @@ export async function systemContext(organisationId: string, opts: SystemContextO
 /*  Per-request resolution (cookie → context), cached with React cache */
 /* ------------------------------------------------------------------ */
 
-/** What the app chrome needs about the signed-in user. */
+/** What the app chrome (staff shell or portal header) needs about the signed-in user. */
 export interface Viewer {
   id: string;
   name: string;
   email: string;
   role: Role;
+  isAdmin: boolean;
+  isPrimaryOwner: boolean;
+  persona: Persona;
+  /** "Owner / Photographer", "Photographer (team member)", "Editor", "Client". */
+  personaLabel: string;
   avatarColour: string;
   title: string | null;
   organisationId: string;
   organisationName: string;
+  /** Client users only. */
+  clientId: string | null;
+  clientName: string | null;
 }
 
 interface ResolvedSession {
@@ -311,8 +422,11 @@ const resolveSession = cache(async (): Promise<ResolvedSession | null> => {
   const db = getDb();
   const [user] = await db.select().from(users).where(eq(users.id, payload.sub)).limit(1);
   if (!user || !user.isActive || user.anonymisedAt || user.sessionVersion !== payload.sv) return null;
+  const resolved = await contextFromUser(db, user, {});
+  if (!resolved) return null;
+  const { ctx, client } = resolved;
   const [org] = await db.select({ name: organisations.name }).from(organisations).where(eq(organisations.id, user.organisationId)).limit(1);
-  const ctx = await contextFromUser(db, user, {});
+  const persona = personaOfUser(user);
   return {
     ctx,
     viewer: {
@@ -320,21 +434,50 @@ const resolveSession = cache(async (): Promise<ResolvedSession | null> => {
       name: user.name,
       email: user.email,
       role: user.role,
+      isAdmin: ctx.isAdmin,
+      isPrimaryOwner: ctx.isPrimaryOwner,
+      persona,
+      personaLabel: PERSONA_LABELS[persona],
       avatarColour: user.avatarColour,
       title: user.title,
       organisationId: user.organisationId,
       organisationName: org?.name ?? "",
+      clientId: ctx.clientId,
+      clientName: client?.clientName ?? null,
     },
   };
 });
 
-/** The current request's context, or null when signed out / revoked. */
+/** The current request's context (staff or client), or null when signed out / revoked. */
 export async function getOptionalContext(): Promise<AuthContext | null> {
   return (await resolveSession())?.ctx ?? null;
 }
 
-/** The current request's context; throws UnauthorizedError (401) otherwise. */
+/** Message of the 403 a client gets from any staff API / page / action. */
+export const STAFF_ONLY_MESSAGE = "This area is for studio staff";
+
+/**
+ * The current request's STAFF context. 401 when signed out; 403 for a client
+ * user (`app.access`, docs/ROLES.md §3.1). Every staff API route, server action
+ * and staff route handler outside /api goes through this.
+ */
 export async function requireContext(): Promise<AuthContext> {
+  const session = await resolveSession();
+  if (!session) throw new UnauthorizedError();
+  if (session.ctx.role === "client") throw new ForbiddenError("app.access", STAFF_ONLY_MESSAGE);
+  return session.ctx;
+}
+
+/** The current request's CLIENT context (`portal.access`): 401 signed out, 403 for staff. Every /api/portal/** route. */
+export async function requirePortalContext(): Promise<AuthContext> {
+  const session = await resolveSession();
+  if (!session) throw new UnauthorizedError();
+  if (session.ctx.role !== "client") throw new ForbiddenError("portal.access", "This area is for clients");
+  return session.ctx;
+}
+
+/** Any signed-in user (staff or client). Only /api/auth/me, /api/auth/logout, /api/auth/change-password. */
+export async function requireAnyContext(): Promise<AuthContext> {
   const session = await resolveSession();
   if (!session) throw new UnauthorizedError();
   return session.ctx;

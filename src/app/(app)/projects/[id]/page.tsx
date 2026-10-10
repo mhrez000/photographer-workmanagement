@@ -10,6 +10,7 @@ import { ProductionJobsTable } from "@/components/production/jobs-table";
 import { EditProjectDialog } from "@/components/production/project-form";
 import { ProjectTimeline, StageBreakdown } from "@/components/production/project-summary";
 import { PageContainer } from "@/components/shell";
+import { ProjectClientSharingSection } from "@/components/sharing/sections";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -176,6 +177,8 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
         </div>
 
         <div className="flex min-w-0 flex-col gap-6">
+          <ProjectClientSharingSection ctx={ctx} db={db} projectId={project.id} />
+
           <SectionCard title="Timeline" description="Key dates across this project's jobs.">
             <ProjectTimeline project={project} jobs={detail.jobs} timeZone={tz} now={ctx.now()} />
           </SectionCard>

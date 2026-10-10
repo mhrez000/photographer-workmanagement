@@ -1,11 +1,12 @@
 import * as React from "react";
-import { Pencil } from "lucide-react";
+import { Info, Pencil } from "lucide-react";
 import { CopyButton } from "@/components/common";
 import { DueChip, JobActionBar, PausedChip, PersonChip, PriorityPill, RevisionCount, StatusPill, TimeInStatus } from "@/components/jobs";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { STATUS_CATEGORY_META } from "@/lib/constants";
 import { daysRemaining, describeDue, formatDateTime } from "@/lib/dates";
+import type { DeliverContext } from "@/lib/sharing";
 import type { JobDetail, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { showsDaysRemaining } from "./format";
@@ -21,6 +22,10 @@ export interface JobHeaderProps {
   viewerId: string | null;
   /** Org setting `time_tracking_enabled`. */
   timeTrackingEnabled: boolean;
+  /** Client sharing facts for the Deliver dialog (ROLES.md §7.3); null = plain delivery. */
+  deliver?: DeliverContext | null;
+  /** Shown under the actions when someone else reviews this job (ROLES.md §4.4). */
+  reviewHint?: string | null;
 }
 
 /** "12 days left" next to a due chip that shows a plain date (never for overdue / today / soon). */
@@ -44,14 +49,14 @@ function personHref(user: UserRef | null, link: boolean): string | undefined {
  * next-step actions. Sticky on desktop; on phones the action bar docks above
  * the tab bar so it stays within thumb reach.
  */
-export function JobHeader({ detail, timeZone, canOverride, linkPeople, viewerId, timeTrackingEnabled }: JobHeaderProps) {
+export function JobHeader({ detail, timeZone, canOverride, linkPeople, viewerId, timeTrackingEnabled, deliver = null, reviewHint = null }: JobHeaderProps) {
   const { job, actions, runningSession } = detail;
   const meta = STATUS_CATEGORY_META[job.statusCategory];
   const finished = job.statusCategory === "completed" ? job.completedAt : null;
   const ownRunning = runningSession && runningSession.isRunning && runningSession.user.id === viewerId ? runningSession : null;
 
   return (
-    <div className="border-b border-border pb-4 lg:sticky lg:bg-canvas/95 lg:backdrop-blur lg:supports-[backdrop-filter]:bg-canvas/85 lg:top-(--topbar-height) lg:z-20 lg:-mx-8 lg:px-8 lg:pt-1">
+    <div className="border-b border-border pb-4 lg:sticky lg:bg-canvas/95 lg:backdrop-blur lg:supports-[backdrop-filter]:bg-canvas/85 lg:top-(--topbar-height) lg:z-(--z-page-sticky) lg:-mx-8 lg:px-8 lg:pt-1">
       <PageHeader
         eyebrow={[
           { label: "Jobs", href: "/jobs" },
@@ -103,7 +108,7 @@ export function JobHeader({ detail, timeZone, canOverride, linkPeople, viewerId,
           {/* Phones: pinned above the tab bar. Desktop: inline in the sticky header. */}
           <div
             className={cn(
-              "max-lg:fixed max-lg:inset-x-0 max-lg:z-30 max-lg:border-t max-lg:border-border max-lg:bg-surface/95 max-lg:px-4 max-lg:py-2.5 max-lg:shadow-pop max-lg:backdrop-blur",
+              "max-lg:fixed max-lg:inset-x-0 max-lg:z-(--z-shell) max-lg:border-t max-lg:border-border max-lg:bg-surface/95 max-lg:px-4 max-lg:py-2.5 max-lg:shadow-pop max-lg:backdrop-blur",
               "max-lg:bottom-[calc(var(--tabbar-height)+env(safe-area-inset-bottom,0px))]",
             )}
           >
@@ -125,7 +130,14 @@ export function JobHeader({ detail, timeZone, canOverride, linkPeople, viewerId,
               timeZone={timeZone}
               workflowStatuses={canOverride ? detail.workflowStatuses : undefined}
               canOverride={canOverride}
+              deliver={deliver}
             />
+            {reviewHint ? (
+              <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-muted lg:justify-end">
+                <Info aria-hidden="true" className="size-4 shrink-0" />
+                {reviewHint}
+              </p>
+            ) : null}
           </div>
         </div>
       </PageHeader>

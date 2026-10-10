@@ -4,7 +4,8 @@ import { PageContainer } from "@/components/shell";
 import { PageHeader } from "@/components/ui/page-header";
 import { EditJobForm } from "@/components/job-form";
 import { StatusPill, jobHref } from "@/components/jobs";
-import type { ClientOption, JobPermissionRef, JobTypeView, ProjectOption } from "@/lib/types";
+import type { ClientOption, JobTypeView, ProjectOption } from "@/lib/types";
+import { loadJobRef } from "@/server/auth/job-ref";
 import { allowed, load, pageContext } from "@/server/page";
 import { getJobDetail } from "@/server/queries/jobDetail";
 import { getClientOptions, getProjectOptions } from "@/server/queries/options";
@@ -23,22 +24,16 @@ export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit
   const detail = await load(() => getJobDetail(db, ctx, id));
   const { job, actions } = detail;
 
-  const ref: JobPermissionRef = {
-    id: job.id,
-    organisationId: ctx.organisationId,
-    photographerId: job.photographer?.id ?? null,
-    editorId: job.editor?.id ?? null,
-    createdByUserId: job.createdBy.id,
-    statusCategory: job.statusCategory,
-    isPaused: job.isPaused,
-  };
+  // Full ref (draft window, project sharing, past editors) — docs/ROLES.md §2.1.
+  const { ref } = await loadJobRef(db, ctx, job.id);
   const permissions = {
     fields: actions.canEditFields,
+    client: allowed(ctx, "job.change_client", ref),
     deadlines: actions.canEditDeadlines,
     priority: actions.canSetPriority,
     completion: allowed(ctx, "job.edit_completion_percent", ref),
   };
-  if (!permissions.fields && !permissions.deadlines && !permissions.priority && !permissions.completion) forbidden();
+  if (!permissions.fields && !permissions.client && !permissions.deadlines && !permissions.priority && !permissions.completion) forbidden();
 
   // Pickers; the job's own (possibly archived) client / project / type is always present.
   const jobTypes: JobTypeView[] = (await load(() => listJobTypes(db, ctx, { includeArchived: true }))).filter((t) => t.archivedAt === null || t.id === job.jobType.id);
@@ -55,9 +50,9 @@ export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit
       openJobCount: 0,
     });
   }
-  const clients: ClientOption[] = permissions.fields ? await load(() => getClientOptions(db, ctx)) : [];
+  const clients: ClientOption[] = permissions.client ? await load(() => getClientOptions(db, ctx)) : [];
   if (!clients.some((c) => c.id === job.client.id)) clients.unshift({ id: job.client.id, name: job.client.name, colour: "" });
-  const projects: ProjectOption[] = permissions.fields ? await load(() => getProjectOptions(db, ctx, { clientId: job.client.id })) : [];
+  const projects: ProjectOption[] = permissions.client ? await load(() => getProjectOptions(db, ctx, { clientId: job.client.id })) : [];
   if (!projects.some((p) => p.id === job.project.id)) {
     projects.unshift({ id: job.project.id, name: job.project.name, clientId: job.client.id, clientName: job.client.name });
   }
@@ -98,8 +93,8 @@ export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit
         jobTypes={jobTypes}
         clients={clients}
         projects={projects}
-        canCreateClient={allowed(ctx, "client.create")}
-        canCreateProject={allowed(ctx, "project.create")}
+        canCreateClient={ctx.role !== "editor" && allowed(ctx, "client.create")}
+        canCreateProject={ctx.role !== "editor" && allowed(ctx, "project.create")}
       />
     </PageContainer>
   );

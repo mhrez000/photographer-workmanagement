@@ -42,6 +42,15 @@ export class ValidationError extends AppError {
   }
 }
 
+/**
+ * 422 — well-formed input that breaks a business rule: an allow-list target of the wrong role
+ * or deactivated (docs/ROLES.md §3.4), a delivery payload on a non-delivering move (§7.3)…
+ * Still a `ValidationError` (code `validation`, field errors in `details`) so forms map it the same way.
+ */
+export class RuleViolationError extends ValidationError {
+  override readonly status: number = 422;
+}
+
 /** 401 — no/invalid session, inactive user, or stale session version. */
 export class UnauthorizedError extends AppError {
   constructor(message = "Sign in required") {

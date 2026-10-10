@@ -8,6 +8,7 @@ import {
   insertJobFixture,
   makeTestDb,
   seedMinimalOrg,
+  setUserFlags,
   type JobFixtureOptions,
   type SeedIds,
   type TestDb,
@@ -65,33 +66,43 @@ describe("listJobs visibility", () => {
   it("scopes rows per role (own / assigned)", async () => {
     const { a, b, c } = await threeJobs();
     expect(numbers((await listJobs(db, await ctxOf("owner"))).rows)).toEqual(numbers([a, b, c]));
-    expect(numbers((await listJobs(db, await ctxOf("manager"))).rows)).toEqual(numbers([a, b, c]));
+    expect(numbers((await listJobs(db, await ctxOf("coAdmin"))).rows)).toEqual(numbers([a, b, c]));
+    expect(numbers((await listJobs(db, await ctxOf("lead"))).rows)).toEqual(numbers([a, b, c])); // ⚑ See all jobs
     expect(numbers((await listJobs(db, await ctxOf("photographer1"))).rows)).toEqual([a.jobNumber]);
     expect(numbers((await listJobs(db, await ctxOf("photographer2"))).rows)).toEqual(numbers([b, c]));
     expect(numbers((await listJobs(db, await ctxOf("editor1"))).rows)).toEqual([a.jobNumber]);
     expect(numbers((await listJobs(db, await ctxOf("editor2"))).rows)).toEqual([b.jobNumber]);
   });
 
-  it("photographers see teammates' jobs when photographers_see_team_jobs is on (default) and not when off", async () => {
-    const { a, b, c } = await threeJobs();
+  it("teams and the deprecated organisation switches never widen visibility (roles v2: per-person switches)", async () => {
+    const { a } = await threeJobs();
     await addTeamFixture(db, ids, { name: "Crew", memberIds: [ids.users.photographer1, ids.users.photographer2] });
-    expect(numbers((await listJobs(db, await ctxOf("photographer1"))).rows)).toEqual(numbers([a, b, c]));
-    await setSettings({ photographersSeeTeamJobs: false });
+    await setSettings({ photographersSeeTeamJobs: true, photographersSeeAllJobs: true, editorsSeeTeamJobs: true });
     expect(numbers((await listJobs(db, await ctxOf("photographer1"))).rows)).toEqual([a.jobNumber]);
-  });
-
-  it("photographers_see_all_jobs shows the whole organisation", async () => {
-    const { a, b, c } = await threeJobs();
-    await setSettings({ photographersSeeAllJobs: true });
-    expect(numbers((await listJobs(db, await ctxOf("photographer1"))).rows)).toEqual(numbers([a, b, c]));
-  });
-
-  it("editors see team jobs only with editors_see_team_jobs", async () => {
-    const { a, b } = await threeJobs();
     await addTeamFixture(db, ids, { name: "Editors", memberIds: [ids.users.editor1, ids.users.editor2] });
     expect(numbers((await listJobs(db, await ctxOf("editor1"))).rows)).toEqual([a.jobNumber]);
-    await setSettings({ editorsSeeTeamJobs: true });
+  });
+
+  it("a member's See all jobs switch shows the whole organisation", async () => {
+    const { a, b, c } = await threeJobs();
+    await setUserFlags(db, ids.users.photographer1, { canViewAllJobs: true });
+    expect(numbers((await listJobs(db, await ctxOf("photographer1"))).rows)).toEqual(numbers([a, b, c]));
+  });
+
+  it("an editor's See other editors' jobs switch shows every job held by an editor (not unassigned ones)", async () => {
+    const { a, b } = await threeJobs();
+    expect(numbers((await listJobs(db, await ctxOf("editor1"))).rows)).toEqual([a.jobNumber]);
+    await setUserFlags(db, ids.users.editor1, { canViewTeamJobs: true });
     expect(numbers((await listJobs(db, await ctxOf("editor1"))).rows)).toEqual(numbers([a, b]));
+  });
+
+  it("editors see jobs they created; members see jobs they shoot or created as a photographer", async () => {
+    const created = await job({ statusKey: "new", photographerId: ids.users.owner, editorId: null, createdByUserId: ids.users.editor2, name: "By editor" });
+    expect(numbers((await listJobs(db, await ctxOf("editor2"))).rows)).toEqual([created.jobNumber]);
+    expect((await listJobs(db, await ctxOf("editor1"))).rows).toEqual([]);
+    const forP2 = await job({ statusKey: "new", photographerId: ids.users.photographer2, createdByUserId: ids.users.owner, name: "Owner made" });
+    expect(numbers((await listJobs(db, await ctxOf("photographer2"))).rows)).toEqual([forP2.jobNumber]);
+    expect(numbers((await listJobs(db, await ctxOf("photographer2"), { quick: "my_jobs" })).rows)).toEqual([forP2.jobNumber]);
   });
 
   it("archived teams grant nothing", async () => {
@@ -112,6 +123,17 @@ describe("listJobs visibility", () => {
       unassignReason: "reassigned",
     });
     expect(numbers((await listJobs(db, await ctxOf("editor2"))).rows)).toEqual(numbers([a, b]));
+  });
+
+  it("clients (portal users) get no rows from any staff list, even for jobs shared with them", async () => {
+    await threeJobs();
+    await job({ statusKey: "delivered", sharedWithClient: true, name: "Shared" });
+    const client = await ctxOf("client");
+    const res = await listJobs(db, client, { includeCancelled: "1" });
+    expect(res.rows).toEqual([]);
+    expect(res.total).toBe(0);
+    await expect(getJobRowByNumber(db, client, "PJ-0004")).rejects.toThrow(NotFoundError);
+    expect((await listJobs(db, client, { groupBy: "status" })).groups).toEqual([]);
   });
 
   it("never returns another organisation's rows", async () => {
@@ -333,16 +355,16 @@ describe("listJobs sorting, grouping, pagination", () => {
         .insert(savedViews)
         .values({
           organisationId: ids.organisationId,
-          ownerUserId: ids.users.manager,
+          ownerUserId: ids.users.coAdmin,
           name: "Urgent",
           scope: "all_work",
           config: { filters: { priority: ["urgent"] }, sort: [{ column: "job", dir: "desc" }], columns: ["job"] },
         })
         .returning()
     )[0];
-    const manager = await ctxOf("manager");
-    expect((await listJobs(db, manager, { viewId: view.id })).rows.map((r) => r.jobNumber)).toEqual([b.jobNumber, a.jobNumber]);
-    expect((await listJobs(db, manager, { viewId: view.id, statusCategory: "in_progress" })).rows.map((r) => r.jobNumber)).toEqual([a.jobNumber]);
+    const coAdmin = await ctxOf("coAdmin");
+    expect((await listJobs(db, coAdmin, { viewId: view.id })).rows.map((r) => r.jobNumber)).toEqual([b.jobNumber, a.jobNumber]);
+    expect((await listJobs(db, coAdmin, { viewId: view.id, statusCategory: "in_progress" })).rows.map((r) => r.jobNumber)).toEqual([a.jobNumber]);
     await expect(listJobs(db, await ctxOf("owner"), { viewId: view.id })).rejects.toThrow(NotFoundError);
     await db.update(savedViews).set({ isShared: true }).where(eq(savedViews.id, view.id));
     expect((await listJobs(db, await ctxOf("owner"), { viewId: view.id })).rows).toHaveLength(2);
@@ -430,5 +452,54 @@ describe("query aliases and the strict REST schema", () => {
     await expect(listJobsApi(db, ctx, { completedFrom: "2026-10-01Tnope" })).rejects.toThrow(ValidationError);
     await expect(listJobsApi(db, ctx, { statusEnteredBefore: "yesterday" })).rejects.toThrow(ValidationError);
     await expect(listJobsApi(db, ctx, { revisedFrom: "2026-10-01T00:00:00.000Z", revisedTo: "2026-10-08" })).resolves.not.toThrow();
+  });
+});
+
+describe("listJobs — personal / business view (docs/ROLES.md §8)", () => {
+  it("scope mine = jobs where I am the photographer; the param beats the cookie; non-holders ignore both", async () => {
+    const own = await job({ statusKey: "in_progress", photographerId: ids.users.owner, createdByUserId: ids.users.owner, name: "Own shoot" });
+    // The owner created this for photographer2: the owner manages nothing about it as a shooter → not in My shoots.
+    const forP2 = await job({ statusKey: "in_progress", photographerId: ids.users.photographer2, createdByUserId: ids.users.owner, name: "For P2" });
+    const owner = await ctxOf("owner");
+    const business = await listJobs(db, owner);
+    expect(business.scope).toBe("business");
+    expect(numbers(business.rows)).toEqual(numbers([own, forP2]));
+    const mine = await listJobs(db, owner, { scope: "mine" });
+    expect(mine.scope).toBe("mine");
+    expect(numbers(mine.rows)).toEqual([own.jobNumber]);
+    expect(mine.total).toBe(1);
+    expect(numbers((await listJobs(db, owner, {}, { scopeCookie: "mine" })).rows)).toEqual([own.jobNumber]);
+    expect(numbers((await listJobs(db, owner, { scope: "business" }, { scopeCookie: "mine" })).rows)).toEqual(numbers([own, forP2]));
+    expect(numbers((await listJobs(db, owner, { scope: "all" })).rows)).toEqual(numbers([own, forP2])); // "all" = business
+    expect((await listJobsApi(db, owner, { scope: "mine" })).rows.map((r) => r.id)).toEqual([own.id]);
+    // grouping counts follow the scope too
+    expect((await listJobs(db, owner, { scope: "mine", groupBy: "photographer" })).groups?.map((g) => g.count)).toEqual([1]);
+
+    // The lead (⚑all) has the switch; photographer2 / editors do not: ?scope is ignored, never an error or a widening.
+    expect(numbers((await listJobs(db, await ctxOf("lead"), { scope: "mine" })).rows)).toEqual([]);
+    const p2 = await ctxOf("photographer2");
+    expect((await listJobs(db, p2, { scope: "mine" })).scope).toBeNull();
+    expect(numbers((await listJobs(db, p2, { scope: "business" })).rows)).toEqual([forP2.jobNumber]);
+    expect(numbers((await listJobs(db, await ctxOf("editor1"), { scope: "business" })).rows)).toEqual(numbers((await listJobs(db, await ctxOf("editor1"))).rows));
+  });
+
+  it("editors without the team switch never learn who holds a past job (rows, groups, filters)", async () => {
+    const a = await job({ statusKey: "in_progress", editorId: ids.users.editor1 });
+    await db.insert(jobAssignments).values({
+      organisationId: ids.organisationId,
+      jobId: a.id,
+      role: "editor",
+      userId: ids.users.editor2,
+      assignedAt: "2026-10-01T00:00:00.000Z",
+      unassignedAt: "2026-10-02T00:00:00.000Z",
+      unassignReason: "reassigned",
+    });
+    const e2 = await ctxOf("editor2");
+    const res = await listJobs(db, e2, { groupBy: "editor" });
+    expect(res.rows.map((r) => r.editor?.name)).toEqual(["Another editor"]);
+    expect(res.groups?.map((g) => g.label)).toEqual(["Another editor"]);
+    expect(res.rowGroupKeys).toEqual(["another-editor"]);
+    expect((await listJobs(db, e2, { editorId: ids.users.editor1 })).rows).toEqual([]);
+    expect((await listJobs(db, e2, { editorId: "another-editor" })).rows.map((r) => r.id)).toEqual([a.id]);
   });
 });

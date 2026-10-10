@@ -137,7 +137,7 @@ function PopoverPanel({ align = "start", side = "bottom", className, children, o
         }
       }}
       className={cn(
-        "absolute z-50 min-w-56 rounded-md border border-border bg-surface-raised p-4 text-ink shadow-pop outline-none",
+        "absolute z-(--z-popover) min-w-56 rounded-md border border-border bg-surface-raised p-4 text-ink shadow-pop outline-none",
         "data-[side=bottom]:top-full data-[side=bottom]:mt-1.5 data-[side=bottom]:animate-slide-down",
         "data-[side=top]:bottom-full data-[side=top]:mb-1.5 data-[side=top]:animate-slide-up",
         align === "start" && "left-0",

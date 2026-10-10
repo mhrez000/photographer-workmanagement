@@ -2,7 +2,7 @@ import "server-only";
 import type { DbLike } from "@/db";
 import type { AuthContext } from "@/lib/types";
 import { NotFoundError, ValidationError } from "@/server/errors";
-import { JOB_LIST_API_KEYS, JobListApiQuerySchema, listJobs, type JobListResult } from "@/server/queries/jobs";
+import { JOB_LIST_API_KEYS, JobListApiQuerySchema, listJobs, type JobListResult, type ListScopeOptions } from "@/server/queries/jobs";
 
 export interface SafeJobList {
   result: JobListResult;
@@ -17,7 +17,13 @@ export interface SafeJobList {
  * filter value degrades to the closest valid list (with a notice) instead of
  * a 404 / error page. Permission errors still propagate.
  */
-export async function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<string, string>): Promise<SafeJobList> {
+export async function safeListJobs(
+  db: DbLike,
+  ctx: AuthContext,
+  input: Record<string, string>,
+  /** `{ scopeCookie }` — the personal / business view cookie (docs/ROLES.md §8); `?scope=` travels in `input`. */
+  opts: ListScopeOptions = {},
+): Promise<SafeJobList> {
   // Keys listJobs would strip anyway (e.g. utm params) are dropped here so the
   // returned `input` — reused as the "Load more" query — passes the strict GET /api/jobs.
   const known = new Set(JOB_LIST_API_KEYS);
@@ -48,7 +54,7 @@ export async function safeListJobs(db: DbLike, ctx: AuthContext, input: Record<s
   };
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      return { result: await listJobs(db, ctx, current), input: current, notice: noticeOf() };
+      return { result: await listJobs(db, ctx, current, opts), input: current, notice: noticeOf() };
     } catch (err) {
       if (err instanceof NotFoundError && current.viewId) {
         const rest = { ...current };

@@ -44,6 +44,8 @@ Stack (fixed, see `CLAUDE.md`): Next.js 16.4 App Router · TypeScript strict · 
 
 ### 2.1 Tenancy & people
 
+> Roles v2: `users.role` ∈ photographer / editor / client, plus `is_admin`, the permission switches and `client_id` — see `docs/ROLES.md` §1.
+
 | Table | Purpose | Key columns / invariants |
 |---|---|---|
 | `organisations` | Tenant. | `slug` unique; `job_sequence` gap-free allocator. |
@@ -110,7 +112,7 @@ Indexes: `(org, job_number)` unique; `(org, status_category, due_date)`; `(org, 
 
 `workflow_transitions.allowed_roles: Role[]` · `activity_events.previous_value/new_value: Json` · `activity_events.metadata: Record<string, Json>` · `automations.trigger: AutomationTrigger` · `automations.conditions: AutomationCondition[]` · `automations.actions: AutomationAction[]` · `automation_runs.conditions_snapshot: AutomationCondition[]` · `automation_runs.actions_performed: AutomationActionResult[]` · `saved_views.config: SavedViewConfig` · `dashboard_layouts.layout: DashboardLayout`.
 
-### 2.7 DB triggers (`drizzle/0001_guards.sql`, 28 PL/pgSQL triggers + 12 TRUNCATE guards, idempotent DROP+CREATE)
+### 2.7 DB triggers (`drizzle/0001_guards.sql` + `drizzle/0003_roles_v2_data.sql`, 31 PL/pgSQL row triggers (28 + users_keep_admin, users_client_link, org_primary_owner) + 12 TRUNCATE guards, idempotent DROP+CREATE)
 
 Append-only: `activity_events` (no UPDATE/DELETE). No DELETE + fill-once guards: `job_status_transitions`, `job_assignments`, `job_revisions`, `job_links`, `job_comments`, `work_sessions`, `automation_runs`, `notifications`, `team_memberships`. No DELETE: `jobs`, `users`. Consistency on `jobs`: status ∈ workflow, category matches status, client matches project, status change requires open transition row, org/job_number/creator immutable. Installed by every migrate: PGlite auto-migrate on open (`src/db/index.ts`), `makeTestDb()`, `npm run db:migrate`, `db:migrate:remote` / `vercel-build`. `src/db/guard.ts` only lists them. Insertion order for same-millisecond ties uses the `rowid` identity column on `activity_events`, `job_assignments`, `automation_runs`.
 
@@ -122,93 +124,49 @@ Append-only: `activity_events` (no UPDATE/DELETE). No DELETE + fill-once guards:
 
 ## 3. Permissions
 
-### 3.1 Model
+> **The contract is `docs/ROLES.md` (roles v2).** This section is a summary; where anything here or in §2.1, §4.2, §6, §10, §12 disagrees with ROLES.md, ROLES.md wins.
 
-- `src/lib/constants.ts → PERMISSIONS`: action → roles that can *ever* perform it (`Action` = its keys; the Roles settings page renders from it).
-- `src/server/auth/permissions.ts → POLICY`: `{ [A in Action]: Rule<ResourceOf<A>> }` typed with `satisfies Record<Action, Rule>` so a missing action is a compile error. Rules are pure closures over `AuthContext` + a resource ref (`JobPermissionRef`, `UserRef`, link/note refs). `can(ctx, action, resource)` and `assertCan()`; `visibleJobsWhere(ctx)` is the SQL predicate for lists.
-- Hard rules applied before any rule: inactive actor → deny; resource `organisationId !== ctx.organisationId` → deny (belt-and-braces; loaders already 404); `ctx.isSystem` → allowed only for the automation action allowlist (§7).
-- Loaders in `src/server/services/_shared.ts`: `loadJobInOrg`, `loadUserInOrg`, `loadClientInOrg`, `loadProjectInOrg`, `loadStatusInWorkflow`, … throw `NotFoundError` for missing **or foreign** ids. Existence never leaks.
+### 3.1 Model (roles v2)
 
-Scope predicates:
-- **own**: `job.photographerId === me || job.createdByUserId === me`
-- **assigned**: `job.editorId === me`
-- **past**: any `job_assignments` row (role editor) for me on the job — read-only
-- **team**: job's photographer or editor ∈ `ctx.teamUserIds`, gated by `photographers_see_team_jobs` (photographers) / `editors_see_team_jobs` (editors). Team *workload* visibility is a separate gate (`can_view_team_workloads` per photographer, `editors_see_team_workloads` org flag) and grants **aggregates only**, never `job.view`.
-- **all** (photographers): `photographers_see_all_jobs`.
+- **Exactly three roles** (`users.role`, `ROLES` in `src/lib/constants.ts`): `photographer`, `editor`, `client`. There is no owner or manager role.
+- **Admin is a property of a photographer** (`users.is_admin`). The **persona** is derived, never stored (`personaOfUser`, `personaOf(ctx)`):
+  - `admin` = photographer ∧ is_admin — shown as **Owner / Photographer**; complete visibility and administrative control.
+  - `member` = photographer ∧ ¬is_admin — **Photographer (team member)**; six permission switches (§2.2 of ROLES.md).
+  - `editor` — **Editor**; two switches (create jobs, see other editors' jobs).
+  - `client` — **Client**; portal only (`/portal`, `/api/portal/*`).
+- **Primary owner** (`organisation_settings.primary_owner_user_id`): the one admin other admins cannot demote, deactivate, re-role, re-email or reset; only they can transfer the status (`POST /api/organisation/primary-owner`). Last-admin and primary-owner rules are enforced by the services (friendly 422) and by DB triggers (`drizzle/0003_roles_v2_data.sql`).
+- **Switches** are per user columns, read through the effective flags on `AuthContext` (`canCreateJobs`, `canViewAllJobs`, `canAssignEditors`, `canReviewSubmissions`, `canViewTeamWorkloads`, `canViewAnalytics`, `canViewTeamJobs`); admins get every member flag, clients none. The four old org-level visibility switches are deprecated columns, never read.
+- `src/lib/constants.ts → PERMISSIONS: Record<Action, readonly Persona[]>` (who can ever do it; `personaMayEver`). `src/server/auth/permissions.ts → POLICY` (`satisfies PolicyTable`): one `Rule { label, scope, memberFlag?, editorFlag?, allow }` per action. `can()` / `assertCan()` apply the hard rules in order: inactive → other org → system allowlist → no user → persona → **self-review** (nobody reviews/approves/delivers a job they edited) → **primary-owner protection** → the rule. `permissionMatrix()` renders the Roles page.
+- **Refs**: always build job refs with `loadJobRef` / `loadJobRefs` (`src/server/auth/job-ref.ts`: one query for past editors, the editor draft window `draftClosed`, and project sharing). `jobRefFromRow` without facts is deliberately conservative (draft closed, project not shared).
+- **SQL twins**: `visibleJobsWhere(ctx)` (staff; clients get no rows), `managedJobsWhere(ctx)`, `portalJobsWhere(ctx)` (clients: shared jobs of their own client, cancelled ones for 30 days). `canViewJob` is the pure twin of `visibleJobsWhere` (property-tested in `visibleJobs.pg.test.ts`).
+- **Gates**: `requireContext()` = staff only (`app.access`; a client gets 403 "This area is for studio staff"); `requirePortalContext()` = clients only (`portal.access`); `requireAnyContext()` only for `/api/auth/me|logout|change-password`. Pages use `pageContext()` (clients → `/portal`) and `portalPageContext()` (staff → `/dashboard`). Missing **or foreign** ids are 404, never 403.
+- **Personal vs business view**: admins and members with "See all jobs" get the `pwm_scope` cookie switch **My shoots | Whole business** (`src/server/view-scope.ts`, `POST /api/me/scope`). "My shoots" = jobs where I am the photographer.
 
-### 3.2 Matrix
+### 3.2 Matrix (summary — the full per-action matrix is ROLES.md §3.3)
 
-Legend: ✅ any · 🔸 condition · ❌ never. O owner · M manager · P photographer · E editor.
+Legend: ✅ always · 🔸 condition · ❌ never. A admin (Owner / Photographer) · M team member · E editor · C client. ⚑ = needs that switch.
 
-| Action | O | M | P | E |
+| Area | A | M | E | C |
 |---|---|---|---|---|
-| `job.create` | ✅ | ✅ | ✅ (photographer defaults to self) | ❌ |
-| `job.view` / `job.view_history` | ✅ | ✅ | 🔸 own ∨ team ∨ all | 🔸 assigned ∨ past ∨ team |
-| `job.edit_fields` (name, description, client, project, jobType, shootDate, estimatedHours) | ✅ | ✅ | 🔸 own | ❌ |
-| `job.edit_completion_percent` | ✅ | ✅ | 🔸 own | 🔸 assigned |
-| `job.set_due_date` / `set_review_due_date` / `set_delivery_due_date` / `set_priority` | ✅ | ✅ | 🔸 own | ❌ |
-| `job.assign_photographer` | ✅ | ✅ | 🔸 createdBy self | ❌ |
-| `job.assign_editor` (assign/reassign/unassign) | ✅ | ✅ | 🔸 own | ❌ |
-| `job.bulk_reassign` | ✅ | ✅ | ❌ | ❌ |
-| `job.transition` | per edge `allowed_roles` | per edge | per edge ∧ own | per edge ∧ (`assignee_only` → assigned) |
-| `job.transition_override` (any → any, reason required, audited `is_override`) | ✅ | ✅ | ❌ | ❌ |
-| `job.accept` / `job.start` / `job.submit` (editor-side edges) | ✅ on behalf | ✅ on behalf | ❌ | 🔸 assigned |
-| `job.decline` (assigned → ready by the editor) | ❌ | ❌ | ❌ | 🔸 assigned |
-| `job.pause` / resume | ✅ on behalf | ✅ on behalf | ❌ | 🔸 assigned ∧ category ∈ EDITOR_WORKING |
-| `job.begin_review` / `revision.request` / `revision.withdraw` / `job.approve` / `job.deliver` / `job.complete` | ✅ | ✅ | 🔸 own | ❌ |
-| `revision.resolve` (revision → resubmitted) | ✅ on behalf | ✅ on behalf | ❌ | 🔸 assigned |
-| `job.cancel` | ✅ | ✅ | 🔸 own ∧ category ≠ completed | ❌ |
-| `job.reopen` / `job.restore` | ✅ | ✅ | 🔸 own | ❌ |
-| `job.migrate_workflow` | ✅ | ✅ | ❌ | ❌ |
-| `link.add` | ✅ | ✅ | 🔸 own (any kind) | 🔸 assigned ∧ kind ∈ `EDITOR_LINK_KINDS` |
-| `link.replace` / `link.remove` | ✅ | ✅ | 🔸 own | 🔸 assigned ∧ `link.addedByUserId = me` |
-| `note.read` | ✅ | ✅ | 🔸 job.view (internal: own only) | 🔸 job.view ∧ kind ≠ internal |
-| `note.add` / `note.edit` / `note.archive` | ✅ | ✅ | 🔸 own; kinds photographer/client/revision (internal: ❌) | 🔸 assigned; kinds editor/revision; edit own |
-| `comment.add` / `comment.mention` | ✅ | ✅ | 🔸 job.view | 🔸 assigned (past: read-only) |
-| `comment.edit` | 🔸 own, 15 min | 🔸 own, 15 min | 🔸 own, 15 min | 🔸 own, 15 min |
-| `comment.delete` (soft) | ✅ | ✅ | 🔸 own | 🔸 own |
-| `timer.use` (org `time_tracking_enabled`) | 🔸 jobs assigned to self | 🔸 same | 🔸 own | 🔸 assigned ∧ category ∈ EDITOR_WORKING |
-| `timer.view_others` | ✅ | ✅ | 🔸 own | ❌ |
-| `analytics.view` (Insights pages) | ✅ | ✅ | 🔸 `can_view_analytics` | ❌ |
-| `analytics.view_self` (My Performance) | ✅ | ✅ | ✅ | ✅ |
-| `workloads.view_team` (aggregates) | ✅ | ✅ | 🔸 `can_view_team_workloads` | 🔸 org `editors_see_team_workloads` |
-| `workloads.view_self` | ✅ | ✅ | ✅ | ✅ |
-| `performance.view` (leaderboard / per-editor pages) | ✅ | ✅ | ❌ | ❌ |
-| `bottlenecks.view` / `reports.view` / `export.csv` | ✅ | ✅ | 🔸 `can_view_analytics` | ❌ |
-| `team.view_members` (directory: name, role, avatar) | ✅ | ✅ | ✅ | ✅ |
-| `activity.view_global` | ✅ | ✅ | 🔸 scoped to visible jobs | 🔸 scoped to visible jobs |
-| `activity.view_management_events` (`visibility = management`) | ✅ | ✅ | ❌ | ❌ |
-| `client.view` / `project.view` | ✅ | ✅ | ✅ | 🔸 those of visible jobs |
-| `client.create/edit` / `project.create/edit` | ✅ | ✅ | ✅ (edit: createdBy self) | ❌ |
-| `client.archive` / `project.archive` | ✅ | ✅ | ❌ | ❌ |
-| `user.view` | ✅ | ✅ | ✅ reduced projection | ✅ reduced projection |
-| `user.invite` / `user.change_role` / `user.deactivate` / `user.reactivate` / `user.set_capacity` / `user.set_visibility_flags` | ✅ | 🔸 targets photographer/editor only; role changes only between photographer ⇄ editor | ❌ | ❌ |
-| `user.edit` | ✅ | 🔸 photographer/editor | 🔸 self (name, avatar) | 🔸 self |
-| `user.reset_password` | ✅ | 🔸 photographer/editor | 🔸 self | 🔸 self |
-| `user.anonymise` | ✅ (target deactivated) | ❌ | ❌ | ❌ |
-| `team.manage` | ✅ | ✅ | ❌ | ❌ |
-| `settings.view` | ✅ | ✅ | ❌ | ❌ |
-| `settings.manage` | ✅ | ❌ | ❌ | ❌ |
-| `workflow.view` | ✅ | ✅ | ❌ | ❌ |
-| `workflow.manage` | ✅ | ❌ | ❌ | ❌ |
-| `job_type.manage` / `automation.manage` / `automation.view_runs` | ✅ | ✅ | ❌ | ❌ |
-| `notification.read` / `notification.prefs` / `dashboard.customise` / `saved_view.manage` | 🔸 self | 🔸 self | 🔸 self | 🔸 self |
-| `saved_view.share` | ✅ | ✅ | ❌ | ❌ |
-| `search.global` | ✅ | ✅ | 🔸 results through `visibleJobsWhere` | 🔸 same |
-| `system.sweep` | ✅ | ✅ | ❌ | ❌ |
-| `system.integrity` | ✅ | ❌ | ❌ | ❌ |
+| Use the studio app (`app.access`) / the portal (`portal.access`) | app | app | app | portal |
+| Create jobs | ✅ any photographer | 🔸 ⚑create; photographer = self | 🔸 ⚑create; photographer required (default photographer → primary owner); editor = self or none; inline new project | ❌ |
+| See jobs | ✅ all | 🔸 managed (photographer of / created) ∨ ⚑all | 🔸 assigned ∨ past ∨ created ∨ ⚑teamJobs (read-only, read cut-off) | 🔸 shared with their client (portal) |
+| Edit fields / dates / priority / client | ✅ | 🔸 managed (dates, cancel, client: jobs they control) | 🔸 own draft window only | ❌ |
+| Assign / reassign / unassign editors | ✅ | 🔸 managed ∧ ⚑assign | ❌ (self-assign at creation / claim only) | ❌ |
+| Accept / start / submit / resubmit | ✅ on behalf | ❌ | 🔸 assigned | ❌ |
+| Review, request revision, approve, deliver, complete, reopen | ✅ (never on a job they edited) | 🔸 managed ∧ ⚑review | ❌ | ❌ |
+| Share jobs / links with the client, reply to client feedback | ✅ | 🔸 managed ∧ ⚑review | ❌ (read client threads) | 🔸 feedback on shared jobs when enabled |
+| Share whole projects, client portal switches, invite client users | ✅ | ❌ | ❌ | ❌ |
+| Team workload / analytics, reports, CSV, performance | ✅ | 🔸 ⚑workloads / ⚑analytics | own only | ❌ |
+| Directories (Photographers / Editors) | ✅ | ✅ | ❌ | ❌ |
+| Users, roles, permissions, settings, workflows, automations, teams | ✅ (primary owner protected) | ❌ | ❌ | ❌ |
+| Audit / activity | ✅ incl. management events | 🔸 visible jobs | 🔸 visible jobs, read cut-off | ❌ |
 
-Additional rules not expressible as cells:
-- Assignee validation: target must be in-org, `is_active`, and have the right role (editor for `assign_editor`; photographer/manager/owner for `assign_photographer`).
-- Managers acting on editor-side edges write `metadata.onBehalfOf = job.editorId`.
-- Owner guards: cannot deactivate self; cannot deactivate/demote the last active owner.
-- Mentions: target must be active, in-org **and pass `job.view` for the job**; otherwise 422 listing the names (no dead links, no existence leak).
-- Editors on `past` jobs: read-only (no comments, links, notes, timer).
-- Reduced users projection for photographers/editors: `id, name, role, avatarColour, isActive` only.
+Rules not expressible as cells (ROLES.md §3.4): allow-list target validation (editors for `assign_editor`, active photographers for photographer pickers, staff for mentions/teams/automation targets); reduced user projection for non-admins (`id, name, title, role, isAdmin, isPrimaryOwner, avatarColour, isActive`; never client users); person pages (`/team/users/[id]`) for admins, self, and members with ⚑workloads/⚑analytics; editors never see client contact details, internal/client notes, others' workloads or assignment reasons (ROLES.md §2.4); sharing/portal columns are written only by `services/sharing.ts` and the user services (every generic input schema is strict).
 
 ### 3.3 Security hygiene (`src/server/auth/*`, `src/server/http.ts`)
 
-Stateless jose HS256 cookie `pwm_session` (`{ sub, sv }`, httpOnly, sameSite=lax, secure in prod, 7 days). `requireContext()` re-reads the user row every request; inactive or `sessionVersion` mismatch ⇒ 401. `sessionVersion++` on deactivate, role change, password change and logout (logout revokes every cookie issued before it, not just the browser's). `src/proxy.ts` only redirects cookie-less requests to `/login` (no DB). CSRF: non-GET requests must carry an `Origin` whose host equals the request host. Login: bcrypt cost 12, in-memory rate limit 5 attempts / 15 min per email+IP (`LOGIN_RATE_LIMIT`), failures audited (`auth.login_failed`, never the password). URLs: `http:`/`https:` only (`ALLOWED_URL_PROTOCOLS`). `redact()` strips `passwordHash` from every event snapshot. 404 for foreign ids. Reduced projections for non-management roles.
+Stateless jose HS256 cookie `pwm_session` (`{ sub, sv, k }`, httpOnly, sameSite=lax, secure in prod, 7 days; `k` = `staff` | `client`). The context is rebuilt from the user row every request; inactive, `sessionVersion` mismatch, or a client whose portal is off / client archived ⇒ 401. `sessionVersion++` on deactivate, role change, admin grant/revoke, password change and logout (permission switches apply on the next request without a sign-out) (logout revokes every cookie issued before it, not just the browser's). `src/proxy.ts` (no DB, unverified `k` claim, UX only) redirects cookie-less requests to `/login`, client cookies on staff pages to `/portal` and staff cookies on `/portal*` to `/dashboard`; security lives in `requireContext` / `requirePortalContext` and the page layouts. CSRF: non-GET requests must carry an `Origin` whose host equals the request host. Login: bcrypt cost 12, in-memory rate limit 5 attempts / 15 min per email+IP (`LOGIN_RATE_LIMIT`), failures audited (`auth.login_failed`, never the password). URLs: `http:`/`https:` only (`ALLOWED_URL_PROTOCOLS`). `redact()` strips `passwordHash` from every event snapshot. 404 for foreign ids. Reduced projections for non-admins. Login failures for wrong passwords, inactive accounts and closed client portals are one generic 401 (no oracle).
 
 ---
 

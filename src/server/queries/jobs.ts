@@ -52,7 +52,11 @@ import {
   priorityOrderSql,
   selectRawJobs,
   visibleJobsWhere,
+  viewScopeFor,
+  viewScopeWhere,
+  ANOTHER_EDITOR,
   type OrgDayBounds,
+  type ViewScope,
 } from "./scope";
 
 /* ------------------------------------------------------------------ */
@@ -143,6 +147,11 @@ export const JobListFiltersSchema = z.object({
   viewId: single(z.string().min(1).optional()),
   cursor: single(z.string().min(1).optional()),
   limit: single(z.coerce.number().int().min(1).max(JOB_LIST_MAX_LIMIT).optional()),
+  /**
+   * Requested personal / business view (docs/ROLES.md §8): "mine" | "business" ("all" = business).
+   * Resolved with `viewScopeFor` — ignored for anyone without the scope switch, never a widening.
+   */
+  scope: single(z.enum(["mine", "business", "all"]).optional()),
 });
 
 export type JobListFiltersInput = z.input<typeof JobListFiltersSchema>;
@@ -165,6 +174,8 @@ export interface JobListResult {
   groups: JobGroup[] | null;
   /** The effective filters after merging the saved view. */
   applied: JobListFilters;
+  /** The resolved view scope (null = the viewer has no scope switch). */
+  scope: ViewScope | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,14 +242,30 @@ function idList(values: readonly string[], column: typeof jobs.editorId | typeof
   return parts.length === 0 ? undefined : parts.length === 1 ? parts[0] : or(...parts);
 }
 
+/** Editors without "See other editors' jobs" never learn who holds a past/created job (§2.3). */
+function hidesOtherEditors(ctx: AuthContext): boolean {
+  return !ctx.isSystem && ctx.role === "editor" && !ctx.canViewTeamJobs;
+}
+
+/** `editorId` filter for an editor who may not see other editors: me / none / ANOTHER_EDITOR only. */
+function redactedEditorList(ctx: AuthContext, values: readonly string[]): SQL {
+  const me = ctx.userId ?? "";
+  const parts: SQL[] = [];
+  if (values.includes(me)) parts.push(eq(jobs.editorId, me));
+  if (values.includes("none")) parts.push(isNull(jobs.editorId));
+  if (values.includes(ANOTHER_EDITOR.id)) parts.push(and(isNotNull(jobs.editorId), ne(jobs.editorId, me)) as SQL);
+  return parts.length === 0 ? sql`1 = 0` : (or(...parts) as SQL);
+}
+
 function quickFilterSql(ctx: AuthContext, quick: QuickFilter, b: OrgDayBounds): SQL {
   const deadlineBound = categoryIn(CATEGORY_GROUPS.DEADLINE_BOUND);
   const me = ctx.userId ?? "";
   switch (quick) {
     case "my_jobs":
+      // Editors: jobs they hold. Photographers (admins included): jobs they shoot or created as a photographer.
       if (ctx.role === "editor") return eq(jobs.editorId, me);
-      if (ctx.role === "photographer") return or(eq(jobs.photographerId, me), eq(jobs.createdByUserId, me)) as SQL;
-      return or(eq(jobs.photographerId, me), eq(jobs.editorId, me), eq(jobs.createdByUserId, me)) as SQL;
+      if (ctx.role === "photographer") return or(eq(jobs.photographerId, me), and(eq(jobs.createdByUserId, me), eq(jobs.createdByRole, "photographer"))) as SQL;
+      return sql`1 = 0`;
     case "unassigned":
       return categoryIn(CATEGORY_GROUPS.UNASSIGNED);
     case "overdue":
@@ -294,9 +321,14 @@ function dueBound(value: string, side: "from" | "to", tz: string): SQL {
  * The WHERE for a filter set (visibility is added by the select helpers).
  * Exported for kanban / team work, which share the filter vocabulary.
  */
-export function jobFiltersWhere(ctx: AuthContext, f: JobListFilters, bounds: OrgDayBounds, opts: { defaultHideCancelled?: boolean } = {}): SQL | undefined {
+export function jobFiltersWhere(
+  ctx: AuthContext,
+  f: JobListFilters,
+  bounds: OrgDayBounds,
+  opts: { defaultHideCancelled?: boolean; /** Resolved view scope ("mine" adds My shoots). */ viewScope?: ViewScope | null } = {},
+): SQL | undefined {
   const tz = ctx.settings.timezone;
-  const parts: (SQL | undefined)[] = [];
+  const parts: (SQL | undefined)[] = [viewScopeWhere(ctx, opts.viewScope ?? null)];
   const q = f.q?.trim();
   if (q) {
     parts.push(
@@ -312,7 +344,7 @@ export function jobFiltersWhere(ctx: AuthContext, f: JobListFilters, bounds: Org
   for (const quick of f.quick ?? []) parts.push(quickFilterSql(ctx, quick, bounds));
   if (f.statusCategory?.length) parts.push(inArray(jobs.statusCategory, f.statusCategory));
   if (f.statusId?.length) parts.push(inArray(jobs.statusId, f.statusId));
-  if (f.editorId?.length) parts.push(idList(f.editorId, jobs.editorId));
+  if (f.editorId?.length) parts.push(hidesOtherEditors(ctx) ? redactedEditorList(ctx, f.editorId) : idList(f.editorId, jobs.editorId));
   if (f.photographerId?.length) parts.push(idList(f.photographerId, jobs.photographerId));
   if (f.clientId?.length) parts.push(inArray(jobs.clientId, f.clientId));
   if (f.projectId?.length) parts.push(inArray(jobs.projectId, f.projectId));
@@ -355,7 +387,7 @@ function nocase(column: SQLWrapper): SQL[] {
 }
 
 /** Sort expressions per table column (each sorted in the requested direction, nulls last). */
-function sortExpressions(column: JobTableColumn): SQL[] {
+function sortExpressions(ctx: AuthContext, column: JobTableColumn): SQL[] {
   switch (column) {
     case "job":
       return [sql`length(${jobs.jobNumber})`, sql`${jobs.jobNumber} collate "C"`];
@@ -366,6 +398,8 @@ function sortExpressions(column: JobTableColumn): SQL[] {
     case "photographer":
       return nocase(photographerUser.name);
     case "editor":
+      // Editors without the team switch: every other editor sorts as "Another editor" (no name oracle through ordering).
+      if (hidesOtherEditors(ctx)) return [sql`(case when ${jobs.editorId} = ${ctx.userId ?? ""} then 0 when ${jobs.editorId} is null then 2 else 1 end)`];
       return nocase(editorUser.name);
     case "status":
       return [categoryOrderSql(), sql`${workflowStatuses.sortOrder}`];
@@ -427,7 +461,13 @@ const DUE_BUCKETS: readonly { key: string; label: string }[] = [
   { key: "none", label: "No due date" },
 ];
 
-function groupSql(groupBy: JobGroupBy, b: OrgDayBounds): GroupSql {
+function groupSql(ctx: AuthContext, groupBy: JobGroupBy, b: OrgDayBounds): GroupSql {
+  if (groupBy === "editor" && hidesOtherEditors(ctx)) {
+    const me = ctx.userId ?? "";
+    const key = sql`(case when ${jobs.editorId} is null then 'none' when ${jobs.editorId} = ${me} then ${jobs.editorId} else ${ANOTHER_EDITOR.id} end)`;
+    const label = sql`(case when ${jobs.editorId} is null then 'Unassigned' when ${jobs.editorId} = ${me} then ${editorUser.name} else ${ANOTHER_EDITOR.name} end)`;
+    return { key, label, order: [nullsLastSql(jobs.editorId), sql`(case when ${jobs.editorId} = ${me} then 0 else 1 end)`] };
+  }
   switch (groupBy) {
     case "status":
       return {
@@ -542,29 +582,42 @@ export async function parseJobListApiQuery(db: DbLike, ctx: AuthContext, input: 
   return parseJobListFilters(db, ctx, checkApiQuery(input));
 }
 
-/** `GET /api/jobs` — `listJobs` behind the strict query schema. */
-export async function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<JobListResult> {
-  return listJobs(db, ctx, checkApiQuery(input));
+/** `GET /api/jobs` — `listJobs` behind the strict query schema (`opts.scopeCookie` = the `pwm_scope` cookie). */
+export async function listJobsApi(db: DbLike, ctx: AuthContext, input: unknown = {}, opts: ListScopeOptions = {}): Promise<JobListResult> {
+  return listJobs(db, ctx, checkApiQuery(input), opts);
+}
+
+/** Cookie half of the view scope; the `scope` param travels in the filters. */
+export interface ListScopeOptions {
+  /** `pwm_scope` cookie value (the `?scope=` param in `input` wins over it). */
+  scopeCookie?: string | null;
+}
+
+/** Resolved view scope for parsed filters + the cookie. */
+export function listViewScope(ctx: AuthContext, f: Pick<JobListFilters, "scope">, opts: ListScopeOptions = {}): ViewScope | null {
+  return viewScopeFor(ctx, { scope: f.scope ?? null, scopeCookie: opts.scopeCookie ?? null });
 }
 
 /**
  * One page of visible jobs. `input` = `JobListFiltersInput` (or raw search
  * params). Throws ValidationError for bad input, NotFoundError for a
- * foreign / private saved view.
+ * foreign / private saved view. The personal / business scope (§8) narrows
+ * to "My shoots" when resolved to "mine".
  */
-export async function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<JobListResult> {
+export async function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}, opts: ListScopeOptions = {}): Promise<JobListResult> {
   const f = await parseJobListFilters(db, ctx, input);
   const now = ctx.now();
   const bounds = orgDayBounds(ctx, now, (await loadOrgSettingsRow(db, ctx))?.weekStartsOn ?? 1);
-  const where = jobFiltersWhere(ctx, f, bounds);
+  const viewScope = listViewScope(ctx, f, opts);
+  const where = jobFiltersWhere(ctx, f, bounds, { viewScope });
   const limit = f.limit ?? JOB_LIST_DEFAULT_LIMIT;
   const offset = decodeOffsetCursor(f.cursor);
 
-  const group = f.groupBy ? groupSql(f.groupBy, bounds) : null;
+  const group = f.groupBy ? groupSql(ctx, f.groupBy, bounds) : null;
   const sorts: SortSpec[] = f.sort?.length ? f.sort : [{ column: "dueDate", dir: "asc" }];
   const orderBy: SQL[] = [
     ...(group ? group.order : []),
-    ...sorts.flatMap((s) => sortExpressions(s.column).map((e) => orderTerm(e, s.dir))),
+    ...sorts.flatMap((s) => sortExpressions(ctx, s.column).map((e) => orderTerm(e, s.dir))),
     sql`${jobs.createdAt} desc`,
     sql`${jobs.id} asc`,
   ];
@@ -598,7 +651,10 @@ export async function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}
       .groupBy(sql`1`)
       .orderBy(...group.order.map((o) => sql`min(${o})`));
     groups = counted.map((g) => ({ key: String(g.key), label: groupLabel(groupBy, String(g.key), String(g.label)), count: Number(g.n) }));
-    rowGroupKeys = page.map((r) => rowGroupKey(groupBy, r.job, bounds));
+    rowGroupKeys = page.map((r) => {
+      const key = rowGroupKey(groupBy, r.job, bounds);
+      return groupBy === "editor" && hidesOtherEditors(ctx) && key !== "none" && key !== ctx.userId ? ANOTHER_EDITOR.id : key;
+    });
   }
 
   return {
@@ -608,6 +664,7 @@ export async function listJobs(db: DbLike, ctx: AuthContext, input: unknown = {}
     rowGroupKeys,
     groups,
     applied: f,
+    scope: viewScope,
   };
 }
 

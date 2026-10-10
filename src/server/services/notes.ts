@@ -6,21 +6,26 @@
  * (`noteHistory`). Internal notes produce management-only events
  * (recordEvent upgrades visibility when `kind = internal`).
  *
- * Permissions (permissions.ts): `note.add/edit/archive` — owners/managers any
- * kind; photographers on own jobs, kinds photographer/client/revision;
- * editors on assigned jobs, kinds editor/revision, edit/archive own notes
- * only. `note.read` — editors never see internal notes; photographers see
- * internal notes on their own jobs only. Restore uses `note.archive`.
+ * Permissions (permissions.ts, docs/ROLES.md §3.3): `note.add/edit/archive` —
+ * admins any kind; team members on jobs they manage, kinds photographer /
+ * client / revision, plus `delivery` (client-visible) with Review submissions;
+ * editors on assigned or own draft jobs, kinds editor / revision, edit/archive
+ * own notes only. `note.read` — editors never see `internal` or `client` notes
+ * (they do see `delivery` notes) and only up to their read cut-off on past /
+ * created jobs; team members see internal notes on managed jobs only. Restore
+ * uses `note.archive`. Automations (system context) never write `delivery`
+ * notes: client-visible text is always written by a person (§6.3).
  */
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { first, one, type DbLike, type Tx } from "@/db/index";
 import { activityEvents, jobNotes, type Json } from "@/db/schema";
-import { NOTE_KINDS, type NoteKind } from "@/lib/constants";
+import { AUTOMATION_NOTE_KINDS, NOTE_KINDS, type NoteKind } from "@/lib/constants";
 import type { AuthContext, JobNote, JobPermissionRef, NoteHistoryEntry, NoteView } from "@/lib/types";
 import { AddNoteInput, ArchiveNoteInput, EditNoteInput, RestoreNoteInput } from "@/lib/validation/notes";
 import { assertCan, can, type NotePermissionRef } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { ConflictError, NotFoundError, ValidationError } from "@/server/errors";
+import { editorReadCutoff, loadEditorAssignmentFacts, passesCutoff } from "@/server/queries/scope";
 import { jobMeta, loadJobWithRef, loadUserRefMap, unknownUserRef } from "./_collab";
 import { assertVersion, loadNoteInOrg, loadRevisionInOrg, loadUserInOrg, parseInput } from "./_shared";
 
@@ -52,6 +57,9 @@ async function updateNote(tx: Tx, ctx: AuthContext, note: JobNote, set: Partial<
  */
 export async function addNote(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobNote> {
   const data = parseInput(AddNoteInput, input);
+  if (ctx.isSystem && !(AUTOMATION_NOTE_KINDS as readonly NoteKind[]).includes(data.kind)) {
+    throw new ValidationError("Automations can't write client-visible delivery notes", { formErrors: [], fieldErrors: { kind: ["Not allowed for automations"] } });
+  }
   const { job, ref } = await loadJobWithRef(tx, ctx, data.jobId);
   assertCan(ctx, "note.add", { job: ref, kind: data.kind });
 
@@ -210,6 +218,7 @@ export async function listNotes(
 ): Promise<NoteView[]> {
   const { job, ref } = await loadJobWithRef(db, ctx, jobId);
   assertCan(ctx, "job.view", ref);
+  const cutoff = ctx.role === "editor" ? editorReadCutoff(ctx, ref, (await loadEditorAssignmentFacts(db, ctx, [job.id])).get(job.id) ?? []) : null;
   const rows = (
     await db
       .select()
@@ -222,7 +231,7 @@ export async function listNotes(
         ),
       )
       .orderBy(asc(jobNotes.createdAt), asc(jobNotes.id))
-  ).filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }));
+  ).filter((n) => can(ctx, "note.read", { job: ref, kind: n.kind }) && passesCutoff(cutoff, n.createdAt, n.authorUserId, ctx.userId));
 
   const people = await loadUserRefMap(db, ctx, rows.flatMap((n) => [n.authorUserId, n.lastEditedByUserId]));
   const views = rows.map<NoteView>((n) => ({

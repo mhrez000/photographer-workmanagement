@@ -3,7 +3,10 @@
  * Every organisation, brand and couple here is fictional; street names and
  * suburbs are real Sydney places so the data reads naturally.
  */
-import type { Role } from "@/lib/constants";
+import type { PermissionFlag, Role } from "@/lib/constants";
+
+/** Raw users.* switch columns set for a seeded person (docs/ROLES.md §2.2, §13). */
+export type SeedFlags = Partial<Record<PermissionFlag, boolean>>;
 
 export interface SeedUserDef {
   key: string;
@@ -13,8 +16,10 @@ export interface SeedUserDef {
   title: string;
   avatarColour: string;
   capacityHoursPerWeek?: number;
-  canViewTeamWorkloads?: boolean;
-  canViewAnalytics?: boolean;
+  /** Photographer with admin (owner / co-owner). */
+  isAdmin?: boolean;
+  /** Team-member / editor switches, applied explicitly after the invite. */
+  flags?: SeedFlags;
 }
 
 export const NORTHLIGHT = {
@@ -34,17 +39,47 @@ export const SEED_PASSWORD = "Password123!";
 const P = (n: number) => `photographer${String(n).padStart(2, "0")}`;
 const E = (n: number) => `editor${String(n).padStart(2, "0")}`;
 
+/** Owner / Photographer (admin, primary owner): runs the business and also shoots (~12 % of jobs). */
 export const OWNER: SeedUserDef = {
   key: "owner",
   email: "owner@studio.test",
   name: "Hannah Brooks",
-  role: "owner",
+  role: "photographer",
+  isAdmin: true,
   title: "Studio Director",
   avatarColour: "#6366f1",
 };
 
+/** photographer02..11: established team members (create ✓, assign ✓, review ✓). */
+const ESTABLISHED: SeedFlags = {
+  canCreateJobs: true,
+  canAssignEditors: true,
+  canReviewSubmissions: true,
+  canViewTeamWorkloads: false,
+  canViewAllJobs: false,
+  canViewAnalytics: false,
+};
+/** photographer01: every team-member switch (sees all jobs, workloads, analytics; reviews). */
+const SENIOR: SeedFlags = {
+  canCreateJobs: true,
+  canAssignEditors: true,
+  canReviewSubmissions: true,
+  canViewTeamWorkloads: true,
+  canViewAllJobs: true,
+  canViewAnalytics: true,
+};
+/** photographer12: invite defaults with assign off — the owner assigns and reviews her work. */
+const JUNIOR: SeedFlags = {
+  canCreateJobs: true,
+  canAssignEditors: false,
+  canReviewSubmissions: false,
+  canViewTeamWorkloads: false,
+  canViewAllJobs: false,
+  canViewAnalytics: false,
+};
+
 const PHOTOGRAPHERS: readonly (readonly [string, string, string])[] = [
-  ["Liam Carter", "Senior Real Estate Photographer", "#22c55e"],
+  ["Liam Carter", "Senior photographer", "#22c55e"],
   ["Chloe Nguyen", "Real Estate Photographer", "#f59e0b"],
   ["Jack Morrison", "Real Estate Photographer", "#f97316"],
   ["Isla Patel", "Drone & Real Estate Photographer", "#ef4444"],
@@ -55,7 +90,7 @@ const PHOTOGRAPHERS: readonly (readonly [string, string, string])[] = [
   ["Ethan Walsh", "Commercial Photographer", "#0891b2"],
   ["Zara Ahmed", "Product Photographer", "#6366f1"],
   ["Harvey Kim", "Commercial & Video", "#0ea5e9"],
-  ["Matilda O'Brien", "Real Estate Photographer", "#14b8a6"],
+  ["Matilda O'Brien", "Junior photographer", "#14b8a6"],
 ];
 
 const EDITORS: readonly (readonly [string, string, number, string])[] = [
@@ -74,9 +109,11 @@ const EDITORS: readonly (readonly [string, string, number, string])[] = [
   ["Jasper Hughes", "Editor", 38, "#94a3b8"],
 ];
 
+/** Key of the junior photographer whose jobs the owner assigns and reviews. */
+export const JUNIOR_PHOTOGRAPHER = P(12);
+
+/** Everyone the owner invites (no manager accounts in roles v2). */
 export const STAFF: readonly SeedUserDef[] = [
-  { key: "manager1", email: "manager1@studio.test", name: "Grace Liu", role: "manager", title: "Production Manager", avatarColour: "#0ea5e9" },
-  { key: "manager2", email: "manager2@studio.test", name: "Tom Gallagher", role: "manager", title: "Operations Manager", avatarColour: "#14b8a6" },
   ...PHOTOGRAPHERS.map(([name, title, colour], i): SeedUserDef => ({
     key: P(i + 1),
     email: `${P(i + 1)}@studio.test`,
@@ -84,7 +121,7 @@ export const STAFF: readonly SeedUserDef[] = [
     role: "photographer",
     title,
     avatarColour: colour,
-    ...(i === 0 ? { canViewTeamWorkloads: true, canViewAnalytics: true } : {}),
+    flags: i === 0 ? SENIOR : i === 11 ? JUNIOR : ESTABLISHED,
   })),
   ...EDITORS.map(([name, title, capacity, colour], i): SeedUserDef => ({
     key: E(i + 1),
@@ -94,7 +131,35 @@ export const STAFF: readonly SeedUserDef[] = [
     title,
     avatarColour: colour,
     capacityHoursPerWeek: capacity,
+    // editor02 sees other editors' jobs (read-only); editor09 cannot create jobs.
+    flags: { canCreateJobs: i !== 8, canViewTeamJobs: i === 1 },
   })),
+];
+
+/* ------------------------------------------------------------------ */
+/*  Client portal (docs/ROLES.md §7, §13)                              */
+/* ------------------------------------------------------------------ */
+
+export interface SeedPortalClientDef {
+  clientName: string;
+  portalEnabled: boolean;
+  feedbackEnabled: boolean;
+  users: readonly { key: string; email: string; name: string; avatarColour: string }[];
+}
+
+export const PORTAL_CLIENTS: readonly SeedPortalClientDef[] = [
+  {
+    clientName: "Harbourline Realty",
+    portalEnabled: true,
+    feedbackEnabled: true,
+    users: [{ key: "client", email: "client@studio.test", name: "Sarah Kingsley", avatarColour: "#d97706" }],
+  },
+  {
+    clientName: "Coastal Key Property",
+    portalEnabled: true,
+    feedbackEnabled: false,
+    users: [{ key: "client2", email: "client2@studio.test", name: "Daniel Ward", avatarColour: "#0891b2" }],
+  },
 ];
 
 export const TEAMS: readonly { name: string; description: string; lead: string; members: readonly string[] }[] = [

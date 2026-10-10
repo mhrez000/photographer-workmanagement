@@ -1,0 +1,51 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`navigation per persona (docs/ROLES.md §10) > gates snapshot for the five staff personas 1`] = `
+{
+  "admin": {
+    "admin": true,
+    "analytics": true,
+    "createClients": true,
+    "createJobs": true,
+    "directory": true,
+    "teamWork": true,
+    "teamWorkloads": true,
+  },
+  "editor": {
+    "admin": false,
+    "analytics": false,
+    "createClients": false,
+    "createJobs": true,
+    "directory": false,
+    "teamWork": false,
+    "teamWorkloads": false,
+  },
+  "editorTeam": {
+    "admin": false,
+    "analytics": false,
+    "createClients": false,
+    "createJobs": true,
+    "directory": false,
+    "teamWork": true,
+    "teamWorkloads": false,
+  },
+  "memberAll": {
+    "admin": false,
+    "analytics": true,
+    "createClients": true,
+    "createJobs": true,
+    "directory": true,
+    "teamWork": true,
+    "teamWorkloads": true,
+  },
+  "memberDefault": {
+    "admin": false,
+    "analytics": false,
+    "createClients": true,
+    "createJobs": true,
+    "directory": true,
+    "teamWork": false,
+    "teamWorkloads": false,
+  },
+}
+`;

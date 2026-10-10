@@ -11,6 +11,10 @@ import type * as s from "@/db/schema";
 import type {
   Action,
   BottleneckKind,
+  ClientMilestone,
+  EditorFlag,
+  MemberFlag,
+  Persona,
   EventCause,
   EventType,
   EventVisibility,
@@ -22,6 +26,8 @@ import type {
   Priority,
   Role,
   StatusCategory,
+  TransitionRole,
+  ViewScope,
   WorkloadBand,
 } from "./constants";
 
@@ -99,20 +105,24 @@ export type {
 /*  Part 2 — auth & request context                                    */
 /* ------------------------------------------------------------------ */
 
-/** Signed into the jose cookie: user id + session version only. */
+/** Session kind claim `k` (docs/ROLES.md §7.8): routing hint for the proxy only (unverified there). */
+export type SessionKind = "staff" | "client";
+
+/** Signed into the jose cookie: user id + session version (+ kind; a missing claim = staff). */
 export interface SessionPayload {
   sub: string;
   sv: number;
+  k?: SessionKind;
 }
 
-/** Visibility flags copied from organisation_settings at request time. */
+/**
+ * Organisation settings copied into the context at request time. Roles v2 removed the
+ * four org-wide visibility switches (photographersSeeAllJobs, photographersSeeTeamJobs,
+ * editorsSeeTeamJobs, editorsSeeTeamWorkloads): visibility is per person now.
+ */
 export interface ContextSettings {
   timezone: string;
   timeTrackingEnabled: boolean;
-  photographersSeeAllJobs: boolean;
-  photographersSeeTeamJobs: boolean;
-  editorsSeeTeamJobs: boolean;
-  editorsSeeTeamWorkloads: boolean;
   automationsEnabled: boolean;
   /** organisation_settings.audit_notifications (write a notification.sent event per notification). */
   auditNotifications?: boolean;
@@ -126,11 +136,34 @@ export interface ContextSettings {
 export interface AuthContext {
   userId: string | null;
   organisationId: string;
+  /** System context: "photographer". */
   role: Role;
+  /** Admin (owner / co-owner). System context: true. Only ever true for role = photographer. */
+  isAdmin: boolean;
+  /** organisation_settings.primary_owner_user_id = me. System context: false. */
+  isPrimaryOwner: boolean;
   isActive: boolean;
+  // EFFECTIVE switches, never raw columns (docs/ROLES.md §2.1). Admin => all six member switches
+  // true. Clients => every switch false. A switch outside its role is false.
+  /** admin yes; member / editor = column; client no */
+  canCreateJobs: boolean;
+  /** admin yes; member = column; editor no */
+  canViewAllJobs: boolean;
+  /** admin yes; member = column; editor no */
+  canAssignEditors: boolean;
+  /** admin yes; member = column; editor no */
+  canReviewSubmissions: boolean;
+  /** admin yes; member = column; editor no */
   canViewTeamWorkloads: boolean;
+  /** admin yes; member = column; editor no */
   canViewAnalytics: boolean;
-  /** Active teammates' user ids (users sharing an active team with the actor). */
+  /** editor = column; everyone else false (admins / all-jobs members already see every job) */
+  canViewTeamJobs: boolean;
+  /** Client users only: their client. */
+  clientId: string | null;
+  /** Client users only: clients.feedback_enabled. */
+  clientFeedbackEnabled: boolean;
+  /** Active teammates' user ids. Kept for grouping; NOT used for visibility any more (roles v2). */
   teamUserIds: ReadonlySet<string>;
   settings: ContextSettings;
   /** true only for the system context (automations / sweep / seed). */
@@ -156,6 +189,25 @@ export interface UserRef {
   id: string;
   name: string;
   role: Role;
+  avatarColour: string;
+  isActive: boolean;
+  /** Roles v2: set where the persona badge is shown (personaLabel). Optional while queries are ported. */
+  isAdmin?: boolean;
+  isPrimaryOwner?: boolean;
+  title?: string | null;
+}
+
+/**
+ * Reduced user projection for members and editors (docs/ROLES.md §3.4): never
+ * email, phone or other private fields.
+ */
+export interface ReducedUser {
+  id: string;
+  name: string;
+  title: string | null;
+  role: Role;
+  isAdmin: boolean;
+  isPrimaryOwner: boolean;
   avatarColour: string;
   isActive: boolean;
 }
@@ -192,17 +244,39 @@ export interface JobRef {
   name: string;
 }
 
-/** Ownership/visibility facts the permission layer needs about a job. */
+/** Ownership/visibility facts the permission layer needs about a job (docs/ROLES.md §2.1). */
 export interface JobPermissionRef {
   id: string;
   organisationId: string;
   photographerId: string | null;
   editorId: string | null;
   createdByUserId: string;
+  /** Role of the creator at creation (jobs.created_by_role). */
+  createdByRole: "photographer" | "editor";
   statusCategory: StatusCategory;
   isPaused: boolean;
-  /** Loaded only for editors: every editor who ever held the job. */
+  /** Every editor who ever held the job (incl. the current one). Loaded for every actor (self-review rule). */
   pastEditorIds?: readonly string[];
+  /** Editor draft window closed for good: ever started, an editor removed by someone else, or ever cancelled. */
+  draftClosed: boolean;
+  clientId: string;
+  /** jobs.shared_with_client */
+  sharedWithClient: boolean;
+  /** projects.shared_with_client of the job's project */
+  projectSharedWithClient: boolean;
+  /** jobs.cancelled_at (portal: cancelled jobs stay visible for PORTAL_CANCELLED_VISIBLE_DAYS). */
+  cancelledAt?: string | null;
+}
+
+/** What the client portal checks about a job (`portal.view_job`, `portal.give_feedback`). */
+export interface PortalJobRef {
+  id: string;
+  organisationId: string;
+  clientId: string;
+  sharedWithClient: boolean;
+  projectSharedWithClient: boolean;
+  statusCategory: StatusCategory;
+  cancelledAt?: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -259,6 +333,8 @@ export interface LinkView {
   removedBy: UserRef | null;
   removeReason: string | null;
   isCurrent: boolean;
+  /** Roles v2: job_links.shared_with_client (visible in the client portal while current). */
+  sharedWithClient?: boolean;
 }
 
 export interface LinkSlot {
@@ -420,6 +496,10 @@ export interface JobDetail {
     reopenedCount: number;
     pausedAt: string | null;
     updatedAt: string;
+    /** Roles v2 client sharing (job / its project) and the creator's role at creation. */
+    sharedWithClient?: boolean;
+    projectSharedWithClient?: boolean;
+    createdByRole?: "photographer" | "editor";
   };
   workflowStatuses: StatusRef[];
   links: LinkSlot[];
@@ -769,10 +849,118 @@ export interface IntegrityReport {
 }
 
 /** Shape of the Roles settings page rows (rendered from PERMISSIONS + POLICY). */
+export interface PermissionMatrixCell {
+  allowed: boolean;
+  /** Scope note ("managed jobs", "any", ...) or "never". */
+  scope: string;
+  /** Member switch the cell needs (Roles page: "needs: Review submissions"). */
+  memberFlag?: MemberFlag;
+  /** Editor switch the cell needs. */
+  editorFlag?: EditorFlag;
+}
+
 export interface PermissionMatrixRow {
   action: Action;
   label: string;
-  cells: Record<Role, { allowed: boolean; scope: string }>;
+  cells: Record<Persona, PermissionMatrixCell>;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Part 2 — client portal view models (docs/ROLES.md §7.4)            */
+/*  Built only by the whitelist mapper toPortalJob(); never spread a row */
+/* ------------------------------------------------------------------ */
+
+export interface PortalProject {
+  id: string;
+  name: string;
+  address: string | null;
+}
+
+/** One step of the Booked > Shot > Editing > Delivered stepper. */
+export interface PortalMilestone {
+  key: ClientMilestone;
+  label: string;
+  state: "done" | "current" | "upcoming";
+  /** Agreed date shown under the step (shoot date for Booked/Shot, delivered/delivery date for Delivered). */
+  date: string | null;
+}
+
+export interface PortalLink {
+  id: string;
+  kind: LinkKind;
+  label: string | null;
+  url: string;
+  provider: string | null;
+}
+
+/** A delivery note (job_notes kind "delivery", not archived). */
+export interface PortalNote {
+  id: string;
+  body: string;
+  createdAt: string;
+  authorName: string;
+}
+
+export interface PortalFeedbackMessage {
+  id: string;
+  /** Plain text; empty when deleted. */
+  body: string;
+  authorName: string;
+  /** Written by a client user (else the studio). */
+  isClient: boolean;
+  createdAt: string;
+  editedAt: string | null;
+  deleted: boolean;
+}
+
+/** A client_feedback thread whose root author is a user of the viewer's client. */
+export interface PortalFeedbackThread extends PortalFeedbackMessage {
+  replies: PortalFeedbackMessage[];
+}
+
+/** Portal list item. Never: editors, statuses, priority, due/review dates, revisions, internal notes, emails. */
+export interface PortalJob {
+  id: string;
+  jobNumber: string;
+  name: string;
+  project: PortalProject;
+  jobTypeName: string;
+  /** null = cancelled. */
+  milestone: ClientMilestone | null;
+  milestoneLabel: string;
+  milestoneDetail: string | null;
+  /** Reopened after delivery ("Updating your delivery"). */
+  updating: boolean;
+  cancelled: boolean;
+  shootDate: string | null;
+  /** The agreed delivery date. */
+  deliveryDueDate: string | null;
+  deliveredAt: string | null;
+  cancelledAt: string | null;
+  photographer: { name: string } | null;
+}
+
+export interface PortalJobDetail extends PortalJob {
+  links: PortalLink[];
+  deliveryNotes: PortalNote[];
+  feedback: PortalFeedbackThread[];
+  canGiveFeedback: boolean;
+}
+
+/** /portal grouping: jobs by project. */
+export interface PortalProjectGroup {
+  project: PortalProject;
+  jobs: PortalJob[];
+}
+
+/** Portal header + GET /api/auth/me for clients (client-safe shape, §7.7). */
+export interface PortalViewer {
+  kind: "client";
+  name: string;
+  email: string;
+  clientName: string;
+  studioName: string;
+  unreadCount: number;
 }
 
 export type { Action, KpiBucket };
@@ -860,9 +1048,47 @@ export interface DashboardPersonal {
   queuePreview: JobRow[];
 }
 
+/** An open editor question or a waiting client-feedback thread (`questions` widget, docs/ROLES.md §6.4 / §7.5). */
+export interface DashboardQuestion {
+  /** Root comment of the thread. */
+  commentId: string;
+  kind: "question" | "client_feedback";
+  job: JobRef;
+  author: UserRef;
+  /** Plain-text excerpt of the latest message (≤ 200 chars). */
+  excerpt: string;
+  /** When the thread started waiting (latest message). */
+  waitingSince: string;
+}
+
+/** A due / review-due / delivery-due date in the next 7 days (`upcoming_deadlines` widget). */
+export interface DashboardDeadline {
+  job: JobRow;
+  kind: "due" | "review_due" | "delivery_due";
+  at: string;
+}
+
+/** A scope-aware list widget: in "mine" scope `moreInBusiness` counts the rest of the business (footer "N more in Whole business →"). */
+export interface DashboardScopedList<T> {
+  items: T[];
+  total: number;
+  moreInBusiness: number;
+}
+
+/** Median turnaround, last 30 days vs the previous 30 (`turnaround` widget, analytics.view only). */
+export interface TurnaroundSummary {
+  /** Shoot date → delivered (or completed when never delivered), seconds. */
+  shootToDelivered: { current: number | null; previous: number | null; count: number };
+  /** Submitted → the review decision (approved / revision), seconds. */
+  submittedToReviewed: { current: number | null; previous: number | null; count: number };
+}
+
 /** `GET /api/dashboard`. Lists are already scoped to the viewer. */
 export interface DashboardData {
-  variant: "management" | "personal";
+  /** "business" = an admin / ⚑all member in the Whole business scope; else "personal" (docs/ROLES.md §9). */
+  variant: "business" | "personal";
+  /** The resolved view scope (null = the viewer has no scope switch). */
+  scope: ViewScope | null;
   kpis: KpiSummary;
   /** null when the viewer may not see team workloads. */
   workloads: WorkloadRow[] | null;
@@ -876,6 +1102,17 @@ export interface DashboardData {
   /** Editor leaderboard for this month (performance.view only). */
   editorPerformance: PerformanceRow[] | null;
   personal: DashboardPersonal | null;
+  /** Active jobs where the viewer is the photographer (always "mine"; [] for editors). */
+  myShoots: JobRow[];
+  /** REVIEWER_HOLDS jobs the viewer may review, oldest first (null: no review permission). */
+  awaitingReview: DashboardScopedList<JobRow> | null;
+  /** Open editor questions + waiting client feedback on jobs the viewer steers (null for editors). */
+  questions: DashboardScopedList<DashboardQuestion> | null;
+  upcomingDeadlines: DashboardDeadline[];
+  /** Open revisions and resubmissions (editors: revisions to address). */
+  revisions: JobRow[];
+  /** null without analytics.view. */
+  turnaround: TurnaroundSummary | null;
   layout: import("@/db/schema").DashboardLayout;
   asOf: string;
 }
@@ -916,13 +1153,20 @@ export interface JobCounts {
 }
 
 export interface ClientListItem {
-  client: Pick<Client, "id" | "name" | "contactName" | "email" | "phone" | "colour" | "archivedAt" | "createdByUserId" | "createdAt" | "version">;
+  /** Editors get `contactName`, `email`, `phone` = null (docs/ROLES.md §2.4). */
+  client: Pick<
+    Client,
+    "id" | "name" | "contactName" | "email" | "phone" | "colour" | "archivedAt" | "createdByUserId" | "createdAt" | "version" | "portalEnabled" | "feedbackEnabled"
+  >;
   projectCount: number;
   counts: JobCounts;
 }
 
 export interface ProjectListItem {
-  project: Pick<Project, "id" | "name" | "clientId" | "address" | "startDate" | "endDate" | "archivedAt" | "createdByUserId" | "createdAt" | "version">;
+  project: Pick<
+    Project,
+    "id" | "name" | "clientId" | "address" | "startDate" | "endDate" | "archivedAt" | "createdByUserId" | "createdAt" | "version" | "sharedWithClient"
+  >;
   client: ClientRef;
   counts: JobCounts;
 }
@@ -949,8 +1193,9 @@ export interface DirectoryStats {
   active: number;
   dueToday: number;
   overdue: number;
-  completedThisMonth: number;
-  /** 0..1 over the last 30 days; null when nothing was approved. */
+  /** null without analytics (docs/ROLES.md §10.2: admins and ⚑analytics members only). */
+  completedThisMonth: number | null;
+  /** 0..1 over the last 30 days; null when nothing was approved (or without analytics, §10.2). */
   revisionRate: number | null;
 }
 
@@ -1053,7 +1298,7 @@ export interface WorkflowTransitionView {
   fromStatusId: string;
   toStatusId: string;
   label: string | null;
-  allowedRoles: Role[];
+  allowedRoles: TransitionRole[];
   requiresAssignedEditor: boolean;
   assigneeOnly: boolean;
   isReopen: boolean;

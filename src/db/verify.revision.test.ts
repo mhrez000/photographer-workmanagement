@@ -18,7 +18,7 @@ afterEach(() => fakeClock.reset());
 describe("open_revision_assignee_is_editor", () => {
   it("is clean after a normal request and flags a manually diverged row", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" });
-    const ctx = await contextFor(db, ids.users.manager);
+    const ctx = await contextFor(db, ids.users.coAdmin);
     const res = await withTx(
       (tx) => requestRevision(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Colour", description: "Too cold" }),
       { db },

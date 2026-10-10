@@ -57,8 +57,8 @@ import {
   type LinkKind,
   type NoteKind,
   type Priority,
-  type Role,
   type StatusCategory,
+  type TransitionRole,
   type WorkloadBand,
 } from "@/lib/constants";
 
@@ -93,7 +93,8 @@ export type AutomationCondition =
 export type AutomationAction =
   | {
       type: "notify";
-      target: "photographer" | "editor" | "previous_editor" | "creator" | "managers" | "owner" | "user";
+      /** roles v2: "managers" / "owner" became "admins" (0003 rewrites stored rules; READ schemas still accept the legacy values). */
+      target: "photographer" | "editor" | "previous_editor" | "creator" | "admins" | "user";
       userId?: string;
       message?: string;
     }
@@ -191,11 +192,22 @@ export const organisationSettings = pgTable("organisation_settings", {
   revisionSpikeMultiplier: doublePrecision("revision_spike_multiplier").notNull().default(1.5),
   /** Default review deadline = submittedAt + reviewSlaHours when none is set. */
   reviewSlaHours: integer("review_sla_hours").notNull().default(24),
-  // visibility
+  // visibility (roles v1). Replaced by per-user switches in roles v2 (docs/ROLES.md §1.2).
+  /** @deprecated roles-v2: replaced by per-user flags; unused; drop in a later migration */
   photographersSeeAllJobs: bool("photographers_see_all_jobs", false),
+  /** @deprecated roles-v2: replaced by per-user flags; unused; drop in a later migration */
   photographersSeeTeamJobs: bool("photographers_see_team_jobs", true),
+  /** @deprecated roles-v2: replaced by per-user flags; unused; drop in a later migration */
   editorsSeeTeamJobs: bool("editors_see_team_jobs", false),
+  /** @deprecated roles-v2: replaced by per-user flags; unused; drop in a later migration */
   editorsSeeTeamWorkloads: bool("editors_see_team_workloads", false),
+  // roles v2
+  /** The one admin other admins cannot demote/deactivate/re-role (trigger org_primary_owner, §1.3 f). */
+  primaryOwnerUserId: text("primary_owner_user_id").references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
+  /** Photographer pre-filled on jobs editors create; null = the primary owner (§4.3). */
+  defaultPhotographerUserId: text("default_photographer_user_id").references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
+  /** Post-migration notice on /settings/users dismissed (§1.5). */
+  rolesV2NoticeDismissedAt: text("roles_v2_notice_dismissed_at"),
   // engine switches
   automationsEnabled: bool("automations_enabled", true),
   /** Write a notification.sent event for every notification (off: keeps the feed readable). */
@@ -226,8 +238,25 @@ export const users = pgTable(
     /** null → organisation_settings.defaultCapacityHoursPerWeek */
     capacityHoursPerWeek: doublePrecision("capacity_hours_per_week"),
     avatarColour: text("avatar_colour").notNull().default("#6366f1"),
+    // ---- roles v2 (docs/ROLES.md §1.2, §2.2). Raw switches; AuthContext carries the EFFECTIVE values. ----
+    /** Admin (owner / co-owner). Only for role = photographer (CHECK users_admin_photographer_ck). */
+    isAdmin: bool("is_admin", false),
+    /** Member AND editor switch. */
+    canCreateJobs: bool("can_create_jobs", true),
+    /** Member switch. */
+    canViewAllJobs: bool("can_view_all_jobs", false),
+    /** Member switch. */
+    canAssignEditors: bool("can_assign_editors", true),
+    /** Member switch. DDL default true (existing photographers keep v1 behaviour); new invites default false. */
+    canReviewSubmissions: bool("can_review_submissions", true),
+    /** Member switch. */
     canViewTeamWorkloads: bool("can_view_team_workloads", false),
+    /** Member switch. */
     canViewAnalytics: bool("can_view_analytics", false),
+    /** Editor switch: read-only view of every job held by an editor. */
+    canViewTeamJobs: bool("can_view_team_jobs", false),
+    /** Client users only (CHECK users_client_id_ck); immutable once set (trigger users_client_link). */
+    clientId: text("client_id").references((): AnyPgColumn => clients.id, { onDelete: "restrict" }),
     /** Bumped on deactivate / role change / password change → every cookie invalid. */
     sessionVersion: integer("session_version").notNull().default(1),
     lastLoginAt: text("last_login_at"),
@@ -238,6 +267,7 @@ export const users = pgTable(
   (t) => [
     uniqueIndex("users_email_uq").on(t.email),
     index("users_org_role_idx").on(t.organisationId, t.role, t.isActive),
+    index("users_org_client_idx").on(t.organisationId, t.clientId),
   ],
 );
 
@@ -312,6 +342,10 @@ export const clients = pgTable(
     phone: text("phone"),
     notes: text("notes"),
     colour: text("colour").notNull().default("#0ea5e9"),
+    /** Client users can sign in only while true (written only by setClientPortal, §3.5). */
+    portalEnabled: bool("portal_enabled", false),
+    /** Client users may post feedback only while true (written only by setClientPortal). */
+    feedbackEnabled: bool("feedback_enabled", false),
     createdByUserId: userRef("created_by_user_id"),
     archivedAt: text("archived_at"),
     createdAt: createdAt(),
@@ -335,6 +369,8 @@ export const projects = pgTable(
     description: text("description"),
     startDate: text("start_date"),
     endDate: text("end_date"),
+    /** Shares every job of the project (current and future) with the client (written only by shareProject). */
+    sharedWithClient: bool("shared_with_client", false),
     createdByUserId: userRef("created_by_user_id"),
     archivedAt: text("archived_at"),
     createdAt: createdAt(),
@@ -419,7 +455,8 @@ export const workflowTransitions = pgTable(
       .references(() => workflowStatuses.id, { onDelete: "restrict" }),
     /** e.g. "Submit for review" */
     label: text("label"),
-    allowedRoles: jsonb("allowed_roles").$type<Role[]>().notNull(),
+    /** TransitionRole[] (roles v2, §5.1): non-empty subset of TRANSITION_ROLES. */
+    allowedRoles: jsonb("allowed_roles").$type<TransitionRole[]>().notNull(),
     requiresAssignedEditor: bool("requires_assigned_editor", false),
     /** An editor may only perform it when they are the job's current editor. */
     assigneeOnly: bool("assignee_only", false),
@@ -532,6 +569,10 @@ export const jobs = pgTable(
     createdByUserId: text("created_by_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
+    /** Role of the creator AT CREATION ("photographer" | "editor"); never updated (CHECK jobs_created_by_role_ck). */
+    createdByRole: text("created_by_role", { enum: ASSIGNMENT_ROLES }).notNull().default("photographer"),
+    /** Shares this job with the client portal (written only by shareJob / the delivery step / client-change reset). */
+    sharedWithClient: bool("shared_with_client", false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -806,6 +847,10 @@ export const jobLinks = pgTable(
     removedAt: text("removed_at"),
     removedByUserId: userRef("removed_by_user_id"),
     removeReason: text("remove_reason"),
+    /** The one mutable flag on a CURRENT link: visible to the client (frozen once superseded/removed by the 0003 guard). */
+    sharedWithClient: bool("shared_with_client", false),
+    /** The adder could link.share_with_client on the job at insert time (immutable; §7.3 default delivery set). */
+    addedBySharer: bool("added_by_sharer", false),
     activityEventId: text("activity_event_id").references((): AnyPgColumn => activityEvents.id, { onDelete: "restrict" }),
   },
   (t) => [

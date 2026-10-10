@@ -31,14 +31,14 @@ type NumberKey =
   | "revisionSpikeMultiplier"
   | "reviewSlaHours";
 
-type BoolKey =
-  | "timeTrackingEnabled"
-  | "photographersSeeAllJobs"
-  | "photographersSeeTeamJobs"
-  | "editorsSeeTeamJobs"
-  | "editorsSeeTeamWorkloads"
-  | "automationsEnabled"
-  | "auditNotifications";
+type BoolKey = "timeTrackingEnabled" | "automationsEnabled" | "auditNotifications";
+
+/** An active photographer who can be the default photographer for jobs editors create (docs/ROLES.md §4.3). */
+export interface DefaultPhotographerOption {
+  id: string;
+  name: string;
+  isPrimaryOwner: boolean;
+}
 
 interface FormState {
   organisationName: string;
@@ -47,6 +47,8 @@ interface FormState {
   jobNumberPrefix: string;
   numbers: Record<NumberKey, string>;
   bools: Record<BoolKey, boolean>;
+  /** "" = the primary owner (null in the API). */
+  defaultPhotographerUserId: string;
 }
 
 const NUMBER_KEYS: NumberKey[] = [
@@ -66,15 +68,7 @@ const NUMBER_KEYS: NumberKey[] = [
   "revisionSpikeMultiplier",
   "reviewSlaHours",
 ];
-const BOOL_KEYS: BoolKey[] = [
-  "timeTrackingEnabled",
-  "photographersSeeAllJobs",
-  "photographersSeeTeamJobs",
-  "editorsSeeTeamJobs",
-  "editorsSeeTeamWorkloads",
-  "automationsEnabled",
-  "auditNotifications",
-];
+const BOOL_KEYS: BoolKey[] = ["timeTrackingEnabled", "automationsEnabled", "auditNotifications"];
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -87,13 +81,14 @@ function initialState(view: SettingsView): FormState {
     jobNumberPrefix: s.jobNumberPrefix,
     numbers: Object.fromEntries(NUMBER_KEYS.map((k) => [k, String(s[k])])) as Record<NumberKey, string>,
     bools: Object.fromEntries(BOOL_KEYS.map((k) => [k, Boolean(s[k])])) as Record<BoolKey, boolean>,
+    defaultPhotographerUserId: s.defaultPhotographerUserId ?? "",
   };
 }
 
 /** Field → value diff against the stored settings (only what changed is sent). */
-function diff(view: SettingsView, form: FormState): Record<string, string | number | boolean> {
+function diff(view: SettingsView, form: FormState): Record<string, string | number | boolean | null> {
   const s = view.settings;
-  const out: Record<string, string | number | boolean> = {};
+  const out: Record<string, string | number | boolean | null> = {};
   if (form.organisationName.trim() !== view.organisation.name) out.organisationName = form.organisationName.trim();
   if (form.timezone !== s.timezone) out.timezone = form.timezone;
   if (Number(form.weekStartsOn) !== s.weekStartsOn) out.weekStartsOn = Number(form.weekStartsOn);
@@ -104,14 +99,24 @@ function diff(view: SettingsView, form: FormState): Record<string, string | numb
     if (n !== s[k]) out[k] = n;
   }
   for (const k of BOOL_KEYS) if (form.bools[k] !== Boolean(s[k])) out[k] = form.bools[k];
+  if (form.defaultPhotographerUserId !== (s.defaultPhotographerUserId ?? "")) out.defaultPhotographerUserId = form.defaultPhotographerUserId || null;
   return out;
 }
 
 /**
- * /settings/organisation form. Owners edit (PATCH /api/settings with the
- * settings version, only changed fields); managers see it read-only.
+ * /settings/organisation form. Admins edit (PATCH /api/settings with the
+ * settings version, only changed fields); anyone else gets it read-only.
  */
-export function OrganisationSettingsForm({ view, timeZones }: { view: SettingsView; timeZones: string[] }) {
+export function OrganisationSettingsForm({
+  view,
+  timeZones,
+  photographers,
+}: {
+  view: SettingsView;
+  timeZones: string[];
+  /** Active photographers for "Default photographer for jobs editors create". */
+  photographers: DefaultPhotographerOption[];
+}) {
   const run = useMutationRunner();
   const readOnly = !view.canManage;
   const [form, setForm] = React.useState<FormState>(() => initialState(view));
@@ -127,6 +132,7 @@ export function OrganisationSettingsForm({ view, timeZones }: { view: SettingsVi
   }
 
   const changes = diff(view, form);
+  const primaryOwnerName = photographers.find((p) => p.isPrimaryOwner)?.name ?? null;
   const changeCount = Object.keys(changes).length;
   const zones = timeZones;
 
@@ -187,7 +193,7 @@ export function OrganisationSettingsForm({ view, timeZones }: { view: SettingsVi
         <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-sunken px-4 py-3 text-sm text-ink-secondary">
           <Lock aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-muted" />
           <p>
-            You can view these settings. Only an <span className="font-medium text-ink">owner</span> can change them.
+            You can view these settings. Only the <span className="font-medium text-ink">owner or an admin</span> can change them.
           </p>
         </div>
       ) : null}
@@ -319,21 +325,32 @@ export function OrganisationSettingsForm({ view, timeZones }: { view: SettingsVi
       </SectionCard>
 
       <SectionCard
-        id="visibility"
+        id="editor-jobs"
         eyebrow="Access"
-        title="Visibility"
-        description="What photographers and editors can see beyond their own work. Owners and managers always see everything."
+        title="Jobs editors create"
+        description="Who can see what is set per person under Users (team-member and editor switches) — see Roles for the full picture."
       >
-        <div className="flex flex-col divide-y divide-border">
-          {toggle("photographersSeeAllJobs", "Photographers see all jobs", "Every photographer can open every job in the studio.")}
-          {toggle("photographersSeeTeamJobs", "Photographers see their team's jobs", "Jobs whose photographer or editor shares a team with them.")}
-          {toggle("editorsSeeTeamJobs", "Editors see their team's jobs", "Read-only access to teammates' jobs.")}
-          {toggle(
-            "editorsSeeTeamWorkloads",
-            "Editors see team workloads",
-            "Aggregate counts only, never job details. Photographers get this per person in Users.",
-          )}
-        </div>
+        <FormField
+          label="Default photographer for jobs editors create"
+          description="Pre-filled when an editor creates a job (they can pick another photographer). Leave on the primary owner unless someone else usually reviews editor-created jobs."
+          error={errors.defaultPhotographerUserId}
+        >
+          <Select
+            value={form.defaultPhotographerUserId}
+            onChange={(e) => setForm((f) => ({ ...f, defaultPhotographerUserId: e.target.value }))}
+            disabled={readOnly}
+          >
+            <option value="">The primary owner{primaryOwnerName ? ` (${primaryOwnerName})` : ""}</option>
+            {photographers
+              .filter((p) => !p.isPrimaryOwner || form.defaultPhotographerUserId === p.id)
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.isPrimaryOwner ? " (primary owner)" : ""}
+                </option>
+              ))}
+          </Select>
+        </FormField>
       </SectionCard>
 
       <SectionCard id="automations" eyebrow="Engine" title="Automations" description="The kill switch stops every rule at once without editing them.">
@@ -346,7 +363,7 @@ export function OrganisationSettingsForm({ view, timeZones }: { view: SettingsVi
       {!readOnly ? (
         <div
           className={cn(
-            "sticky bottom-[calc(var(--tabbar-height)+0.75rem)] z-20 flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-raised/95 px-4 py-3 shadow-pop backdrop-blur transition-[opacity,transform] duration-(--motion-base) lg:bottom-4",
+            "sticky bottom-[calc(var(--tabbar-height)+0.75rem)] z-(--z-page-sticky) flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-raised/95 px-4 py-3 shadow-pop backdrop-blur transition-[opacity,transform] duration-(--motion-base) lg:bottom-4",
             changeCount === 0 && "pointer-events-none translate-y-2 opacity-0",
           )}
           aria-hidden={changeCount === 0}

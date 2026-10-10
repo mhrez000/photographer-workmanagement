@@ -59,7 +59,10 @@ test("audit log is append-only and the integrity check reports zero drift", asyn
   expect(report.structural, JSON.stringify(report.structural).slice(0, 500)).toEqual([]);
   expect(report.ok).toBe(true);
 
-  // Owner-only.
-  const manager = await apiAs("manager");
-  expect((await manager.raw("GET", "/api/system/integrity")).status).toBe(403);
+  // Admins only (docs/ROLES.md §3.3 system.integrity): even a team member with every switch on
+  // (photographer01, the v2 equivalent of a v1 manager) and an editor are refused.
+  for (const role of ["photographer", "editor"] as const) {
+    const other = await apiAs(role);
+    expect((await other.raw("GET", "/api/system/integrity")).status, role).toBe(403);
+  }
 });

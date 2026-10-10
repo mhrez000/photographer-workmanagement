@@ -13,7 +13,7 @@ import { HISTORY_EVENT_TYPES, STATUS_CATEGORY_META } from "@/lib/constants";
 import { durationSeconds } from "@/lib/metrics";
 import type { ActivityFeedItem, AuthContext, HistoryEntry, Job, JobStatusTransition, Paginated, StageView, StatusRef, TimelineRow } from "@/lib/types";
 import { jobEvents, listActivity } from "./activity";
-import { loadStatusRefs, loadUserRefs, loadVisibleJob } from "./scope";
+import { ANOTHER_EDITOR, editorReadCutoff, loadEditorAssignmentFacts, loadStatusRefs, loadUserRefs, loadVisibleJob } from "./scope";
 import { getJobTimelineRow } from "./timeline";
 
 /** All transitions of a job (org-scoped), by sequence. */
@@ -110,10 +110,29 @@ export function mergeHistory(stages: readonly StageView[], events: readonly Acti
   return entries.map(({ at, kind, stage, event }) => (kind === "stage" ? { at, kind, stage } : { at, kind, event }));
 }
 
-/** History tab: stages + milestone events (HISTORY_EVENT_TYPES), management events redacted per role. */
+/**
+ * Stages under the editor read cut-off (docs/ROLES.md §2.3): stages entered
+ * after the cut-off keep their status and dates but hide who acted and who
+ * held the job (unless it was the viewer).
+ */
+export function redactStagesAfterCutoff(stages: readonly StageView[], cutoff: string | null, me: string | null): StageView[] {
+  if (cutoff === null) return [...stages];
+  return stages.map((st) => {
+    if (st.enteredAt < cutoff) return st; // the handover stage itself (entered at the cut-off) already names the next holder
+    return {
+      ...st,
+      actor: st.actor && st.actor.id === me ? st.actor : null,
+      reason: st.actor && st.actor.id === me ? st.reason : null,
+      editorAtEntry: st.editorAtEntry && st.editorAtEntry.id !== me ? ANOTHER_EDITOR : st.editorAtEntry,
+    };
+  });
+}
+
+/** History tab: stages + milestone events (HISTORY_EVENT_TYPES), management events redacted per persona, editor cut-off applied. */
 export async function getJobHistory(db: DbLike, ctx: AuthContext, jobId: string): Promise<HistoryEntry[]> {
-  const { job } = await loadVisibleJob(db, ctx, jobId, "job.view_history");
-  const stages = await loadStageViews(db, ctx, job);
+  const { job, ref } = await loadVisibleJob(db, ctx, jobId, "job.view_history");
+  const cutoff = editorReadCutoff(ctx, ref, (await loadEditorAssignmentFacts(db, ctx, [job.id])).get(job.id) ?? []);
+  const stages = redactStagesAfterCutoff(await loadStageViews(db, ctx, job), cutoff, ctx.userId);
   const events = await jobEvents(db, ctx, job.id, HISTORY_EVENT_TYPES);
   return mergeHistory(stages, events);
 }

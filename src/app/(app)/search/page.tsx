@@ -24,7 +24,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { StatusPill } from "@/components/jobs/status-pill";
 import { Highlight } from "@/components/production/highlight";
 import { UrlSearchInput } from "@/components/production/url-search";
-import { ROLE_LABELS } from "@/lib/constants";
+import { roleBadgeLabel } from "@/lib/constants";
 import type { SearchResults } from "@/lib/types";
 import { isManagement } from "@/server/auth/permissions";
 import { guard, load, pageContext, param } from "@/server/page";
@@ -221,7 +221,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
                   <>
                     <Avatar name={u.name} colour={u.avatarColour} size="sm" />
                     <Highlight text={u.name} query={q} className="truncate text-sm font-medium text-ink" />
-                    <span className="text-xs text-ink-muted">{ROLE_LABELS[u.role]}</span>
+                    <span className="text-xs text-ink-muted">{roleBadgeLabel(u)}</span>
                   </>
                 );
                 return management || u.id === ctx.userId ? (

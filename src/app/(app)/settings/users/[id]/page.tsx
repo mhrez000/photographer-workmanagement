@@ -5,21 +5,24 @@ import { SectionCard } from "@/components/common/section-card";
 import { StatTile } from "@/components/common/stat-tile";
 import { WorkloadBand } from "@/components/jobs/workload-band";
 import { PageContainer } from "@/components/shell/page-container";
-import { UserAccessCard, UserProfileCard } from "@/components/settings/user-admin";
-import { UserLifecycleCard, type OpenJobBrief } from "@/components/settings/user-lifecycle";
+import { PERSONA_BADGE } from "@/components/settings/permission-copy";
+import { TransferPrimaryOwnerCard, UserAccessCard, UserProfileCard, type UserAdminAccess } from "@/components/settings/user-admin";
+import { UserLifecycleCard, type LifecycleAccess, type OpenJobBrief } from "@/components/settings/user-lifecycle";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
-import { CATEGORY_GROUPS, ROLE_LABELS } from "@/lib/constants";
+import { CATEGORY_GROUPS, displayRoleLabel, personaOfUser } from "@/lib/constants";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/dates";
-import type { ActivityFeedItem, JobRow } from "@/lib/types";
+import type { ActivityFeedItem, JobRow, ReducedUser, UserProfile } from "@/lib/types";
 import { formatPercent } from "@/lib/utils";
 import { listActivity } from "@/server/queries/activity";
 import { listJobs } from "@/server/queries/jobs";
 import { getSettingsView } from "@/server/queries/settings";
-import { getUserDetail } from "@/server/queries/users";
+import type { UserPermissionRef } from "@/server/auth/permissions";
+import { listClients } from "@/server/queries/clients";
+import { getUserDetail, listUsers } from "@/server/queries/users";
 import { allowed, guard, load, pageContext } from "@/server/page";
 
 export const metadata: Metadata = { title: "Manage user" };
@@ -60,14 +63,60 @@ export default async function ManageUserPage({ params }: PageProps<"/settings/us
   const tz = ctx.settings.timezone;
   const detail = await load(() => getUserDetail(db, ctx, id));
   const profile = detail.profile;
-  if (!profile) return null; // management always gets the profile; defensive.
+  if (!profile) return null; // admins always get the profile; defensive.
   const settings = (await load(() => getSettingsView(db, ctx))).settings;
   const isSelf = profile.id === ctx.userId;
+  const primaryOwnerId = settings.primaryOwnerUserId ?? null;
+  const isPrimaryOwner = profile.id === primaryOwnerId;
+
+  // Every control is decided by can() on the full target ref (primary-owner protection included, docs/ROLES.md §3.4).
+  const target: UserPermissionRef = {
+    id: profile.id,
+    role: profile.role,
+    isActive: profile.isActive,
+    organisationId: profile.organisationId,
+    isAdmin: profile.isAdmin,
+    isPrimaryOwner,
+  };
+  const lockedReason =
+    isPrimaryOwner && !isSelf ? `Only ${profile.name} can change their own account — they are the primary owner.` : isSelf ? "This is you. Some changes need another admin." : null;
+  const access: UserAdminAccess = {
+    edit: allowed(ctx, "user.edit", target),
+    changeEmail: allowed(ctx, "user.change_email", target),
+    changeRole: allowed(ctx, "user.change_role", target),
+    grantAdmin: allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: true }),
+    revokeAdmin: allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: false }),
+    setPermissions: allowed(ctx, "user.set_permissions", target),
+    setCapacity: allowed(ctx, "user.set_capacity", target),
+    lockedReason,
+  };
+  const lifecycle: LifecycleAccess = {
+    resetPassword: !isSelf && allowed(ctx, "user.reset_password", target),
+    deactivate: allowed(ctx, "user.deactivate", target),
+    reactivate: allowed(ctx, "user.reactivate", target),
+    anonymise: allowed(ctx, "user.anonymise", target),
+    lockedReason,
+  };
+
+  const clientRow = profile.clientId ? (await load(() => listClients(db, ctx, { includeArchived: true }))).find((c) => c.client.id === profile.clientId) : undefined;
+  const client = clientRow
+    ? { id: clientRow.client.id, name: clientRow.client.name, portalEnabled: clientRow.client.portalEnabled, archived: clientRow.client.archivedAt !== null }
+    : null;
+
+  // Transfer primary ownership: only on the primary owner's own page.
+  const isProfileRow = (u: UserProfile | ReducedUser): u is UserProfile => "email" in u;
+  const transferCandidates =
+    isSelf && isPrimaryOwner && allowed(ctx, "org.transfer_primary_owner")
+      ? (await load(() => listUsers(db, ctx, { role: "photographer", active: "1" })))
+          .filter(isProfileRow)
+          .filter((u) => u.isAdmin && u.id !== profile.id)
+          .map((u) => ({ id: u.id, name: u.name }))
+      : null;
 
   const active = [...CATEGORY_GROUPS.ACTIVE];
   const editorJobs = profile.role === "editor" ? (await listJobs(db, ctx, { editorId: [profile.id], statusCategory: active, limit: 200 })).rows : [];
   const photographerJobs =
-    profile.role !== "editor" ? (await listJobs(db, ctx, { photographerId: [profile.id], statusCategory: active, limit: 200 })).rows : [];
+    profile.role === "photographer" ? (await listJobs(db, ctx, { photographerId: [profile.id], statusCategory: active, limit: 200 })).rows : [];
   const activity = allowed(ctx, "activity.view_global") ? (await listActivity(db, ctx, { userId: profile.id, limit: 12 })).items : [];
   const workload = detail.workload;
 
@@ -84,7 +133,9 @@ export default async function ManageUserPage({ params }: PageProps<"/settings/us
         }
         meta={
           <span className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline">{ROLE_LABELS[profile.role]}</Badge>
+            <Badge variant={PERSONA_BADGE[personaOfUser(profile)]}>{displayRoleLabel({ role: profile.role, isAdmin: profile.isAdmin })}</Badge>
+            {isPrimaryOwner ? <Badge variant="accent">Owner</Badge> : null}
+            {client ? <Badge variant="outline">{client.name}</Badge> : null}
             {profile.anonymisedAt ? (
               <Badge variant="neutral">Anonymised</Badge>
             ) : profile.isActive ? (
@@ -133,13 +184,28 @@ export default async function ManageUserPage({ params }: PageProps<"/settings/us
         </SectionCard>
       ) : null}
 
-      <UserProfileCard profile={profile} viewerRole={ctx.role} canManage={detail.canManage} defaultCapacity={settings.defaultCapacityHoursPerWeek} timeZone={tz} />
-      <UserAccessCard profile={profile} viewerRole={ctx.role} canManage={detail.canManage} defaultCapacity={settings.defaultCapacityHoursPerWeek} timeZone={tz} />
+      <UserProfileCard
+        profile={profile}
+        access={access}
+        isPrimaryOwner={isPrimaryOwner}
+        defaultCapacity={settings.defaultCapacityHoursPerWeek}
+        timeZone={tz}
+        client={client}
+      />
+      <UserAccessCard
+        profile={profile}
+        access={access}
+        isPrimaryOwner={isPrimaryOwner}
+        defaultCapacity={settings.defaultCapacityHoursPerWeek}
+        timeZone={tz}
+        client={client}
+      />
+      {transferCandidates ? <TransferPrimaryOwnerCard candidates={transferCandidates} settingsVersion={settings.version} /> : null}
       <UserLifecycleCard
         profile={profile}
-        viewerRole={ctx.role}
-        canManage={detail.canManage}
+        access={lifecycle}
         isSelf={isSelf}
+        targetIsAdmin={profile.role === "photographer" && profile.isAdmin}
         editorJobs={brief(editorJobs)}
         photographerJobs={brief(photographerJobs)}
         timeZone={tz}

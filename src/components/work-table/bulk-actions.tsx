@@ -81,7 +81,7 @@ export function BulkActions({ selected, onClear, onKeep, canOverride }: BulkActi
   return (
     <>
       {count > 0 ? (
-        <div className="pointer-events-none sticky bottom-4 z-30 flex justify-center px-2" role="region" aria-label="Bulk actions">
+        <div className="pointer-events-none sticky bottom-4 z-(--z-shell) flex justify-center px-2" role="region" aria-label="Bulk actions">
           <div className="pointer-events-auto flex max-w-full animate-slide-up flex-wrap items-center gap-1.5 rounded-lg border border-border bg-surface-raised p-1.5 pl-3 shadow-pop">
             <span className="mr-1 text-sm font-medium text-ink numeric" aria-live="polite">
               {pluralise(count, "job")} selected

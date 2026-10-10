@@ -11,7 +11,7 @@ import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
-import { ROLES, ROLE_LABELS, type Role } from "@/lib/constants";
+import { TRANSITION_ROLES, TRANSITION_ROLE_CHIPS, TRANSITION_ROLE_LABELS, type TransitionRole } from "@/lib/constants";
 import type { WorkflowStatusView, WorkflowTransitionView } from "@/lib/types";
 
 export interface TransitionDraft {
@@ -44,7 +44,7 @@ export function TransitionDialog({ open, onOpenChange, workflowId, statuses, tra
   const [from, setFrom] = React.useState(transition?.fromStatusId ?? draft?.fromStatusId ?? live[0]?.id ?? "");
   const [to, setTo] = React.useState(transition?.toStatusId ?? draft?.toStatusId ?? live[1]?.id ?? "");
   const [label, setLabel] = React.useState(transition?.label ?? "");
-  const [roles, setRoles] = React.useState<Role[]>(transition?.allowedRoles ?? ["owner", "manager"]);
+  const [roles, setRoles] = React.useState<TransitionRole[]>(transition?.allowedRoles ?? ["admin"]);
   const [assigneeOnly, setAssigneeOnly] = React.useState(transition?.assigneeOnly ?? false);
   const [requiresEditor, setRequiresEditor] = React.useState(transition?.requiresAssignedEditor ?? false);
   const [isReopen, setIsReopen] = React.useState(transition?.isReopen ?? false);
@@ -128,20 +128,23 @@ export function TransitionDialog({ open, onOpenChange, workflowId, statuses, tra
             <Input value={label} onChange={(e) => setLabel(e.target.value)} disabled={readOnly} maxLength={80} placeholder={toStatus ? `Move to ${toStatus.name}` : ""} />
           </FormField>
           <fieldset>
-            <legend className="mb-2 text-sm font-medium text-ink">Allowed roles</legend>
-            <div className="flex flex-wrap gap-2">
-              {ROLES.map((r) => (
+            <legend className="mb-2 text-sm font-medium text-ink">Who can make this move</legend>
+            <div className="flex flex-col gap-2">
+              {TRANSITION_ROLES.map((r) => (
                 <Checkbox
                   key={r}
                   checked={roles.includes(r)}
                   onChange={(e) => setRoles((cur) => (e.target.checked ? [...cur, r] : cur.filter((x) => x !== r)))}
                   disabled={readOnly}
-                  label={ROLE_LABELS[r]}
+                  label={TRANSITION_ROLE_CHIPS[r]}
+                  description={TRANSITION_ROLE_LABELS[r]}
                   wrapperClassName="rounded-md border border-border px-3 py-2"
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-xs text-ink-muted">Photographers only ever act on their own jobs.</p>
+            <p className="mt-1.5 text-xs text-ink-muted">
+              Team members only act on jobs they manage. Each move also needs the matching permission (e.g. approving needs Review submissions).
+            </p>
             {errors.allowedRoles ? <p className="mt-1 text-sm text-danger">{errors.allowedRoles}</p> : null}
           </fieldset>
           <fieldset className="flex flex-col gap-3">

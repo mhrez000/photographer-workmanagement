@@ -117,16 +117,34 @@ function NewClientForm({ initialName, onOpenChange, onCreated }: Omit<QuickDialo
 }
 
 /** "+ New project" for the chosen client: name + address, POST /api/projects. */
+/** A project the job create call makes in the same transaction (editors, docs/ROLES.md §4.3). */
+export interface DeferredProjectDraft {
+  name: string;
+  address: string | null;
+}
+
+interface ProjectDialogExtras {
+  client: { id: string; name: string } | null;
+  /**
+   * Editors: do not POST /api/projects; hand the draft back so `POST /api/jobs`
+   * creates it with the job (`newProject`).
+   */
+  onDeferred?: (draft: DeferredProjectDraft) => void;
+}
+
 export function NewProjectDialog({
   open,
   onOpenChange,
   initialName = "",
   client,
   onCreated,
-}: QuickDialogBase<ProjectOption> & { client: { id: string; name: string } | null }) {
+  onDeferred,
+}: QuickDialogBase<ProjectOption> & ProjectDialogExtras) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange} size="sm">
-      {open && client ? <NewProjectForm initialName={initialName} client={client} onOpenChange={onOpenChange} onCreated={onCreated} /> : null}
+      {open && client ? (
+        <NewProjectForm initialName={initialName} client={client} onOpenChange={onOpenChange} onCreated={onCreated} onDeferred={onDeferred} />
+      ) : null}
     </Dialog>
   );
 }
@@ -136,7 +154,8 @@ function NewProjectForm({
   client,
   onOpenChange,
   onCreated,
-}: Omit<QuickDialogBase<ProjectOption>, "open"> & { client: { id: string; name: string } }) {
+  onDeferred,
+}: Omit<QuickDialogBase<ProjectOption>, "open"> & { client: { id: string; name: string }; onDeferred?: (draft: DeferredProjectDraft) => void }) {
   const [name, setName] = React.useState(initialName ?? "");
   const [address, setAddress] = React.useState("");
   const { busy, errors, setErrors, submit } = useQuickSubmit();
@@ -146,6 +165,11 @@ function NewProjectForm({
     event.stopPropagation();
     if (!name.trim()) {
       setErrors({ name: "Give the project a name" });
+      return;
+    }
+    if (onDeferred) {
+      onDeferred({ name: name.trim(), address: address.trim() || null });
+      onOpenChange(false);
       return;
     }
     const project = await submit(() =>
@@ -166,6 +190,7 @@ function NewProjectForm({
         <DialogTitle>New project</DialogTitle>
         <DialogDescription>
           For <strong className="font-medium text-ink">{client.name}</strong> — usually a property, event or campaign.
+          {onDeferred ? " It is created together with the job." : null}
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-4 pb-5">
@@ -181,7 +206,7 @@ function NewProjectForm({
           Cancel
         </Button>
         <Button type="submit" loading={busy}>
-          Create project
+          {onDeferred ? "Use this project" : "Create project"}
         </Button>
       </DialogFooter>
     </form>

@@ -93,7 +93,7 @@ export function ClientFields({
         {() => <ColourPicker value={values.colour} onChange={(colour) => onChange({ colour })} />}
       </FormField>
       {showNotes ? (
-        <FormField label="Notes" optional error={errors.notes} description="Preferences, access instructions, billing details. Visible to owners, managers and photographers.">
+        <FormField label="Notes" optional error={errors.notes} description="Preferences, access instructions, billing details. Visible to the owner, admins and photographers — never to editors or the client.">
           <Textarea value={values.notes} onChange={(e) => onChange({ notes: e.target.value })} rows={4} maxLength={5000} />
         </FormField>
       ) : null}

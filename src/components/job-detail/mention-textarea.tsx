@@ -5,7 +5,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea, type TextareaProps } from "@/components/ui/textarea";
 import { api } from "@/lib/api-client";
-import { ROLE_LABELS } from "@/lib/constants";
+import { roleBadgeLabel } from "@/lib/constants";
 import type { UserOption, UserRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -144,7 +144,7 @@ export const MentionTextarea = React.forwardRef<HTMLTextAreaElement, MentionText
           id={listId}
           role="listbox"
           aria-label="Mention someone"
-          className="absolute left-0 top-full z-40 mt-1 w-72 max-w-full overflow-hidden rounded-md border border-border bg-surface-raised p-1 shadow-pop animate-slide-down"
+          className="absolute left-0 top-full z-(--z-popover) mt-1 w-72 max-w-full overflow-hidden rounded-md border border-border bg-surface-raised p-1 shadow-pop animate-slide-down"
         >
           {loading ? (
             <div className="flex items-center gap-2 px-2.5 py-2 text-sm text-ink-muted">
@@ -169,7 +169,7 @@ export const MentionTextarea = React.forwardRef<HTMLTextAreaElement, MentionText
               >
                 <Avatar name={u.name} colour={u.avatarColour || undefined} size="xs" />
                 <span className="flex-1 truncate">{u.name}</span>
-                <span className="text-2xs text-ink-subtle">{ROLE_LABELS[u.role]}</span>
+                <span className="text-2xs text-ink-subtle">{roleBadgeLabel(u)}</span>
               </button>
             ))
           )}

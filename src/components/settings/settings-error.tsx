@@ -17,7 +17,7 @@ export function SettingsError({ error, retry, what = "these settings" }: Setting
     <PageContainer width="narrow">
       <ErrorState
         title={`Couldn't load ${what}`}
-        message="Something interrupted this page. Your saved settings are safe — try again, and if it keeps happening let an owner know."
+        message="Something interrupted this page. Your saved settings are safe — try again, and if it keeps happening let the studio owner know."
         onRetry={retry}
         homeHref="/dashboard"
         digest={error.digest}

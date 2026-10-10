@@ -5,7 +5,7 @@
 import { and, eq } from "drizzle-orm";
 import { first, type DbLike } from "@/db/index";
 import { organisations, userNotificationPrefs } from "@/db/schema";
-import { NOTIFICATION_TYPES, NOTIFICATION_TYPE_META } from "@/lib/constants";
+import { CLIENT_NOTIFICATION_TYPES, NOTIFICATION_TYPES, NOTIFICATION_TYPE_META } from "@/lib/constants";
 import type { AuthContext, NotificationPrefView, PermissionMatrixRow, SettingsView } from "@/lib/types";
 import { assertCan, can, permissionMatrix } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
@@ -27,7 +27,11 @@ export function getPermissionMatrix(ctx: AuthContext): PermissionMatrixRow[] {
   return permissionMatrix();
 }
 
-/** `GET /api/users/:me/notification-prefs` view: every type with its effective toggle (missing row = enabled). */
+/**
+ * `GET /api/users/:me/notification-prefs` view: every type the actor can
+ * receive with its effective toggle (missing row = enabled). Staff never see
+ * the client types; client users only the client types (docs/ROLES.md §6.2).
+ */
 export async function getNotificationPrefs(db: DbLike, ctx: AuthContext): Promise<NotificationPrefView[]> {
   if (ctx.userId === null) return [];
   assertCan(ctx, "notification.prefs", { userId: ctx.userId, organisationId: ctx.organisationId });
@@ -36,7 +40,9 @@ export async function getNotificationPrefs(db: DbLike, ctx: AuthContext): Promis
     .from(userNotificationPrefs)
     .where(and(eq(userNotificationPrefs.organisationId, ctx.organisationId), eq(userNotificationPrefs.userId, ctx.userId)));
   const byType = new Map(rows.map((r) => [r.type, r.enabled]));
-  return NOTIFICATION_TYPES.map((type) => {
+  const clientTypes: readonly string[] = CLIENT_NOTIFICATION_TYPES;
+  const forClient = ctx.role === "client";
+  return NOTIFICATION_TYPES.filter((type) => clientTypes.includes(type) === forClient).map((type) => {
     const meta = NOTIFICATION_TYPE_META[type];
     return { type, label: meta.label, mandatory: meta.mandatory, enabled: meta.mandatory ? true : (byType.get(type) ?? true) };
   });

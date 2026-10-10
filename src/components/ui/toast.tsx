@@ -182,7 +182,7 @@ export function Toaster({ position = "bottom-right", className }: ToasterProps) 
       aria-live="polite"
       aria-label="Notifications"
       className={cn(
-        "pointer-events-none fixed z-[100] flex w-[calc(100vw-2rem)] max-w-sm flex-col gap-2",
+        "pointer-events-none fixed z-(--z-toast) flex w-[calc(100vw-2rem)] max-w-sm flex-col gap-2",
         "max-lg:bottom-[calc(var(--tabbar-height)+0.5rem)]",
         positions[position],
         className,

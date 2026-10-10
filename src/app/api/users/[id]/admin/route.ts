@@ -1,8 +1,8 @@
-/** POST /api/users/:id/visibility { canViewTeamWorkloads?, canViewAnalytics?, expectedVersion } */
+/** POST /api/users/:id/admin { isAdmin, expectedVersion } (docs/ROLES.md §6.1; admin, not self; last-admin guard) */
 import { mutateById, methodNotAllowed } from "@/app/api/_lib/route";
-import { setVisibilityFlags } from "@/server/services/users";
+import { setAdmin } from "@/server/services/users";
 
-export const POST = mutateById("userId", setVisibilityFlags);
+export const POST = mutateById("userId", setAdmin);
 
 /** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
 export const GET = methodNotAllowed(["POST"]);

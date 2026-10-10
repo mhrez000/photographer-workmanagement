@@ -50,7 +50,7 @@ export async function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string
       fromCategory: open.toCategory,
       toCategory: status.category,
       statusName: status.name,
-      actorUserId: opts.actorUserId === undefined ? ids.users.manager : opts.actorUserId,
+      actorUserId: opts.actorUserId === undefined ? ids.users.coAdmin : opts.actorUserId,
       isReopen: opts.isReopen ?? false,
       enteredAt: at,
       editorIdAtEntry: job.editorId,
@@ -65,7 +65,7 @@ export async function moveJob(db: Db, ids: SeedIds, jobId: string, toKey: string
     }
     if (c === "approved") {
       milestones.approvedAt = at;
-      milestones.approvedByUserId = ids.users.manager;
+      milestones.approvedByUserId = ids.users.coAdmin;
       milestones.dueDateAtApproval = job.dueDate;
       milestones.wasOnTime = job.dueDate === null ? null : at <= job.dueDate;
       milestones.completionPercent = 100;
@@ -110,7 +110,7 @@ export async function reattribute(db: Db, ids: SeedIds, jobId: string, newEditor
       .update(jobAssignments)
       .set({
         unassignedAt: at,
-        unassignedByUserId: ids.users.manager,
+        unassignedByUserId: ids.users.coAdmin,
         unassignReason: "reassigned",
       })
       .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.role, "editor"), isNull(jobAssignments.unassignedAt)));
@@ -119,7 +119,7 @@ export async function reattribute(db: Db, ids: SeedIds, jobId: string, newEditor
       jobId,
       role: "editor",
       userId: newEditorId,
-      assignedByUserId: ids.users.manager,
+      assignedByUserId: ids.users.coAdmin,
       assignedAt: at,
       statusCategoryAtAssign: job.statusCategory,
     });
@@ -147,7 +147,7 @@ export async function reattribute(db: Db, ids: SeedIds, jobId: string, newEditor
       fromCategory: open.toCategory,
       toCategory: open.toCategory,
       statusName: open.statusName,
-      actorUserId: ids.users.manager,
+      actorUserId: ids.users.coAdmin,
       reason: "reassigned",
       enteredAt: at,
       editorIdAtEntry: newEditorId,
@@ -175,7 +175,7 @@ export async function addRevision(db: Db, ids: SeedIds, jobId: string, n: number
           organisationId: ids.organisationId,
           jobId,
           revisionNumber: n,
-          requestedByUserId: ids.users.manager,
+          requestedByUserId: ids.users.coAdmin,
           assigneeUserId: ids.users.editor1,
           reason: "Colour",
           description: "Fix colour",

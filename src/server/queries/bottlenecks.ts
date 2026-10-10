@@ -12,7 +12,7 @@ import type { DbLike } from "@/db/index";
 import { jobs as jobsTable, users } from "@/db/schema";
 import { evaluateBottlenecks, type BottleneckInput } from "@/lib/metrics";
 import type { AuthContext, BottleneckAlert } from "@/lib/types";
-import { assertCan, isManagement, visibleJobsWhere } from "@/server/auth/permissions";
+import { assertCan, isAdmin, visibleJobsWhere } from "@/server/auth/permissions";
 import { bottleneckSettingsOf, loadActiveMetricJobs, revisionWeekWindows } from "./metrics";
 import { bottleneckEditorsOf, computeWorkloads, type WorkloadComputation } from "./workloads";
 
@@ -66,7 +66,7 @@ export async function computeBottlenecks(db: DbLike, ctx: AuthContext, opts: { n
  * `hiddenJobCount`.
  */
 export async function alertsForViewer(db: DbLike, ctx: AuthContext, alerts: readonly BottleneckAlert[]): Promise<BottleneckAlert[]> {
-  if (isManagement(ctx) || ctx.isSystem) return alerts.map((a) => ({ ...a, hiddenJobCount: 0 }));
+  if (isAdmin(ctx)) return alerts.map((a) => ({ ...a, hiddenJobCount: 0 }));
   const ids = [...new Set(alerts.flatMap((a) => a.jobs.map((j) => j.id)))];
   const visible = new Set<string>();
   for (let i = 0; i < ids.length; i += 500) {

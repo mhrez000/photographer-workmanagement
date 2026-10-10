@@ -43,8 +43,10 @@ export interface EditableJob {
 
 /** Per-field-group permissions (from `JobDetail.actions` + `job.edit_completion_percent`). */
 export interface EditPermissions {
-  /** name, description, client/project, job type, shoot date, estimated hours (`job.edit_fields`). */
+  /** name, description, job type, shoot date, estimated hours (`job.edit_fields`). */
   fields: boolean;
+  /** client / project (`job.change_client`, docs/ROLES.md §4.5). Omitted = same as `fields`. */
+  client?: boolean;
   /** due / review / delivery dates (`job.set_*_date`). */
   deadlines: boolean;
   priority: boolean;
@@ -66,7 +68,7 @@ export interface EditJobFormProps {
 type DateKey = "shootDate" | "dueDate" | "reviewDueDate" | "deliveryDueDate";
 
 const PRIORITY_OPTIONS = PRIORITIES.map((p) => ({ value: p, label: PRIORITY_META[p].label }));
-const LOCKED_FIELDS = "Only the job's photographer, its creator or a manager can change this.";
+const LOCKED_FIELDS = "Only the job's photographer, its creator or the studio owner can change this.";
 
 function Locked({ show }: { show: boolean }) {
   if (!show) return null;
@@ -108,14 +110,15 @@ export function EditJobForm({ job, permissions, timeZone, jobTypes, clients, pro
   const [saved, setSaved] = React.useState(false);
   const [conflict, setConflict] = React.useState<ApiError | null>(null);
 
+  const canChangeClient = permissions.client ?? permissions.fields;
   const clientProject = useClientProject({
     clients,
     projects,
     initialClientId: job.clientId,
     initialProjectId: job.projectId,
-    canCreateClient: canCreateClient && permissions.fields,
-    canCreateProject: canCreateProject && permissions.fields,
-    disabled: busy || !permissions.fields,
+    canCreateClient: canCreateClient && canChangeClient,
+    canCreateProject: canCreateProject && canChangeClient,
+    disabled: busy || !canChangeClient,
     errors: { clientId: errors.clientId, projectId: errors.projectId },
     onChange: () => clearError("clientId", "projectId"),
   });
@@ -136,7 +139,7 @@ export function EditJobForm({ job, permissions, timeZone, jobTypes, clients, pro
       if (name.trim() !== job.name) out.name = name.trim();
       const desc = description.trim() || null;
       if (desc !== (job.description?.trim() || null)) out.description = desc;
-      if (clientProject.projectId !== job.projectId && clientProject.projectId) {
+      if (canChangeClient && clientProject.projectId !== job.projectId && clientProject.projectId) {
         out.projectId = clientProject.projectId;
         if (clientProject.clientId) out.clientId = clientProject.clientId;
       }
@@ -155,10 +158,10 @@ export function EditJobForm({ job, permissions, timeZone, jobTypes, clients, pro
     if (permissions.priority && priority !== job.priority) out.priority = priority;
     if (permissions.completion && completion !== job.completionPercent) out.completionPercent = completion;
     return out;
-  }, [permissions, name, description, clientProject.projectId, clientProject.clientId, jobTypeId, dates, hours, priority, completion, job, initialDates, initialHours]);
+  }, [permissions, canChangeClient, name, description, clientProject.projectId, clientProject.clientId, jobTypeId, dates, hours, priority, completion, job, initialDates, initialHours]);
 
   const changeCount = Object.keys(changes).length;
-  const clientChangedWithoutProject = permissions.fields && clientProject.clientId !== job.clientId && !clientProject.projectId;
+  const clientChangedWithoutProject = canChangeClient && clientProject.clientId !== job.clientId && !clientProject.projectId;
   useUnsavedChangesWarning(changeCount > 0 && !busy && !saved);
 
   const reset = () => {
@@ -275,7 +278,7 @@ export function EditJobForm({ job, permissions, timeZone, jobTypes, clients, pro
                 ["shootDate", "Shoot date"],
                 ["dueDate", "Editing deadline"],
                 ["reviewDueDate", "Review deadline"],
-                ["deliveryDueDate", "Delivery date"],
+                ["deliveryDueDate", "Delivery date — visible to the client when shared"],
               ] as const
             ).map(([key, label]) => (
               <FormField key={key} label={label} optional error={errors[key]} hint={changedDot(key)} description={!dateEditable(key) ? "Read-only for you." : undefined}>
@@ -349,7 +352,7 @@ export function EditJobForm({ job, permissions, timeZone, jobTypes, clients, pro
           </div>
         </FormSection>
 
-        <div className="sticky bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px))] z-20 -mx-4 mt-2 flex flex-wrap items-center gap-3 border-t border-border bg-canvas/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:mx-0 lg:px-0">
+        <div className="sticky bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px))] z-(--z-page-sticky) -mx-4 mt-2 flex flex-wrap items-center gap-3 border-t border-border bg-canvas/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:mx-0 lg:px-0">
           <span className="text-sm text-ink-muted" aria-live="polite">
             {changeCount > 0 ? (
               <>

@@ -47,7 +47,7 @@ export function Sidebar({ groups, pathname, collapsed, onToggleCollapsed, orgNam
     <aside
       data-collapsed={collapsed || undefined}
       className={cn(
-        "fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-border bg-surface lg:flex",
+        "fixed inset-y-0 left-0 z-(--z-shell) hidden flex-col border-r border-border bg-surface lg:flex",
         "transition-[width] duration-(--motion-slow) ease-out-soft",
         collapsed ? "w-(--sidebar-width-collapsed)" : "w-(--sidebar-width)",
       )}

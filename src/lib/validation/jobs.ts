@@ -63,35 +63,86 @@ export const RevisionInput = z.object({
   dueDate: NullableDateSchema.optional(),
   /** Editor expected to resolve it; defaults to the job's current editor. */
   assigneeUserId: IdSchema.nullish(),
+  /**
+   * "Turn into revision request" (docs/ROLES.md §7.5): the client_feedback thread
+   * this request quotes. Needs `client_feedback.to_revision`; stored as
+   * `revision.requested` metadata.fromFeedbackCommentId.
+   */
+  fromFeedbackCommentId: IdSchema.optional(),
 });
 export type RevisionInputValue = z.output<typeof RevisionInput>;
+
+/* ------------------------------------------------------------------ */
+/*  Delivery step (docs/ROLES.md §7.3)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Optional payload of a DELIVERING move (→ delivered, or → completed while the
+ * job was never delivered). `shareJob` shares the job with its client;
+ * `shareLinkIds` (current links of this job, any kind) replace the default
+ * share set (current gallery / client_delivery links added by someone who
+ * could share). Sent on any other move → 422.
+ */
+export const DeliveryInput = z.strictObject({
+  shareJob: z.boolean().optional(),
+  shareLinkIds: z.array(IdSchema).max(50).optional(),
+});
+export type DeliveryInputValue = z.output<typeof DeliveryInput>;
 
 /* ------------------------------------------------------------------ */
 /*  Jobs                                                               */
 /* ------------------------------------------------------------------ */
 
-export const CreateJobInput = z.object({
+/** Inline "New project" from the New job form (docs/ROLES.md §4.3), under an existing client. */
+export const InlineProjectInput = z.strictObject({
   name: z.string().trim().min(1, "Required").max(200),
-  description: z.string().trim().max(5000).nullish(),
-  projectId: IdSchema,
-  /** Optional; must equal the project's client when given. */
-  clientId: IdSchema.optional(),
-  jobTypeId: IdSchema,
-  priority: PrioritySchema.optional(),
-  /** Omitted → the creating photographer (photographers) or none. */
-  photographerId: IdSchema.nullish(),
-  /** Optional initial editor → the job moves to `assigned` in the same transaction. */
-  editorId: IdSchema.nullish(),
-  shootDate: NullableDateSchema.optional(),
-  dueDate: NullableDateSchema.optional(),
-  reviewDueDate: NullableDateSchema.optional(),
-  deliveryDueDate: NullableDateSchema.optional(),
-  estimatedHours: EstimatedHoursSchema.optional(),
+  address: z.string().trim().max(500).nullish(),
 });
+
+/**
+ * Strict (docs/ROLES.md §3.5): sharing columns (`sharedWithClient`, …) and any
+ * other unknown key → 400. Exactly one of `projectId` / `newProject`
+ * (`newProject` needs `clientId`).
+ */
+export const CreateJobInput = z
+  .strictObject({
+    name: z.string().trim().min(1, "Required").max(200),
+    description: z.string().trim().max(5000).nullish(),
+    projectId: IdSchema.optional(),
+    /** Created in the same transaction under `clientId` (needs `project.create`). */
+    newProject: InlineProjectInput.optional(),
+    /** Optional with `projectId` (must equal the project's client); required with `newProject`. */
+    clientId: IdSchema.optional(),
+    jobTypeId: IdSchema,
+    priority: PrioritySchema.optional(),
+    /**
+     * Admins: any active photographer (omitted → self; null → none). Team members:
+     * themselves only. Editors: required; omitted → the org's default photographer.
+     */
+    photographerId: IdSchema.nullish(),
+    /**
+     * Optional initial editor → the job moves to `assigned` in the same transaction.
+     * Editors: only themselves ("Assign to me", checked with `job.claim`) or none.
+     */
+    editorId: IdSchema.nullish(),
+    shootDate: NullableDateSchema.optional(),
+    dueDate: NullableDateSchema.optional(),
+    reviewDueDate: NullableDateSchema.optional(),
+    deliveryDueDate: NullableDateSchema.optional(),
+    estimatedHours: EstimatedHoursSchema.optional(),
+  })
+  .refine((v) => (v.projectId ? 1 : 0) + (v.newProject ? 1 : 0) === 1, {
+    message: "Choose a project or create a new one",
+    path: ["projectId"],
+  })
+  .refine((v) => !v.newProject || v.clientId !== undefined, {
+    message: "Choose the client of the new project",
+    path: ["clientId"],
+  });
 export type CreateJobInputValue = z.output<typeof CreateJobInput>;
 
-/** Fields `updateJob` accepts (each checked against its own permission). */
-export const JobFieldsSchema = z.object({
+/** Fields `updateJob` accepts (each checked against its own permission). Strict (§3.5). */
+export const JobFieldsSchema = z.strictObject({
   name: z.string().trim().min(1, "Required").max(200).optional(),
   description: z.string().trim().max(5000).nullable().optional(),
   clientId: IdSchema.optional(),
@@ -125,6 +176,12 @@ export const SetCompletionPercentInput = z.object({
 export const PauseInput = z.object({ jobId: IdSchema, expectedVersion: ExpectedVersionSchema, reason: z.string().trim().max(2000).nullish() });
 export const JobIdInput = z.object({ jobId: IdSchema });
 
+/** `POST /api/jobs/:id/claim` — an editor takes an unassigned job they created (draft window open). */
+export const ClaimJobInput = z.strictObject({ jobId: IdSchema, expectedVersion: ExpectedVersionSchema });
+
+/** `POST /api/jobs/:id/share { shared, expectedVersion }` (`job.share_with_client`). */
+export const ShareJobInput = z.strictObject({ jobId: IdSchema, shared: z.boolean(), expectedVersion: ExpectedVersionSchema });
+
 /* ------------------------------------------------------------------ */
 /*  Transitions                                                        */
 /* ------------------------------------------------------------------ */
@@ -142,6 +199,8 @@ export const TransitionInput = z
     revision: RevisionInput.optional(),
     /** Start the actor's timer when entering an editing status (time tracking on). */
     startTimer: z.boolean().optional(),
+    /** Delivering moves only (docs/ROLES.md §7.3). */
+    delivery: DeliveryInput.optional(),
     /** Honoured for system contexts only (automation / sweep / seed). */
     cause: z.enum(EVENT_CAUSES).optional(),
   })
@@ -159,6 +218,8 @@ export const CategoryMoveInput = z.object({
   toStatusId: IdSchema.optional(),
   reason: z.string().trim().max(2000).nullish(),
   startTimer: z.boolean().optional(),
+  /** Deliver / complete only (docs/ROLES.md §7.3); 422 on any other move. */
+  delivery: DeliveryInput.optional(),
 });
 export type CategoryMoveInputValue = z.output<typeof CategoryMoveInput>;
 

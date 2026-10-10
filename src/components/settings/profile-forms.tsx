@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff, KeyRound, LogOut, UserRound } from "lucide-react";
+import { Eye, EyeOff, KeyRound, LogOut, ShieldCheck, UserRound } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
 import { firstFieldErrors, useMutationRunner } from "@/components/jobs/mutation";
 import { Avatar } from "@/components/ui/avatar";
@@ -10,9 +10,12 @@ import { FormField } from "@/components/ui/form-field";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
-import { ROLE_LABELS } from "@/lib/constants";
+import { Badge } from "@/components/ui/badge";
+import { PERSONA_LABELS, displayRoleLabel, type Persona } from "@/lib/constants";
 import type { UserProfile } from "@/lib/types";
 import { ColourField } from "./colour-field";
+import { PERSONA_BADGE, type EditorFlagValues, type MemberFlagValues } from "./permission-copy";
+import { PermissionSwitches } from "./permission-switches";
 import { useConflict } from "./use-conflict";
 
 const MIN_PASSWORD = 10;
@@ -59,7 +62,7 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
           <div className="min-w-0">
             <p className="truncate text-md font-semibold text-ink">{name || profile.name}</p>
             <p className="truncate text-sm text-ink-muted">
-              {ROLE_LABELS[profile.role]} · {profile.email}
+              {displayRoleLabel({ role: profile.role, isAdmin: profile.isAdmin })} · {profile.email}
             </p>
           </div>
         </div>
@@ -74,7 +77,7 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
         <FormField label="Avatar colour">
           <ColourField value={colour} onChange={setColour} label="Avatar colour" />
         </FormField>
-        <p className="text-xs text-ink-muted">Your email and role are managed by an owner or manager.</p>
+        <p className="text-xs text-ink-muted">Your email, role and permissions are managed by the studio owner.</p>
         <div className="flex justify-end">
           <Button type="submit" loading={pending} disabled={!dirty}>
             Save profile
@@ -189,6 +192,46 @@ export function ChangePasswordForm() {
           </Button>
         </div>
       </form>
+    </SectionCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Your access (docs/ROLES.md §10)                                    */
+/* ------------------------------------------------------------------ */
+
+export interface YourAccessCardProps {
+  persona: Exclude<Persona, "client">;
+  /** Effective switches (admins: all on). */
+  memberFlags: MemberFlagValues;
+  editorFlags: EditorFlagValues;
+  isPrimaryOwner: boolean;
+}
+
+/** Plain-English list of what the signed-in person can do; locked rows show "Always on". */
+export function YourAccessCard({ persona, memberFlags, editorFlags, isPrimaryOwner }: YourAccessCardProps) {
+  return (
+    <SectionCard
+      title="Your access"
+      description="What your account can do in this studio. Ask the studio owner to change a switch."
+      actions={<ShieldCheck aria-hidden="true" className="size-4 text-ink-subtle" />}
+    >
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Badge variant={PERSONA_BADGE[persona]}>{PERSONA_LABELS[persona]}</Badge>
+        {isPrimaryOwner ? <Badge variant="accent">Primary owner</Badge> : null}
+      </div>
+      {persona === "admin" ? (
+        <>
+          <p className="mb-3 text-sm text-ink-secondary">
+            You&apos;re an admin: you can see and change every job, person and setting{isPrimaryOwner ? ", and nobody else can change your account" : ""}.
+          </p>
+          <PermissionSwitches kind="member" values={memberFlags} readOnly aria-label="Your permissions" />
+        </>
+      ) : persona === "member" ? (
+        <PermissionSwitches kind="member" values={memberFlags} readOnly aria-label="Your permissions" />
+      ) : (
+        <PermissionSwitches kind="editor" values={editorFlags} readOnly aria-label="Your permissions" />
+      )}
     </SectionCard>
   );
 }

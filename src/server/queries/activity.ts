@@ -3,10 +3,15 @@
  *
  * Scoping:
  *  - every query is org-filtered;
- *  - `visibility = 'management'` rows only for roles passing
- *    `activity.view_management_events` (owner / manager);
- *  - photographers / editors see job events only for jobs passing
- *    `visibleJobsWhere(ctx)`, plus non-job events they performed themselves.
+ *  - `visibility = 'management'` rows only for actors passing
+ *    `activity.view_management_events` (admins);
+ *  - team members / editors see job events only for jobs passing
+ *    `visibleJobsWhere(ctx)`, plus non-job events they performed themselves;
+ *  - editors with past / created-only access see a job's events up to their
+ *    read cut-off (docs/ROLES.md §2.3) plus their own;
+ *  - clients never read the staff feed (`activity.view_global` → 403);
+ *  - the personal / business view (§8): "mine" keeps events of My shoots
+ *    plus the actor's own non-job events.
  *
  * Order = (created_at, rowid): events written in the same millisecond keep
  * their insertion order (ids are random nanoids, so `id` is no tie-breaker;
@@ -18,13 +23,13 @@ import { and, asc, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, o
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
 import { activityEvents, jobs, projects, users } from "@/db/schema";
-import { ENTITY_TYPES, EVENT_TYPES, type EventType } from "@/lib/constants";
+import { ENTITY_TYPES, EVENT_TYPES, NOTE_KIND_META, NOTE_KINDS, type EventType, type NoteKind } from "@/lib/constants";
 import { describeEventForFeed } from "@/lib/audit-summaries";
 import { endOfCivilDayIso, startOfCivilDayIso } from "@/lib/dates";
 import type { ActivityEvent, ActivityFeedItem, AuthContext, JobRef, Paginated, UserRef } from "@/lib/types";
-import { assertCan, isManagement } from "@/server/auth/permissions";
+import { assertCan, isAdmin, managedJobsWhere } from "@/server/auth/permissions";
 import { parseInput } from "@/server/services/_shared";
-import { canSeeManagementEvents, visibleJobsWhere } from "./scope";
+import { canSeeManagementEvents, editorCutoffWhere, viewScopeFor, viewScopeWhere, visibleJobsWhere, type ViewScope } from "./scope";
 
 export const ACTIVITY_MAX_LIMIT = 200;
 export const ACTIVITY_DEFAULT_LIMIT = 50;
@@ -54,6 +59,8 @@ export const ActivityFiltersSchema = z.object({
   to: bound,
   cursor: one(z.string().min(1).optional()),
   limit: one(z.coerce.number().int().min(1).max(ACTIVITY_MAX_LIMIT).optional()),
+  /** Personal / business view (§8); ignored without the scope switch. */
+  scope: one(z.enum(["mine", "business", "all"]).optional()),
 });
 export type ActivityFiltersInput = z.input<typeof ActivityFiltersSchema>;
 
@@ -80,17 +87,76 @@ export function decodeKeysetCursor(cursor: string | undefined | null): { created
 /*  Scoping                                                            */
 /* ------------------------------------------------------------------ */
 
+/** Note kinds an editor never reads (`NOTE_KIND_META[kind].editorReadable === false`, docs/ROLES.md §2.4). */
+export const EDITOR_HIDDEN_NOTE_KINDS: readonly NoteKind[] = NOTE_KINDS.filter((k) => !NOTE_KIND_META[k].editorReadable);
+
+/**
+ * `note.read` on the feed: a note event carries the note's kind (and body) in
+ * its snapshots, so editors must not receive events of kinds they cannot read
+ * through the notes API (`internal` is already `management` visibility;
+ * `client` notes keep `all`). Covers note.added / edited / archived /
+ * restored. Non-editors → undefined (members: `client` notes on visible jobs,
+ * `internal` stays behind the management tier).
+ */
+function notePrivacyWhere(ctx: AuthContext): SQL | undefined {
+  if (ctx.isSystem || isAdmin(ctx) || ctx.role !== "editor" || EDITOR_HIDDEN_NOTE_KINDS.length === 0) return undefined;
+  const kinds = sql.join(
+    EDITOR_HIDDEN_NOTE_KINDS.map((k) => sql`${k}`),
+    sql`, `,
+  );
+  const hiddenKind = sql`(
+    coalesce(${activityEvents.newValue} ->> 'kind', '') in (${kinds})
+    or coalesce(${activityEvents.previousValue} ->> 'kind', '') in (${kinds})
+    or coalesce(${activityEvents.metadata} ->> 'kind', '') in (${kinds})
+    or coalesce(${activityEvents.metadata} ->> 'noteKind', '') in (${kinds})
+  )`;
+  return sql`not ((${activityEvents.eventType} like 'note.%' or ${activityEvents.entityType} = 'note') and ${hiddenKind})`;
+}
+
+/**
+ * `timer.view_others` on the feed (docs/ROLES.md §2.4): `work_session.*`
+ * events expose per-person time, so non-admins only get those of their own
+ * sessions (they started it, or `metadata.sessionUserId` is them); members
+ * additionally on jobs they manage. Editors (even with ⚑teamJobs) never see
+ * another person's sessions.
+ */
+function workSessionPrivacyWhere(db: DbLike, ctx: AuthContext): SQL {
+  const me = ctx.userId ?? "";
+  const mine = or(eq(activityEvents.actorUserId, me), sql`coalesce(${activityEvents.metadata} ->> 'sessionUserId', '') = ${me}`) as SQL;
+  const allowed: SQL[] = [sql`${activityEvents.entityType} <> 'work_session'`, mine];
+  if (ctx.role === "photographer") {
+    const managed = db
+      .select({ one: sql`1` })
+      .from(jobs)
+      .where(and(eq(jobs.id, activityEvents.jobId), eq(jobs.organisationId, ctx.organisationId), managedJobsWhere(ctx)));
+    allowed.push(and(isNotNull(activityEvents.jobId), exists(managed)) as SQL);
+  }
+  return or(...allowed) as SQL;
+}
+
 /** Org + management-visibility + job-visibility predicate over activity_events. */
-export function activityScopeWhere(db: DbLike, ctx: AuthContext): SQL {
+export function activityScopeWhere(db: DbLike, ctx: AuthContext, viewScope: ViewScope | null = null): SQL {
   const parts: SQL[] = [eq(activityEvents.organisationId, ctx.organisationId)];
+  if (!ctx.isSystem && (!ctx.isActive || ctx.role === "client")) parts.push(sql`1 = 0`);
   if (!canSeeManagementEvents(ctx)) parts.push(eq(activityEvents.visibility, "all"));
-  if (!ctx.isSystem && !isManagement(ctx)) {
+  const own = ctx.userId ? and(isNull(activityEvents.jobId), eq(activityEvents.actorUserId, ctx.userId)) : sql`1 = 0`;
+  if (!ctx.isSystem && !isAdmin(ctx)) {
     const visibleJob = db
       .select({ one: sql`1` })
       .from(jobs)
-      .where(and(eq(jobs.id, activityEvents.jobId), visibleJobsWhere(ctx)));
-    const own = ctx.userId ? and(isNull(activityEvents.jobId), eq(activityEvents.actorUserId, ctx.userId)) : sql`1 = 0`;
+      .where(and(eq(jobs.id, activityEvents.jobId), visibleJobsWhere(ctx), editorCutoffWhere(ctx, activityEvents.createdAt, activityEvents.actorUserId)));
     parts.push(or(and(isNotNull(activityEvents.jobId), exists(visibleJob)), own) as SQL);
+    const notes = notePrivacyWhere(ctx);
+    if (notes) parts.push(notes);
+    parts.push(workSessionPrivacyWhere(db, ctx));
+  }
+  const mine = viewScopeWhere(ctx, viewScope);
+  if (mine) {
+    const myShoot = db
+      .select({ one: sql`1` })
+      .from(jobs)
+      .where(and(eq(jobs.id, activityEvents.jobId), mine));
+    parts.push(or(and(isNotNull(activityEvents.jobId), exists(myShoot)), own) as SQL);
   }
   return and(...parts) as SQL;
 }
@@ -123,9 +189,28 @@ export function feedQuery(db: DbLike) {
     .$dynamic();
 }
 
-export function toFeedItem(row: RawFeedRow): ActivityFeedItem {
+function subjectIds(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const id = (value as Record<string, unknown>).userId;
+  return typeof id === "string" ? [id] : [];
+}
+
+/**
+ * Assignment reason text is private for editors unless they are the actor or
+ * the subject of that assignment (docs/ROLES.md §2.4).
+ */
+function hidesAssignmentReason(ctx: AuthContext | undefined, e: ActivityEvent): boolean {
+  if (!ctx || ctx.isSystem || ctx.role !== "editor") return false;
+  if (e.eventType !== "assignment.created" && e.eventType !== "assignment.ended") return false;
+  const me = ctx.userId;
+  if (me !== null && (e.actorUserId === me || [...subjectIds(e.newValue), ...subjectIds(e.previousValue)].includes(me))) return false;
+  return true;
+}
+
+export function toFeedItem(row: RawFeedRow, ctx?: AuthContext): ActivityFeedItem {
   const e = row.event;
-  const metadata = e.metadata && typeof e.metadata === "object" && !Array.isArray(e.metadata) ? (e.metadata as Record<string, unknown>) : {};
+  const rawMeta = e.metadata && typeof e.metadata === "object" && !Array.isArray(e.metadata) ? (e.metadata as Record<string, unknown>) : {};
+  const metadata = hidesAssignmentReason(ctx, e) && "reason" in rawMeta ? { ...rawMeta, reason: null } : rawMeta;
   const job = row.job ? { id: row.job.id, jobNumber: row.job.jobNumber, name: row.job.name } : null;
   const actor = row.actor ? { ...row.actor } : null;
   return {
@@ -165,12 +250,18 @@ function boundSql(value: string, side: "from" | "to", tz: string): SQL {
  * Global / filtered feed, newest first. Input = `ActivityFiltersInput` (or
  * raw search params). Events the actor may not see are never returned.
  */
-export async function listActivity(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<Paginated<ActivityFeedItem>> {
+export async function listActivity(
+  db: DbLike,
+  ctx: AuthContext,
+  input: unknown = {},
+  opts: { /** `pwm_scope` cookie value (the `scope` filter wins). */ scopeCookie?: string | null } = {},
+): Promise<Paginated<ActivityFeedItem>> {
   assertCan(ctx, "activity.view_global");
   const f = parseInput(ActivityFiltersSchema, input ?? {});
   const tz = ctx.settings.timezone;
   const limit = f.limit ?? ACTIVITY_DEFAULT_LIMIT;
-  const parts: (SQL | undefined)[] = [activityScopeWhere(db, ctx)];
+  const viewScope = viewScopeFor(ctx, { scope: f.scope ?? null, scopeCookie: opts.scopeCookie ?? null });
+  const parts: (SQL | undefined)[] = [activityScopeWhere(db, ctx, viewScope)];
   if (f.userId) parts.push(eq(activityEvents.actorUserId, f.userId));
   if (f.jobId) parts.push(eq(activityEvents.jobId, f.jobId));
   if (f.projectId) {
@@ -216,7 +307,7 @@ export async function listActivity(db: DbLike, ctx: AuthContext, input: unknown 
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
   return {
-    items: page.map(toFeedItem),
+    items: page.map((r) => toFeedItem(r, ctx)),
     nextCursor: hasMore && last ? encodeKeysetCursor(last.event.createdAt, last.event.id) : null,
   };
 }
@@ -233,5 +324,5 @@ export async function jobEvents(db: DbLike, ctx: AuthContext, jobId: string, eve
     )
     .orderBy(asc(activityEvents.createdAt), asc(EVENT_ROWID))) as RawFeedRow[];
 
-  return rows.map(toFeedItem);
+  return rows.map((r) => toFeedItem(r, ctx));
 }

@@ -14,9 +14,9 @@ import { WorkTable, toJobListInput } from "@/components/work-table";
 import type { JobTableColumn } from "@/lib/constants";
 import type { TeamWorkGroup } from "@/lib/types";
 import { cn, pluralise } from "@/lib/utils";
-import { isManagement } from "@/server/auth/permissions";
+import { isAdmin } from "@/server/auth/permissions";
 import { ValidationError } from "@/server/errors";
-import { pageContext } from "@/server/page";
+import { allowed, pageContext } from "@/server/page";
 import { getTeamWork } from "@/server/queries/teamWork";
 import { listJobTypes } from "@/server/queries/workflows";
 import { canViewTeamWork } from "./access";
@@ -47,7 +47,8 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
   if (!canViewTeamWork(ctx)) forbidden();
   const timeZone = ctx.settings.timezone;
 
-  const role: "editor" | "photographer" = sp.role === "photographer" ? "photographer" : "editor";
+  // Editors with "See other editors' jobs" group by editor only (docs/ROLES.md §10.1).
+  const role: "editor" | "photographer" = sp.role === "photographer" && ctx.role !== "editor" ? "photographer" : "editor";
   let notice: string | null = null;
   let groups: TeamWorkGroup[];
   try {
@@ -68,7 +69,10 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
   );
   const filtered = JOB_FILTER_KEYS.some((k) => sp[k] !== undefined && sp[k] !== "");
   const personNoun = role === "editor" ? "editor" : "photographer";
-  const management = isManagement(ctx);
+  const admin = isAdmin(ctx);
+  // Per-person counts and team totals are workload data: admins and team members with "View team workload" (§2.4, §10.1).
+  const canSeeCounts = allowed(ctx, "workloads.view_team");
+  const canOpenEditorPages = canSeeCounts || allowed(ctx, "analytics.view");
 
   return (
     <PageContainer>
@@ -76,13 +80,16 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
         eyebrow="Workspace"
         title="Team Work"
         description={
-          management
+          admin
             ? "What everyone is working on right now, person by person."
-            : "What you and your teammates are working on right now."
+            : ctx.role === "editor"
+              ? "What the editors are working on right now (read-only)."
+              : "What everyone is working on right now — you can change only your own jobs."
         }
-        actions={<TeamRoleSwitch value={role} />}
+        actions={ctx.role === "editor" ? undefined : <TeamRoleSwitch value={role} />}
       />
 
+      {canSeeCounts ? (
       <section aria-label="Team summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile label={role === "editor" ? "Editors" : "Photographers"} value={groups.length} icon={UsersRound} sub="with active work" />
         <StatTile label="Active jobs" value={totals.active} icon={Briefcase} sub="across the team" />
@@ -103,6 +110,7 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
           sub="Open in All Work"
         />
       </section>
+      ) : null}
 
       <div className="flex flex-col gap-3">
         <FilterBar
@@ -156,7 +164,8 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
           {groups.map((group) => {
             const c = countsOf(group);
             const self = group.user.id === ctx.userId;
-            const profileHref = management || self ? `/team/users/${group.user.id}` : null;
+            const profileHref = admin || self || (role === "editor" && canOpenEditorPages) ? `/team/users/${group.user.id}` : null;
+            const showCounts = canSeeCounts || self;
             return (
               <details
                 key={group.user.id}
@@ -179,12 +188,14 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
                       <WorkloadBand band={group.workload.band} ratio={group.workload.ratio} reason={group.workload.bandReason} showRatio size="sm" />
                     ) : null}
                   </span>
-                  <span className="flex flex-wrap items-center gap-1.5 pl-7 text-xs sm:pl-0">
-                    <CountPill label="active" value={c.active} />
-                    <CountPill label="due today" value={c.dueToday} tone="attention" />
-                    <CountPill label="overdue" value={c.overdue} tone="danger" />
-                    {c.review > 0 ? <CountPill label="in review" value={c.review} /> : null}
-                  </span>
+                  {showCounts ? (
+                    <span className="flex flex-wrap items-center gap-1.5 pl-7 text-xs sm:pl-0">
+                      <CountPill label="active" value={c.active} />
+                      <CountPill label="due today" value={c.dueToday} tone="attention" />
+                      <CountPill label="overdue" value={c.overdue} tone="danger" />
+                      {c.review > 0 ? <CountPill label="in review" value={c.review} /> : null}
+                    </span>
+                  ) : null}
                 </summary>
                 <div className="border-t border-border">
                   <WorkTable
@@ -200,7 +211,9 @@ export default async function TeamWorkPage({ searchParams }: PageProps<"/workspa
                       <span className="numeric">
                         {group.workload
                           ? `${group.workload.completedThisWeek} completed this week · ${group.workload.completedThisMonth} this month`
-                          : pluralise(c.active, "active job")}
+                          : showCounts
+                            ? pluralise(c.active, "active job")
+                            : null}
                       </span>
                       {profileHref ? (
                         <Link href={profileHref} className="inline-flex items-center gap-1 rounded-xs font-medium text-accent-ink hover:underline focus-ring">

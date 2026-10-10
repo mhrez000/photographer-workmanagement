@@ -3,9 +3,11 @@
 import * as React from "react";
 import { api, type ApiError } from "@/lib/api-client";
 import type { StatusCategory } from "@/lib/constants";
+import type { DeliverContext } from "@/lib/sharing";
 import type { StatusRef, UserRef } from "@/lib/types";
 import { AssignEditorDialog } from "./assign-editor-dialog";
 import { ConflictDialog } from "./conflict-dialog";
+import { DeliverDialog, type DeliveryChoice } from "./deliver-dialog";
 import { toDialogResult, useMutationRunner, type DialogSubmitResult } from "./mutation";
 import { ReasonDialog } from "./reason-dialog";
 import { RevisionRequestDialog } from "./revision-request-dialog";
@@ -45,12 +47,15 @@ export interface JobMove {
 export interface TransitionExtra {
   reason?: string;
   override?: boolean;
+  /** Deliver dialog payload (ROLES.md §7.3); only on a delivering move. */
+  delivery?: DeliveryChoice;
 }
 
 type DialogState =
   | { kind: "none" }
   | { kind: "reason"; move: JobMove }
   | { kind: "revision"; move: JobMove }
+  | { kind: "deliver"; move: JobMove }
   | { kind: "assign"; notice?: string }
   | { kind: "picker"; move: JobMove; extra: TransitionExtra; candidates: StatusCandidate[] }
   | { kind: "override" }
@@ -68,6 +73,12 @@ export interface JobActionControllerInput {
   timeZone?: string;
   /** Statuses for the override picker. */
   workflowStatuses?: StatusRef[];
+  /**
+   * Client sharing facts for the Deliver dialog (ROLES.md §7.3). When set, a move into
+   * Delivered opens the dialog; without it (no portal for this client, or the viewer
+   * cannot share) the move runs directly and the server applies the default link set.
+   */
+  deliver?: DeliverContext | null;
 }
 
 export function moveKey(move: JobMove): string {
@@ -107,7 +118,7 @@ function successText(move: JobMove, restoring: boolean): string {
 
 /** Hook: action runners + the dialogs element to render once. */
 export function useJobActionController(input: JobActionControllerInput) {
-  const { jobId, version, job, timeTrackingEnabled, canUseTimer = false, canAssignEditor = false, timeZone, workflowStatuses } = input;
+  const { jobId, version, job, timeTrackingEnabled, canUseTimer = false, canAssignEditor = false, timeZone, workflowStatuses, deliver = null } = input;
   const run = useMutationRunner();
   const [busy, setBusy] = React.useState<string | null>(null);
   const [dialog, setDialog] = React.useState<DialogState>({ kind: "none" });
@@ -139,6 +150,7 @@ export function useJobActionController(input: JobActionControllerInput) {
                 : { toCategory: move.toCategory }),
               reason: extra.reason || undefined,
               override: extra.override || undefined,
+              delivery: extra.delivery,
               startTimer,
             }),
       {
@@ -167,6 +179,7 @@ export function useJobActionController(input: JobActionControllerInput) {
   /** Entry point for a button press: opens the right dialog or moves straight away. */
   const startMove = (move: JobMove) => {
     if (move.requiresRevisionPayload) setDialog({ kind: "revision", move });
+    else if (deliver && moveTargetCategory(move) === "delivered" && !move.isReopen) setDialog({ kind: "deliver", move });
     else if (move.requiresReason) setDialog({ kind: "reason", move });
     else void transition(move);
   };
@@ -183,7 +196,11 @@ export function useJobActionController(input: JobActionControllerInput) {
   const openAssign = (notice?: string) => setDialog({ kind: "assign", notice });
   const openOverride = () => setDialog({ kind: "override" });
 
+  /** The header's "Deliver…" button: the first move into Delivered, through the dialog. */
+  const openDeliver = (move: JobMove) => setDialog({ kind: "deliver", move });
+
   const reasonMove = dialog.kind === "reason" ? dialog.move : null;
+  const deliverMove = dialog.kind === "deliver" ? dialog.move : null;
   const revisionMove = dialog.kind === "revision" ? dialog.move : null;
   const cancelling = reasonMove ? moveTargetCategory(reasonMove) === "cancelled" : false;
 
@@ -217,6 +234,15 @@ export function useJobActionController(input: JobActionControllerInput) {
         timeZone={timeZone}
         onConflict={onConflict}
       />
+      {deliver ? (
+        <DeliverDialog
+          open={dialog.kind === "deliver"}
+          onOpenChange={(open) => (open ? undefined : closeIf("deliver"))}
+          jobLabel={job.jobNumber}
+          context={deliver}
+          onSubmit={(delivery) => (deliverMove ? transition(deliverMove, { delivery }) : false)}
+        />
+      ) : null}
       <AssignEditorDialog
         open={dialog.kind === "assign"}
         onOpenChange={(open) => (open ? undefined : closeIf("assign"))}
@@ -261,7 +287,7 @@ export function useJobActionController(input: JobActionControllerInput) {
     </>
   );
 
-  return { busy, startMove, transition, pauseOrResume, openAssign, openOverride, onConflict, dialogs };
+  return { busy, startMove, transition, pauseOrResume, openAssign, openOverride, openDeliver, onConflict, dialogs };
 }
 
 export type JobActionController = ReturnType<typeof useJobActionController>;
