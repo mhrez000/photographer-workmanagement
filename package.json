@@ -21,7 +21,8 @@
     "db:migrate:remote": "tsx scripts/db-remote.ts migrate",
     "db:seed:remote": "tsx scripts/db-remote.ts seed",
     "db:verify:remote": "tsx scripts/db-remote.ts verify",
-    "vercel-build": "node scripts/vercel-migrate.mjs && next build"
+    "vercel-build": "node scripts/vercel-migrate.mjs && next build",
+    "start:remote": "node scripts/start-remote.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
