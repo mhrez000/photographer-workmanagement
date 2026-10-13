@@ -476,7 +476,7 @@ describe("resolveKanbanDrop", () => {
     const edges = VIDEO_EDGES.filter((e) => e.toStatusId !== sid("revision") && e.fromStatusId !== sid("revision"));
     expect(resolveKanbanDrop(ctx("owner"), jobAt("client_review", statuses), "revision", statuses, edges)).toEqual({
       kind: "none",
-      reason: "This workflow has no Revision status",
+      reason: "This workflow has no Changes asked status",
     });
   });
 

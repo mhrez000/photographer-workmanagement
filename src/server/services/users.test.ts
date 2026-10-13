@@ -96,7 +96,7 @@ describe("inviteUser", () => {
 
     const [ev] = await eventsOf("user.created");
     expect(ev).toMatchObject({ entityId: res.user.id, visibility: "management", actorUserId: ids.users.coAdmin });
-    expect(ev.newValue).toMatchObject({ role: "editor", isAdmin: false, clientId: null, flags: { canCreateJobs: true, canViewTeamJobs: false } });
+    expect(ev.newValue).toMatchObject({ role: "editor", isAdmin: false, clientId: null, flags: { canCreateJobs: false, canViewTeamJobs: false } });
     expect(JSON.stringify([ev.newValue, ev.previousValue, ev.metadata])).not.toMatch(/password|\$2[aby]\$/i);
     expect(ev.summary).toBe("invited Nia New as Editor");
   });
@@ -324,7 +324,7 @@ describe("changeRole", () => {
 
     await setUserFlags(db, ids.users.photographer2, { canCreateJobs: false });
     await run(ids.users.owner, (tx, ctx) => changeRole(tx, ctx, { userId: ids.users.photographer2, role: "editor" }));
-    expect(await contextFor(db, ids.users.photographer2)).toMatchObject({ role: "editor", canCreateJobs: true, canViewTeamJobs: false });
+    expect(await contextFor(db, ids.users.photographer2)).toMatchObject({ role: "editor", canCreateJobs: false, canViewTeamJobs: false });
   });
 
   it("photographer → editor clears admin (two events); the primary owner cannot be re-roled", async () => {

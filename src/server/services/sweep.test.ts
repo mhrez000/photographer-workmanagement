@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Tx } from "@/db/index";
 import { activityEvents, automationRuns, notifications, organisationSettings, workSessions } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, systemContextFor, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, optInAllNotifications, seedMinimalOrg, setUserFlags, systemContextFor, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
 import { verifyDerived } from "@/db/verify";
 import type { NotificationType } from "@/lib/constants";
 import type { AuthContext } from "@/lib/types";
@@ -20,6 +20,8 @@ beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z"); // 11:00 Sydney
   db = await makeTestDb();
   ids = await seedMinimalOrg(db, { settings: { timeTrackingEnabled: true } });
+  // The simplified defaults (plan §8) turn most per-type notices off; these tests check the notices themselves.
+  await optInAllNotifications(db, ids);
 });
 afterEach(() => fakeClock.reset());
 
@@ -45,7 +47,7 @@ async function expectClean() {
 }
 
 describe("job.became_overdue", () => {
-  it("emits once per (job, dueDate), notifies editor + photographer, fires job_overdue rules, re-arms after a deadline change", async () => {
+  it("emits once per (job, dueDate); ONE daily late summary per person (editor, photographer, admins); job_overdue rules never double-notify; re-arms after a deadline change", async () => {
     const rule = await runAs("coAdmin", (tx, ctx) =>
       createAutomation(tx, ctx, { name: "Overdue → admins", trigger: { type: "job_overdue" }, actions: [{ type: "notify", target: "admins" }] }),
     );
@@ -59,18 +61,24 @@ describe("job.became_overdue", () => {
     const [evt] = await eventsOf("job.became_overdue");
     expect(evt).toMatchObject({ jobId: late.id, actorUserId: null, action: "flagged", newValue: { dueDate: "2026-10-07T12:59:59.999Z" } });
     expect(evt?.metadata).toMatchObject({ cause: "sweep" });
-    expect((await noticesOf("job_overdue")).map((n) => [n.userId, n.dedupeKey])).toEqual([
-      [ids.users.editor1, `overdue:${late.id}:2026-10-07T12:59:59.999Z`],
-      [ids.users.photographer1, `overdue:${late.id}:2026-10-07T12:59:59.999Z`],
-    ]);
+    // SIMPLIFICATION-PLAN §8: one "late jobs" notice per person per civil day (2026-10-08 in Sydney), not one per job.
+    const firstDay = (await noticesOf("job_overdue")).sort((a, b) => a.userId.localeCompare(b.userId));
+    expect(firstDay.map((n) => [n.userId, n.dedupeKey, n.title, n.jobId, n.activityEventId])).toEqual(
+      [ids.users.coAdmin, ids.users.editor1, ids.users.owner, ids.users.photographer1]
+        .sort()
+        .map((userId) => [userId, `late_summary:${userId}:2026-10-08`, "1 job is late", late.id, evt?.id]),
+    );
+    // the admins' built-in summary covers the rule's "notify admins": the run succeeds without a second notice
     expect(await db.select().from(automationRuns).where(eq(automationRuns.automationId, rule.id))).toMatchObject([
       { status: "succeeded", triggerEventId: evt?.id },
     ]);
     expect(firstSweep.automations.succeeded).toBe(1);
+    expect(await noticesOf("automation")).toHaveLength(0);
 
     fakeClock.advanceHours(1);
     expect((await sweep()).overdueJobIds).toEqual([]);
     expect(await eventsOf("job.became_overdue")).toHaveLength(1);
+    expect(await noticesOf("job_overdue")).toHaveLength(4); // same day: nothing new
 
     // deadline moved → re-armed; flagged again once the new deadline passes
     const {
@@ -84,7 +92,11 @@ describe("job.became_overdue", () => {
       "2026-10-07T12:59:59.999Z",
       "2026-10-09T12:59:59.999Z",
     ]);
-    expect((await noticesOf("job_overdue")).filter((n) => n.jobId === late.id)).toHaveLength(4);
+    // a new civil day (2026-10-10): one new summary each, now listing both late jobs (no single job to link to)
+    const secondDay = (await noticesOf("job_overdue")).filter((n) => n.dedupeKey?.endsWith(":2026-10-10"));
+    expect(secondDay).toHaveLength(4);
+    for (const n of secondDay) expect(n).toMatchObject({ title: "2 jobs are late", jobId: null, activityEventId: null, linkPath: "/jobs?late=1" });
+    expect(await noticesOf("job_overdue")).toHaveLength(8);
     await expectClean();
   });
 });

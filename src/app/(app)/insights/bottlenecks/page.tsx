@@ -18,14 +18,14 @@ import { cn, pluralise } from "@/lib/utils";
 import { getBottlenecks } from "@/server/queries/bottlenecks";
 import { getJobRowsByIds } from "@/server/queries/jobs";
 import { loadOrgSettings } from "@/server/queries/metrics";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Bottlenecks" };
 
 const VISIBLE_JOBS = 6;
 
 export default async function BottlenecksPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("bottlenecks", "/editors"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "bottlenecks.view");
   const tz = ctx.settings.timezone;
   const alerts = await load(() => getBottlenecks(db, ctx));

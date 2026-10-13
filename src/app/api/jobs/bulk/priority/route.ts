@@ -1,11 +1,10 @@
 /** POST /api/jobs/bulk/priority - one transaction per job -> BulkResult (200 even when some fail) */
-import { requireContext } from "@/server/auth/session";
 import { bodyOrNull, handle } from "@/server/http";
 import { bulkSetPriority } from "@/server/services/jobs";
-import { methodNotAllowed } from "@/app/api/_lib/route";
+import { methodNotAllowed, requireRouteContext } from "@/app/api/_lib/route";
 
 export const POST = handle(async (req) => {
-  const ctx = await requireContext();
+  const ctx = await requireRouteContext(req); // Advanced tools (bulk_ui): 404 while off
   return bulkSetPriority(ctx, await bodyOrNull(req));
 });
 

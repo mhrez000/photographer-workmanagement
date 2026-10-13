@@ -33,6 +33,7 @@ import {
   CATEGORY_GROUPS,
   DEFAULT_JOB_NUMBER_PREFIX,
   DEFAULT_JOB_TYPES,
+  DEFAULT_OFF_NOTIFICATION_TYPES,
   DEFAULT_TIMEZONE,
   DEFAULT_WORKFLOW_NAME,
   DEFAULT_WORKFLOW_STATUSES,
@@ -40,6 +41,7 @@ import {
   JOB_NUMBER_PAD,
   MEMBER_INVITE_DEFAULTS,
   STATUS_CATEGORY_META,
+  type NotificationType,
   type PermissionFlag,
   type Priority,
   type Role,
@@ -469,6 +471,21 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
       projectId2,
     };
   });
+}
+
+/**
+ * Opts every fixture staff user in to the notification types that are OFF by default since the
+ * simplified UI (SIMPLIFICATION-PLAN §8: `NOTIFICATION_TYPE_META.defaultOn`), by inserting explicit
+ * `enabled = true` preference rows — the way a person does it under My account → Notifications.
+ * Tests of the older per-type notices (deadline_changed, job_declined, review_overdue, automation, …)
+ * call it after `seedMinimalOrg`; tests of the new defaults do not.
+ */
+export async function optInAllNotifications(db: DbLike, ids: SeedIds, types: readonly NotificationType[] = DEFAULT_OFF_NOTIFICATION_TYPES): Promise<void> {
+  const staff = (Object.keys(ids.users) as FixtureUserKey[]).filter((k) => k !== "client" && k !== "client2").map((k) => ids.users[k]);
+  const at = nowIso();
+  const rows = staff.flatMap((userId) => types.map((type) => ({ organisationId: ids.organisationId, userId, type, enabled: true, updatedAt: at })));
+  if (rows.length === 0) return;
+  await db.insert(schema.userNotificationPrefs).values(rows).onConflictDoNothing();
 }
 
 /**

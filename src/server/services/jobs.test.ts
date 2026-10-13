@@ -22,6 +22,7 @@ import {
   insertJobFixture,
   inviteDefaultsMember,
   makeTestDb,
+  optInAllNotifications,
   seedMinimalOrg,
   setUserFlags,
   type FixtureUserKey,
@@ -65,6 +66,8 @@ beforeEach(async () => {
   fakeClock.set(T0);
   db = await makeTestDb();
   ids = await seedMinimalOrg(db, { settings: { timeTrackingEnabled: true } });
+  // The simplified defaults (plan §8) turn most per-type notices off; these tests check the notices themselves.
+  await optInAllNotifications(db, ids);
 });
 afterEach(() => fakeClock.reset());
 

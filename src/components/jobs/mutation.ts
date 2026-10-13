@@ -9,11 +9,37 @@ import { ApiError, errorMessage } from "@/lib/api-client";
  * Shared mutation plumbing for client islands:
  *   success → toast.success + router.refresh()
  *   409     → `onConflict` (ConflictDialog) or a toast with a Reload action
+ *   stale   → a 403 / 409 marked by `markStalePage` (the simplified job actions, `@/components/job-simple`):
+ *             `onConflict` when given, else router.refresh() + the "This job has changed" toast
  *   400     → field errors handed back to the form
  *   other   → toast.error(errorMessage(err))
  */
 
 export type FieldErrors = Record<string, string[]>;
+
+/** The one toast for a page that no longer matches the job (SIMPLIFICATION-PLAN §9 "someone else just changed this job"). */
+export const STALE_PAGE_MESSAGE = "This job has changed — the page has been updated";
+
+const STALE_PAGE_FLAG = "stalePage";
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Re-labels a 403 / 409 from a simplified job action as a STALE PAGE: the buttons the viewer pressed
+ * belong to a job that has since moved on (another editor holds it, it was approved, cancelled, …), so
+ * the right response is a refresh, not a dialog or an error toast. Other errors pass through untouched.
+ */
+export function markStalePage(err: unknown): unknown {
+  if (!(err instanceof ApiError) || (err.status !== 403 && err.status !== 409)) return err;
+  const details = isRecord(err.details) ? err.details : {};
+  return new ApiError(err.status, err.code, err.message, { ...details, [STALE_PAGE_FLAG]: true }, err.current);
+}
+
+export function isStalePageError(err: unknown): boolean {
+  return err instanceof ApiError && isRecord(err.details) && err.details[STALE_PAGE_FLAG] === true;
+}
 
 /** What a dialog's submit handler resolves to: close (true), stay open (false), or show field errors. */
 export type DialogSubmitResult = boolean | { fieldErrors: FieldErrors };
@@ -67,6 +93,16 @@ export function useMutationRunner() {
           return { ok: false, error: err, fieldErrors: null, handled: false };
         }
         if (options.onError?.(err)) return { ok: false, error: err, fieldErrors: null, handled: true };
+        if (isStalePageError(err)) {
+          // A simple action from a page that is out of date: show the live job, say so once.
+          if (options.onConflict) {
+            options.onConflict(err);
+          } else {
+            router.refresh();
+            toast.info(STALE_PAGE_MESSAGE, err.isConflict ? undefined : err.message);
+          }
+          return { ok: false, error: err, fieldErrors: null, handled: true };
+        }
         if (err.isConflict) {
           if (options.onConflict) {
             options.onConflict(err);

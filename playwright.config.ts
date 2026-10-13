@@ -1,22 +1,24 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Playwright e2e (spec §40, ARCHITECTURE §13).
+ * Playwright e2e for the simplified product (docs/SIMPLIFICATION-PLAN.md; ARCHITECTURE §13).
  *
  * Two modes:
  * - `E2E_BASE_URL` set (e.g. `E2E_BASE_URL=http://localhost:3130 npx playwright test`):
- *   run against that already-running server. No web server is started and no
- *   database is touched — the specs create every job/user they need via the API.
- * - `E2E_BASE_URL` unset (`npm run e2e`): Playwright owns a dev server on :3100
- *   backed by the PGlite data dir `data/pglite-e2e`. The web server command first
- *   resets that database (`npm run e2e:prepare` = PGLITE_DATA_DIR=./data/pglite-e2e
- *   tsx src/db/reset.ts, i.e. the `db:reset` pipeline pointed at that dir).
- *   Playwright starts `webServer` BEFORE `globalSetup`, and PGlite allows one
- *   process per data dir (the server holds it open), so the reset is chained in
- *   front of the server command instead of living in globalSetup. `DATABASE_URL`
- *   is forced empty so e2e can never reach a remote database. When a server is already
- *   listening on :3100 (`reuseExistingServer`), stop it and run
- *   `npm run e2e:prepare && npm run e2e`.
+ *   run against that already-running server (the shared dev server on the SMALL demo). No web
+ *   server is started and no database is touched — the specs create every job/user they need
+ *   via the API and assert only on those.
+ * - `E2E_BASE_URL` unset (`npm run e2e`): Playwright owns a dev server on :3100 backed by the
+ *   PGlite data dir `data/pglite-e2e`. The web server command first resets that database with
+ *   the SMALL seed profile (`npm run e2e:prepare` = PGLITE_DATA_DIR=./data/pglite-e2e
+ *   SEED_PROFILE=small tsx src/db/reset.ts). Playwright starts `webServer` BEFORE `globalSetup`,
+ *   and PGlite allows one process per data dir (the server holds it open), so the reset is
+ *   chained in front of the server command instead of living in globalSetup. `DATABASE_URL` is
+ *   forced empty so e2e can never reach a remote database. When a server is already listening on
+ *   :3100 (`reuseExistingServer`), stop it and run `npm run e2e:prepare && npm run e2e`.
+ *
+ * Projects: `desktop` (1440×900) runs every spec except mobile.spec.ts; `mobile` (390×844, touch)
+ * runs mobile.spec.ts only (plan §3 phone tabs, §5 "pinned next step").
  */
 const OWN_PORT = 3100;
 const externalBaseURL = process.env.E2E_BASE_URL?.trim() || undefined;
@@ -44,7 +46,7 @@ export default defineConfig({
   },
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } }, testIgnore: /mobile\.spec\.ts/ },
-    // Spec §28 / §40: a 390×844 phone with touch (Pixel 7 user agent and DPR, iPhone-size viewport).
+    // A 390×844 phone with touch (Pixel 7 user agent and DPR, iPhone-size viewport).
     { name: "mobile", use: { ...devices["Pixel 7"], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 } }, testMatch: /mobile\.spec\.ts/ },
   ],
   webServer: externalBaseURL
@@ -54,6 +56,6 @@ export default defineConfig({
         url: `http://localhost:${OWN_PORT}/login`,
         reuseExistingServer: true,
         timeout: 240_000,
-        env: { PGLITE_DATA_DIR: "./data/pglite-e2e", DATABASE_URL: "" },
+        env: { PGLITE_DATA_DIR: "./data/pglite-e2e", DATABASE_URL: "", SEED_PROFILE: "small" },
       },
 });

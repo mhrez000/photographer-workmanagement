@@ -17,11 +17,22 @@
 import fs from "node:fs";
 import path from "node:path";
 import { count } from "drizzle-orm";
+import { DEFAULT_SEED_PROFILE, SEED_PROFILES, type SeedProfile } from "@/lib/constants";
 import type { Db } from "./index";
 
 export interface SeedDatabaseOptions {
   now?: Date;
   log?: (line: string) => void;
+  /** "small" (default) | "full" — see `resolveSeedProfile` / SIMPLIFICATION-PLAN §8. */
+  profile?: SeedProfile;
+}
+
+/** `SEED_PROFILE` env (default "small"); anything else is an error rather than a silent default. */
+export function resolveSeedProfile(raw: string | undefined = process.env.SEED_PROFILE): SeedProfile {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return DEFAULT_SEED_PROFILE;
+  if ((SEED_PROFILES as readonly string[]).includes(value)) return value as SeedProfile;
+  throw new Error(`SEED_PROFILE must be one of ${SEED_PROFILES.join(", ")} (got "${raw}")`);
 }
 
 /** Runs the demo seed + report + verify on `db`. Resolves true when everything passed. */
@@ -30,8 +41,9 @@ export async function seedDatabase(db: Db, options: SeedDatabaseOptions = {}): P
   const started = Date.now();
   const { organisations } = await import("./schema");
   const { runSeed } = await import("./seed/index");
-  const { buildReport } = await import("./seed/summary");
+  const { buildReport, buildSmallReport } = await import("./seed/summary");
   const { verifyDerived } = await import("./verify");
+  const profile = options.profile ?? resolveSeedProfile();
 
   const [existing] = await db.select({ n: count() }).from(organisations);
   if ((existing?.n ?? 0) > 0) {
@@ -40,8 +52,8 @@ export async function seedDatabase(db: Db, options: SeedDatabaseOptions = {}): P
   }
 
   const now = options.now ?? new Date();
-  out(`db:seed — generating history up to ${now.toISOString()}`);
-  const result = await runSeed(db, { now, log: out });
+  out(`db:seed — profile "${profile}", generating history up to ${now.toISOString()}`);
+  const result = await runSeed(db, { now, log: out, profile });
   out(`db:seed — ${result.stepsRun} queued steps executed; ${result.skipped.length} skipped`);
   for (const s of result.skipped.slice(0, 20)) out(`  skipped: ${s}`);
   out(
@@ -56,7 +68,7 @@ export async function seedDatabase(db: Db, options: SeedDatabaseOptions = {}): P
   }
   out(`db:seed — notifications marked read: ${result.notificationsRead.read} of ${result.notificationsRead.total}`);
 
-  const report = await buildReport(db, result.northlightId, now.getTime());
+  const report = profile === "full" ? await buildReport(db, result.northlightId, now.getTime()) : await buildSmallReport(db, result.northlightId, now.getTime());
   for (const line of report.lines) out(line);
   for (const c of report.checks) out(`  ${c.ok ? "ok  " : c.hard ? "FAIL" : "warn"} ${c.label}: ${c.detail}`);
 
@@ -71,7 +83,7 @@ export async function seedDatabase(db: Db, options: SeedDatabaseOptions = {}): P
     return false;
   }
   if (!report.ok) {
-    process.stderr.write("db:seed: spec §39 minimums not met.\n");
+    process.stderr.write(profile === "full" ? "db:seed: spec §39 minimums not met.\n" : "db:seed: the small demo did not cover every stage / scenario it promises.\n");
     return false;
   }
   return true;

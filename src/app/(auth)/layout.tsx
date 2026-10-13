@@ -3,9 +3,9 @@ import { CheckCircle2 } from "lucide-react";
 import { BrandMark } from "@/components/shell";
 
 const HIGHLIGHTS = [
-  "Every job, stage and hand-off on one timeline",
-  "Editor workloads and review bottlenecks at a glance",
-  "Revisions, links and comments with a full audit trail",
+  "One list of jobs, five plain stages, one next button",
+  "Every job says who it is waiting on",
+  "Five plain numbers per editor, and a permanent record of every change",
 ];
 
 /** Public auth chrome: brand panel (desktop) + centred form column. */
@@ -19,7 +19,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         </div>
         <div className="max-w-md">
           <h2 className="text-2xl font-semibold leading-tight tracking-tight text-ink">
-            The production desk for photography studios.
+            Shoot. Give it to an editor. Check it. Done.
           </h2>
           <ul className="mt-6 flex flex-col gap-3">
             {HIGHLIGHTS.map((item) => (
@@ -30,7 +30,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
             ))}
           </ul>
         </div>
-        <p className="text-xs text-ink-muted">Shoot · Edit · Review · Deliver</p>
+        <p className="text-xs text-ink-muted">Needs editor · With editor · Ready to check · Changes asked · Done</p>
         <div
           aria-hidden="true"
           className="pointer-events-none absolute -right-24 -bottom-24 size-80 rounded-full border-[28px] border-accent/10"

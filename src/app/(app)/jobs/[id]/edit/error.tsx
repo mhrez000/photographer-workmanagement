@@ -10,8 +10,8 @@ export default function EditJobError({ error, retry }: { error: Error & { digest
         title="This job couldn't be opened for editing"
         message="Something went wrong loading the job. No changes were made — try again."
         onRetry={retry}
-        homeHref="/workspace/all"
-        homeLabel="Back to All Work"
+        homeHref="/jobs"
+        homeLabel="Back to Jobs"
         digest={error.digest}
       />
     </PageContainer>

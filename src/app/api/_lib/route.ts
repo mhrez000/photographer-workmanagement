@@ -10,12 +10,16 @@
  *   cannot retarget another row).
  * - Query strings become plain objects (`?a=1&b=2&b=3` → `{ a: "1", b: ["2","3"] }`)
  *   and are parsed by the query's own Zod schema.
+ * - Advanced tools (SIMPLIFICATION-PLAN §8): every factory runs `gateAdvancedApi`
+ *   right after `requireContext()`, so a route whose path belongs to a hidden
+ *   feature (`./advanced.ts`) is a 404 JSON while the studio's switch is off.
  */
 import { getDb, type DbLike, type Tx } from "@/db/index";
 import type { AuthContext } from "@/lib/types";
 import { requireContext } from "@/server/auth/session";
 import { bodyOrNull, errorJson, handle, searchParamsToObject } from "@/server/http";
 import { withTxThenAutomations } from "@/server/services/_shared";
+import { advancedFeatureForApiPath, gateAdvancedApi, pathnameOf } from "./advanced";
 
 /** Next 16 route context: dynamic params arrive as a Promise. */
 export interface RouteParams<P extends Record<string, string>> {
@@ -29,6 +33,13 @@ type Service = (tx: Tx, ctx: AuthContext, input: unknown) => unknown;
 /** The request's query string as a plain object. */
 export function queryOf(req: Request): Query {
   return searchParamsToObject(new URL(req.url));
+}
+
+/** Staff context + the Advanced tools gate for this request's path (404 while off). */
+export async function requireRouteContext(req: Request): Promise<AuthContext> {
+  const ctx = await requireContext();
+  gateAdvancedApi(ctx, pathnameOf(req));
+  return ctx;
 }
 
 /**
@@ -45,7 +56,7 @@ export function withFields(body: unknown, extra: Record<string, unknown>): unkno
 /** GET without path params: `fn(db, ctx, query)`. */
 export function read(fn: (db: DbLike, ctx: AuthContext, query: Query, req: Request) => unknown) {
   return handle(async (req) => {
-    const ctx = await requireContext();
+    const ctx = await requireRouteContext(req);
     return fn(getDb(), ctx, queryOf(req), req);
   });
 }
@@ -56,7 +67,7 @@ export function readBy<K extends string = "id">(
   param: K = "id" as K,
 ) {
   return handle<RouteParams<Record<K, string>>>(async (req, { params }) => {
-    const ctx = await requireContext();
+    const ctx = await requireRouteContext(req);
     const value = (await params)[param];
     return fn(getDb(), ctx, value, queryOf(req), req);
   });
@@ -65,7 +76,7 @@ export function readBy<K extends string = "id">(
 /** POST/PUT/PATCH without path params: body → service in one tx. */
 export function mutate(service: Service) {
   return handle(async (req) => {
-    const ctx = await requireContext();
+    const ctx = await requireRouteContext(req);
     const input = await bodyOrNull(req);
     return withTxThenAutomations(ctx, (tx) => service(tx, ctx, input ?? {}));
   });
@@ -78,7 +89,7 @@ export function mutate(service: Service) {
  */
 export function mutateById(key: string, service: Service, opts: { withQuery?: boolean; extra?: Record<string, unknown> } = {}) {
   return handle<IdParams>(async (req, { params }) => {
-    const ctx = await requireContext();
+    const ctx = await requireRouteContext(req);
     const { id } = await params;
     let body = await bodyOrNull(req);
     if (opts.withQuery) body = withFields(body, coerceQuery(queryOf(req)));
@@ -133,13 +144,17 @@ export function notFoundRoute() {
  *   export const GET = methodNotAllowed(["POST"]);
  *
  * Body `{ error: { code: "method_not_allowed", message } }` + an `Allow` header.
+ * On a path that belongs to an Advanced-tools feature the gate runs first, so a
+ * hidden route is a 404 for EVERY method while the switch is off, never a 405
+ * that reveals it exists.
  */
 export function methodNotAllowed(allowed: readonly HttpMethod[]) {
   const allow = allowed.join(", ");
-  return handle(async (req) =>
-    Response.json(
+  return handle(async (req) => {
+    if (advancedFeatureForApiPath(pathnameOf(req)) !== null) await requireRouteContext(req);
+    return Response.json(
       { error: { code: "method_not_allowed", message: `${req.method.toUpperCase()} is not supported here. Allowed: ${allow}` } },
       { status: 405, headers: { allow } },
-    ),
-  );
+    );
+  });
 }

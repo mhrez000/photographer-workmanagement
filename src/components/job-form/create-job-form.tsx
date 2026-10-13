@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { GitBranch, Lock, Sparkles } from "lucide-react";
-import { CategoryPill, DueChip, PersonChip, PriorityPill, jobHref } from "@/components/jobs";
+import { ChevronDown, Lock } from "lucide-react";
+import { LinkProviderIcon, jobHref } from "@/components/jobs";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { DateInput } from "@/components/ui/date-input";
 import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
@@ -14,144 +15,121 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { api, ApiError, errorMessage } from "@/lib/api-client";
-import { NOTE_KIND_META, PRIORITIES, PRIORITY_META, type LinkKind, type NoteKind, type Priority, type Role } from "@/lib/constants";
-import { endOfCivilDayIso } from "@/lib/dates";
-import type { ClientOption, Job, JobTypeView, ProjectOption, UserOption, UserRef } from "@/lib/types";
-import { pluralise } from "@/lib/utils";
-import { FormSection } from "./form-section";
-import { dateWarnings, fromCivilInput, hoursError, parseHours, pickErrors, suggestJobName } from "./form-utils";
-import { LinksEditor, draftLinkError, filledLinks, newDraftLink, type DraftLink } from "./links-editor";
-import { PersonPicker, WorkloadNotice, usePeopleOptions } from "./person-picker";
+import { AVATAR_PALETTE, DEFAULT_USUAL_DAYS_TO_EDIT, SIMPLE_LINK_SLOTS, priorityForRush, type Role } from "@/lib/constants";
+import { addCivilDays } from "@/lib/dates";
+import type { Client, ClientOption, EditorPickerOption, Job, JobTypeView, UserOption } from "@/lib/types";
+import { cn, pluralise } from "@/lib/utils";
+import { deriveLinkProvider, isAllowedLinkUrl } from "@/lib/validation/links";
+import { ClientPicker, type ClientChoice } from "./client-picker";
+import { EditorPicker } from "./editor-picker";
+import { fromCivilInput, pickErrors } from "./form-utils";
+import { LinksEditor, draftLinkError, filledLinks, type DraftLink } from "./links-editor";
+import { PersonPicker } from "./person-picker";
 import { SubmitHint, formKeyDown, useUnsavedChangesWarning } from "./submit-hint";
-import { useClientProject } from "./use-client-project";
 
 export interface CreateJobFormProps {
-  viewer: { id: string; name: string; role: Role; avatarColour: string; isAdmin?: boolean; title?: string | null };
+  viewer: { id: string; name: string; role: Role; avatarColour: string; isAdmin?: boolean };
   timeZone: string;
+  /** Today's civil date in the studio timezone (the shoot date default). */
+  today: string;
   jobTypes: JobTypeView[];
+  /** "Usual days to edit" per job type id (null → DEFAULT_USUAL_DAYS_TO_EDIT). */
+  usualDays: Record<string, number | null>;
+  /** The last type of shoot this person used (plan §5), when it still exists. */
+  defaultJobTypeId: string | null;
   clients: ClientOption[];
-  /** Projects of `initialClientId`. */
-  projects: ProjectOption[];
   initialClientId: string | null;
-  initialProjectId: string | null;
+  /** Pre-filled address (e.g. from a project page while Advanced tools is on). */
+  initialAddress?: string;
+  /** Pre-selected editor (from an editor page's "Give them a job", plan §7); must be one of `editors`. */
+  initialEditorId?: string | null;
+  canCreateClient: boolean;
   /**
-   * Photographer field (docs/ROLES.md §4):
-   * - "pick": admins choose any active photographer (default: themselves);
-   * - "self": team members are always the photographer on jobs they create;
-   * - "required": editors must choose one (pre-filled with the studio default).
+   * Photographer field (docs/ROLES.md §4, plan §5 "Photographer (only if the studio has more than one)"):
+   * - "pick": owners choose; shown under More options only when `photographers.length > 1`;
+   * - "self": extra photographers are always the photographer on jobs they create (no field);
+   * - "required": editors must say who shot it (pre-filled with the owner / studio default).
    */
   photographerMode: "pick" | "self" | "required";
-  /** Pre-filled photographer for "pick" / "required". */
+  /** Active photographers of the studio (empty for "self"). */
+  photographers: UserOption[];
   defaultPhotographerId: string | null;
-  /**
-   * Editor field: "pick" (admins, members with Assign editors), "self" (editors:
-   * "Assign to me" or "Leave unassigned"), "none" (hidden).
-   */
+  /** Editor field: "pick" (owners, photographers with Assign editors), "self" (editors), "none" (hidden). */
   editorMode: "pick" | "self" | "none";
-  /** Note kinds the creator may add with the job (admin: photographer/client/internal; member: photographer/client; editor: editor). */
-  noteKinds: readonly NoteKind[];
-  /** Link kinds the creator may add (editors: their link kinds + raw files). Omit = every kind. */
-  linkKinds?: readonly LinkKind[];
-  canCreateClient: boolean;
-  canCreateProject: boolean;
-  /** Editors: "New project" is created together with the job (docs/ROLES.md §4.3). */
-  inlineNewProject?: boolean;
-  /** Editors usually create the job after the shoot: pre-fill today's date (civil YYYY-MM-DD). */
-  initialShootDate?: string;
+  /** Picker rows with "On their desk N · Late N" (empty unless editorMode is "pick"). */
+  editors: EditorPickerOption[];
   /** Where Cancel goes. */
-  cancelHref?: string;
+  cancelHref: string;
 }
 
 interface CreatedJob {
   job: Job;
 }
 
-type NoteDrafts = Partial<Record<NoteKind, string>>;
-
-/** Short guidance under each note box on the create form. */
-const NOTE_HINTS: Partial<Record<NoteKind, string>> = {
-  photographer: "Shot details, style, what to prioritise.",
-  client: "What the client asked for, in their words. Kept from editors and from the client.",
-  internal: "Pricing, client history — anything only the studio owner should read.",
-  editor: "What you noticed in the raw files, how you plan to edit.",
-};
-
-const PRIORITY_OPTIONS = PRIORITIES.map((p) => ({ value: p, label: PRIORITY_META[p].label }));
-
 /** Field order used to focus the first invalid control after a failed submit. */
-const FIELD_ORDER = ["clientId", "projectId", "jobTypeId", "name", "photographerId", "editorId", "shootDate", "dueDate", "reviewDueDate", "deliveryDueDate", "estimatedHours", "links"];
+const FIELD_ORDER = ["client", "name", "jobTypeId", "shootDate", "dueDate", "editorId", "photographerId", "rawUrl", "instructions", "deliveryDueDate", "links"];
+
+/** Due date default (plan §5): shoot date + that type's usual days to edit. */
+export function defaultDueFor(shootDate: string, jobTypeId: string, usualDays: Record<string, number | null>): string {
+  if (!shootDate) return "";
+  return addCivilDays(shootDate, usualDays[jobTypeId] ?? DEFAULT_USUAL_DAYS_TO_EDIT);
+}
+
+/** A stable palette colour for a client created from the form (no colour picker in the simple UI). */
+export function colourForName(name: string): string {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
+}
 
 /**
- * Create-job form (spec §4, §23, §24; ARCHITECTURE §10 `/jobs/new`).
- * POST /api/jobs, then the initial links and notes against the new job, then
- * redirect to it. ⌘/Ctrl+Enter submits.
+ * The New job form (docs/SIMPLIFICATION-PLAN.md §5): one screen, 8 fields, a collapsed "More options".
+ * POST /api/clients (only when a new name was typed) → POST /api/jobs with `autoProject` (the project is
+ * reused or created from the address behind the scenes) → the raw files link and any other links →
+ * open the job. ⌘/Ctrl+Enter submits.
  */
 export function CreateJobForm(props: CreateJobFormProps) {
-  const { viewer, timeZone, jobTypes, photographerMode, editorMode, noteKinds } = props;
-  const canPickPhotographer = photographerMode !== "self";
-  const canAssignEditor = editorMode === "pick";
-  const isEditorCreator = editorMode === "self";
+  const { viewer, today, jobTypes, usualDays, photographerMode, editorMode, photographers, editors } = props;
   const router = useRouter();
   const formRef = React.useRef<HTMLFormElement>(null);
+  const isEditorCreator = editorMode === "self";
+  const canPickEditor = editorMode === "pick";
+  const showPhotographer = photographerMode === "required" || (photographerMode === "pick" && photographers.length > 1);
+  const initialType = props.defaultJobTypeId && jobTypes.some((t) => t.id === props.defaultJobTypeId) ? props.defaultJobTypeId : (jobTypes[0]?.id ?? "");
 
-  const [jobTypeId, setJobTypeId] = React.useState<string>(jobTypes.length === 1 ? jobTypes[0].id : "");
-  const [name, setName] = React.useState("");
-  const [nameTouched, setNameTouched] = React.useState(false);
-  const [priority, setPriority] = React.useState<Priority>("normal");
-  const [photographerId, setPhotographerId] = React.useState<string | null>(canPickPhotographer ? props.defaultPhotographerId : viewer.id);
-  const [editorId, setEditorId] = React.useState<string | null>(null);
-  /** Editors: take the job themselves at creation, or leave it for the studio to assign. */
+  const [client, setClient] = React.useState<ClientChoice>(props.initialClientId ? { kind: "existing", id: props.initialClientId } : null);
+  const [name, setName] = React.useState(props.initialAddress ?? "");
+  const [jobTypeId, setJobTypeId] = React.useState(initialType);
+  const [shootDate, setShootDate] = React.useState(today);
+  const [dueDate, setDueDate] = React.useState(() => defaultDueFor(today, initialType, usualDays));
+  const [dueTouched, setDueTouched] = React.useState(false);
+  const [editorId, setEditorId] = React.useState<string | null>(
+    canPickEditor && props.initialEditorId && editors.some((e) => e.editor.id === props.initialEditorId) ? props.initialEditorId : null,
+  );
   const [selfAssign, setSelfAssign] = React.useState<"me" | "unassigned">("me");
-  const [dates, setDates] = React.useState({ shootDate: props.initialShootDate ?? "", dueDate: "", reviewDueDate: "", deliveryDueDate: "" });
-  const [hours, setHours] = React.useState(jobTypes.length === 1 && jobTypes[0].defaultEstimatedHours !== null ? String(jobTypes[0].defaultEstimatedHours) : "");
-  const [hoursTouched, setHoursTouched] = React.useState(false);
-  const [description, setDescription] = React.useState("");
-  const [links, setLinks] = React.useState<DraftLink[]>(() => [newDraftLink("raw_files")]);
-  const [notes, setNotes] = React.useState<NoteDrafts>({});
+  const [photographerId, setPhotographerId] = React.useState<string | null>(photographerMode === "self" ? viewer.id : props.defaultPhotographerId);
+  const [rawUrl, setRawUrl] = React.useState("");
+  const [rawTouched, setRawTouched] = React.useState(false);
+  const [instructions, setInstructions] = React.useState("");
+  const [moreOpen, setMoreOpen] = React.useState(false);
+  const [rush, setRush] = React.useState(false);
+  const [deliveryDueDate, setDeliveryDueDate] = React.useState("");
+  const [otherLinks, setOtherLinks] = React.useState<DraftLink[]>([]);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitted, setSubmitted] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [done, setDone] = React.useState(false);
 
+  const moreId = React.useId();
   const jobType = jobTypes.find((t) => t.id === jobTypeId) ?? null;
+  const usual = usualDays[jobTypeId] ?? DEFAULT_USUAL_DAYS_TO_EDIT;
+  const chosenEditor = canPickEditor ? (editors.find((e) => e.editor.id === editorId) ?? null) : null;
+  const chosenPhotographer = photographers.find((p) => p.id === photographerId) ?? null;
+  const rawTrimmed = rawUrl.trim();
+  const rawProvider = rawTrimmed && isAllowedLinkUrl(rawTrimmed) ? deriveLinkProvider(rawTrimmed) : null;
+  const rawError = rawTrimmed && !isAllowedLinkUrl(rawTrimmed) ? "Enter a full http:// or https:// link" : null;
 
-  const clientProject = useClientProject({
-    clients: props.clients,
-    projects: props.projects,
-    initialClientId: props.initialClientId,
-    initialProjectId: props.initialProjectId,
-    canCreateClient: props.canCreateClient,
-    canCreateProject: props.canCreateProject,
-    inlineNewProject: props.inlineNewProject,
-    clientEmptyHint: props.canCreateClient ? undefined : "Ask your studio owner to add this client.",
-    disabled: busy,
-    errors: { clientId: errors.clientId, projectId: errors.projectId },
-    onChange: ({ project }) => {
-      clearError("clientId", "projectId");
-      if (!nameTouched) setName(suggestJobName(project?.name, jobType));
-    },
-  });
-
-  const editors = usePeopleOptions("editor", canAssignEditor);
-  const photographers = usePeopleOptions("photographer", canPickPhotographer);
-  const selectedEditor: UserOption | null = editors.options.find((e) => e.id === editorId) ?? null;
-  const selectedPhotographer: UserRef | null = canPickPhotographer
-    ? (photographers.options.find((p) => p.id === photographerId) ?? null)
-    : { id: viewer.id, name: viewer.name, role: viewer.role, avatarColour: viewer.avatarColour, isActive: true, isAdmin: viewer.isAdmin, title: viewer.title };
-  const meAsEditor: UserRef = { id: viewer.id, name: viewer.name, role: viewer.role, avatarColour: viewer.avatarColour, isActive: true };
-  const previewEditor: UserRef | null = isEditorCreator ? (selfAssign === "me" ? meAsEditor : null) : selectedEditor;
-
-  const dirty =
-    !done &&
-    Boolean(
-      clientProject.clientId ||
-        name.trim() ||
-        description.trim() ||
-        editorId ||
-        Object.values(dates).some(Boolean) ||
-        filledLinks(links).length > 0 ||
-        Object.values(notes).some((n) => n?.trim()),
-    );
+  const dirty = !done && Boolean(client || name.trim() || instructions.trim() || rawTrimmed || editorId || filledLinks(otherLinks).length > 0);
   useUnsavedChangesWarning(dirty && !busy);
 
   function clearError(...keys: string[]) {
@@ -166,30 +144,32 @@ export function CreateJobForm(props: CreateJobFormProps) {
   const onJobTypeChange = (id: string) => {
     setJobTypeId(id);
     clearError("jobTypeId");
-    const next = jobTypes.find((t) => t.id === id) ?? null;
-    if (!nameTouched) setName(suggestJobName(clientProject.project?.name, next));
-    if (!hoursTouched) setHours(next?.defaultEstimatedHours !== null && next?.defaultEstimatedHours !== undefined ? String(next.defaultEstimatedHours) : "");
+    if (!dueTouched) setDueDate(defaultDueFor(shootDate, id, usualDays));
+  };
+  const onShootDateChange = (value: string) => {
+    setShootDate(value);
+    clearError("shootDate");
+    if (!dueTouched) setDueDate(defaultDueFor(value, jobTypeId, usualDays));
   };
 
   const validate = (): Record<string, string> => {
     const e: Record<string, string> = {};
-    if (!clientProject.clientId) e.clientId = "Choose the client";
-    if (!clientProject.projectId) e.projectId = "Choose the project (or create one)";
-    if (!jobTypeId) e.jobTypeId = "Choose a job type";
-    if (photographerMode === "required" && !photographerId) e.photographerId = "Choose the photographer who shot it";
-    if (!name.trim()) e.name = "Give the job a name";
-    const h = hoursError(hours);
-    if (h) e.estimatedHours = h;
-    if (links.some((l) => draftLinkError(l))) e.links = "Fix the highlighted links";
+    if (!client) e.client = props.canCreateClient ? "Pick a client, or type a new name" : "Pick the client";
+    if (!name.trim()) e.name = "Type the address or a short job name";
+    if (!jobTypeId) e.jobTypeId = "Choose the type of shoot";
+    if (photographerMode === "required" && !photographerId) e.photographerId = "Choose who shot it";
+    if (rawError) e.rawUrl = rawError;
+    if (otherLinks.some((l) => draftLinkError(l))) e.links = "Fix the highlighted links";
+    if (shootDate && dueDate && dueDate < shootDate) e.dueDate = "The due date is before the shoot";
     return e;
   };
 
   const focusFirstError = (errs: Record<string, string>) => {
     const first = FIELD_ORDER.find((k) => errs[k]);
     if (!first) return;
-    const box = first === "projectId" ? "clientId" : first;
+    if (["deliveryDueDate", "links", "photographerId"].includes(first) && !moreOpen && !(first === "photographerId" && photographerMode === "required")) setMoreOpen(true);
     requestAnimationFrame(() => {
-      const root = formRef.current?.querySelector<HTMLElement>(`[data-field="${box}"]`);
+      const root = formRef.current?.querySelector<HTMLElement>(`[data-field="${first}"]`);
       const el = root?.querySelector<HTMLElement>('[aria-invalid="true"]') ?? root?.querySelector<HTMLElement>("input, button, select, textarea");
       el?.scrollIntoView({ block: "center", behavior: "smooth" });
       el?.focus({ preventScroll: true });
@@ -202,35 +182,42 @@ export function CreateJobForm(props: CreateJobFormProps) {
     setSubmitted(true);
     const local = validate();
     setErrors(local);
-    if (Object.keys(local).length > 0) {
+    if (Object.keys(local).length > 0 || !client) {
       focusFirstError(local);
       return;
     }
 
     setBusy(true);
+    const address = name.trim();
+    let clientId: string;
     let created: CreatedJob;
     try {
-      const newProject = clientProject.newProject;
+      if (client.kind === "new") {
+        const row = await api.post<Client>("/api/clients", { name: client.name, colour: colourForName(client.name) });
+        clientId = row.id;
+        setClient({ kind: "existing", id: row.id });
+      } else {
+        clientId = client.id;
+      }
       created = await api.post<CreatedJob>("/api/jobs", {
-        name: name.trim(),
-        description: description.trim() || undefined,
-        clientId: clientProject.clientId ?? undefined,
-        // Editors' inline project is created with the job (`newProject` XOR `projectId`, docs/ROLES.md §4.3).
-        ...(newProject ? { newProject: { name: newProject.name, address: newProject.address ?? undefined } } : { projectId: clientProject.projectId }),
+        name: address,
+        description: instructions.trim() || undefined,
+        autoProject: { clientId, address },
         jobTypeId,
-        priority,
-        photographerId: canPickPhotographer ? photographerId : undefined,
-        editorId: isEditorCreator ? (selfAssign === "me" ? viewer.id : undefined) : canAssignEditor && editorId ? editorId : undefined,
-        shootDate: fromCivilInput(dates.shootDate) ?? undefined,
-        dueDate: fromCivilInput(dates.dueDate) ?? undefined,
-        reviewDueDate: fromCivilInput(dates.reviewDueDate) ?? undefined,
-        deliveryDueDate: fromCivilInput(dates.deliveryDueDate) ?? undefined,
-        estimatedHours: parseHours(hours) ?? undefined,
+        priority: priorityForRush(rush),
+        photographerId: photographerMode === "self" ? undefined : (photographerId ?? undefined),
+        editorId: isEditorCreator ? (selfAssign === "me" ? viewer.id : undefined) : canPickEditor && editorId ? editorId : undefined,
+        shootDate: fromCivilInput(shootDate) ?? undefined,
+        dueDate: fromCivilInput(dueDate),
+        deliveryDueDate: fromCivilInput(deliveryDueDate) ?? undefined,
       });
     } catch (err) {
       setBusy(false);
       if (err instanceof ApiError && err.code === "validation" && Object.keys(err.fieldErrors).length > 0) {
         const server = pickErrors(err.fieldErrors);
+        // The API speaks in its own field names; map the ones the form shows.
+        if (server.clientId) server.client = server.clientId;
+        if (server.autoProject) server.name = server.autoProject;
         setErrors(server);
         focusFirstError(server);
         toast.error("Check the highlighted fields", err.message !== "Validation failed" ? err.message : undefined);
@@ -240,378 +227,297 @@ export function CreateJobForm(props: CreateJobFormProps) {
       return;
     }
 
-    // Follow-ups against the new job. A failure here never loses the job.
+    // Links against the new job. A failure here never loses the job.
     const jobId = created.job.id;
     const failures: string[] = [];
-    for (const link of filledLinks(links)) {
+    const links: { kind: DraftLink["kind"]; url: string; label?: string }[] = [];
+    if (rawTrimmed) links.push({ kind: "raw_files", url: rawTrimmed });
+    for (const l of filledLinks(otherLinks)) links.push({ kind: l.kind, url: l.url.trim(), label: l.label.trim() || undefined });
+    for (const link of links) {
       try {
-        await api.post(`/api/jobs/${jobId}/links`, { kind: link.kind, url: link.url.trim(), label: link.label.trim() || undefined });
+        await api.post(`/api/jobs/${jobId}/links`, link);
       } catch (err) {
-        failures.push(`link (${errorMessage(err)})`);
-      }
-    }
-    for (const kind of noteKinds) {
-      const body = notes[kind]?.trim();
-      if (!body) continue;
-      try {
-        await api.post(`/api/jobs/${jobId}/notes`, { kind, body });
-      } catch (err) {
-        failures.push(`${NOTE_KIND_META[kind].label.toLowerCase()} (${errorMessage(err)})`);
+        failures.push(`${link.kind === "raw_files" ? "raw files link" : "link"} (${errorMessage(err)})`);
       }
     }
 
     setDone(true);
+    const sentTo = chosenEditor ? ` · sent to ${chosenEditor.editor.name}` : isEditorCreator && selfAssign === "me" ? " · it's on your desk" : "";
     if (failures.length > 0) {
-      toast.warning(`${created.job.jobNumber} created — ${pluralise(failures.length, "item")} not saved`, `Add again from the job: ${failures.join("; ")}`);
+      toast.warning(`${created.job.jobNumber} created — ${pluralise(failures.length, "link")} not saved`, `Add again from the job: ${failures.join("; ")}`);
     } else {
-      toast.success(`${created.job.jobNumber} created`, created.job.name);
+      toast.success(`${created.job.jobNumber} created${sentTo}`, created.job.name);
     }
     router.push(jobHref(jobId));
     router.refresh();
   };
 
-  const warnings = dateWarnings(dates);
-  const startsAs = previewEditor ? "assigned" : "new";
   const showErr = (key: string) => (submitted || key in errors ? errors[key] : undefined);
+  const submitLabel = chosenEditor ? `Create & send to ${chosenEditor.editor.name}` : isEditorCreator && selfAssign === "me" ? "Create & assign to me" : "Create job";
+  const moreCount = [rush, Boolean(deliveryDueDate), filledLinks(otherLinks).length > 0, showPhotographer && photographerMode === "pick" && photographerId !== props.defaultPhotographerId].filter(Boolean).length;
 
   return (
-    <>
-      <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_19rem]">
-        <form ref={formRef} onSubmit={onSubmit} onKeyDown={formKeyDown} noValidate aria-label="Create job" className="min-w-0">
-          <FormSection title="What & who for" description="Organisation → Client → Project → Job. Pick the project this work belongs to.">
-            <div className="grid gap-5 sm:grid-cols-2" data-field="clientId">
-              {clientProject.fields}
-            </div>
-            <div data-field="jobTypeId">
-              <FormField
-                label="Job type"
-                required
-                error={showErr("jobTypeId")}
-                description={
-                  jobType ? (
-                    <span className="inline-flex flex-wrap items-center gap-x-1.5">
-                      <GitBranch aria-hidden="true" className="size-3.5" />
-                      Uses the <strong className="font-medium text-ink-secondary">{jobType.workflow.name}</strong> workflow
-                      {jobType.defaultEstimatedHours !== null ? <span className="numeric">· typically {jobType.defaultEstimatedHours}h</span> : null}
-                    </span>
-                  ) : jobTypes.length === 0 ? (
-                    "No job types yet — an admin can add them in Settings → Job types."
-                  ) : (
-                    "Each type follows its own workflow."
-                  )
-                }
-              >
-                <Select value={jobTypeId} onChange={(e) => onJobTypeChange(e.target.value)} placeholder="Choose a job type" disabled={busy} required>
-                  {jobTypes.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-            </div>
-            <div data-field="name">
-              <FormField
-                label="Job name"
-                required
-                error={showErr("name")}
-                hint={
-                  nameTouched && clientProject.project && jobType && name !== suggestJobName(clientProject.project.name, jobType) ? (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 text-accent-ink hover:underline focus-ring rounded-xs"
-                      onClick={() => {
-                        setName(suggestJobName(clientProject.project?.name, jobType));
-                        setNameTouched(false);
-                      }}
-                    >
-                      <Sparkles aria-hidden="true" className="size-3" /> Use suggestion
-                    </button>
-                  ) : null
-                }
-                description={!nameTouched && name ? "Suggested from the project and job type — edit freely." : undefined}
-              >
-                <Input
-                  value={name}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    setNameTouched(true);
-                    clearError("name");
-                  }}
-                  placeholder="e.g. 123 Smith Street · Twilight"
-                  maxLength={200}
-                  disabled={busy}
-                  autoComplete="off"
-                />
-              </FormField>
-            </div>
-            <FormField label="Description" optional description="The brief: what the client wants, style, anything unusual.">
-              <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} maxLength={5000} disabled={busy} />
-            </FormField>
-          </FormSection>
+    <form ref={formRef} onSubmit={onSubmit} onKeyDown={formKeyDown} noValidate aria-label="Create job" className="mx-auto flex w-full max-w-2xl flex-col gap-5">
+      <div data-field="client">
+        <FormField label="Client" required error={showErr("client")} description={client?.kind === "new" ? `“${client.name}” is added as a new client when you create the job.` : undefined}>
+          {(control) => (
+            <ClientPicker
+              {...control}
+              clients={props.clients}
+              value={client}
+              onChange={(next) => {
+                setClient(next);
+                clearError("client");
+              }}
+              canCreate={props.canCreateClient}
+              disabled={busy}
+            />
+          )}
+        </FormField>
+      </div>
 
-          <FormSection
-            title="People"
-            description={
-              isEditorCreator
-                ? "Who shot it, and whether you edit it yourself. The studio can assign another editor later."
-                : canAssignEditor
-                  ? "Who shoots it and who edits it. You can assign or change the editor later."
-                  : "Who shoots it. The studio owner assigns the editor."
-            }
+      <div data-field="name">
+        <FormField label="Address / job name" required error={showErr("name")}>
+          <Input
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              clearError("name");
+            }}
+            placeholder="e.g. 8 Penrose St, Bondi"
+            maxLength={200}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </FormField>
+      </div>
+
+      <div className="grid gap-5 sm:grid-cols-3">
+        <div data-field="jobTypeId">
+          <FormField label="Type of shoot" required error={showErr("jobTypeId")}>
+            <Select value={jobTypeId} onChange={(e) => onJobTypeChange(e.target.value)} placeholder="Choose a type" disabled={busy || jobTypes.length === 0} required>
+              {jobTypes.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </Select>
+          </FormField>
+        </div>
+        <div data-field="shootDate">
+          <FormField label="Shoot date" error={showErr("shootDate")}>
+            <DateInput value={shootDate} onChange={(e) => onShootDateChange(e.target.value)} disabled={busy} />
+          </FormField>
+        </div>
+        <div data-field="dueDate">
+          <FormField
+            label="Due date"
+            error={showErr("dueDate")}
+            description={!dueTouched && jobType ? `${pluralise(usual, "day")} after the shoot, as usual for ${jobType.name}.` : undefined}
           >
-            <div className="grid gap-5 sm:grid-cols-2">
-              <div data-field="photographerId">
-                <FormField
-                  label="Photographer"
-                  required={photographerMode === "required"}
-                  error={showErr("photographerId") ?? photographers.error ?? undefined}
-                  description={
-                    photographerMode === "self"
-                      ? "You — you are the photographer on jobs you create."
-                      : photographerMode === "required"
-                        ? "Who shot it. They review your edit and deliver it."
-                        : undefined
-                  }
-                >
-                  {(control) =>
-                    canPickPhotographer ? (
-                      <PersonPicker
-                        {...control}
-                        kind="photographer"
-                        people={photographers.options}
-                        loading={photographers.loading}
-                        value={photographerId}
-                        onChange={(id) => {
-                          setPhotographerId(id);
-                          clearError("photographerId");
-                        }}
-                        clearLabel={photographerMode === "pick" ? "No photographer yet" : undefined}
-                        disabled={busy}
-                      />
-                    ) : (
-                      <div id={control.id} className="flex h-9 items-center gap-2 rounded-md border border-border bg-surface-sunken px-3 text-sm text-ink">
-                        <Avatar name={viewer.name} size="xs" colour={viewer.avatarColour || undefined} />
-                        <span className="truncate">{viewer.name}</span>
-                        <Lock aria-hidden="true" className="ml-auto size-3.5 text-ink-subtle" />
-                      </div>
-                    )
-                  }
-                </FormField>
-              </div>
-              {isEditorCreator ? (
-                <div data-field="editorId">
-                  <FormField
-                    label="Editor"
-                    error={showErr("editorId")}
-                    description={selfAssign === "me" ? "You edit it — the job starts as Assigned to you." : "The job starts as New; the studio assigns an editor."}
-                  >
-                    {(control) => (
-                      <SegmentedControl
-                        id={control.id}
-                        aria-label="Editor"
-                        value={selfAssign}
-                        onValueChange={(v) => {
-                          setSelfAssign(v);
-                          clearError("editorId");
-                        }}
-                        options={[
-                          { value: "me", label: "Assign to me" },
-                          { value: "unassigned", label: "Leave unassigned" },
-                        ]}
-                        className="self-start"
-                      />
-                    )}
-                  </FormField>
-                </div>
-              ) : canAssignEditor ? (
-                <div data-field="editorId" className="flex flex-col gap-2">
-                  <FormField
-                    label="Editor"
-                    optional
-                    error={showErr("editorId") ?? editors.error ?? undefined}
-                    description={!selectedEditor ? "Leave empty to assign later — the job starts as New." : undefined}
-                  >
-                    {(control) => (
-                      <PersonPicker
-                        {...control}
-                        kind="editor"
-                        people={editors.options}
-                        loading={editors.loading}
-                        value={editorId}
-                        onChange={(id) => {
-                          setEditorId(id);
-                          clearError("editorId");
-                        }}
-                        clearLabel="Assign later"
-                        disabled={busy}
-                      />
-                    )}
-                  </FormField>
-                  <WorkloadNotice person={selectedEditor} />
-                </div>
-              ) : null}
-            </div>
-          </FormSection>
+            <DateInput
+              value={dueDate}
+              onChange={(e) => {
+                setDueDate(e.target.value);
+                setDueTouched(true);
+                clearError("dueDate");
+              }}
+              disabled={busy}
+            />
+          </FormField>
+        </div>
+      </div>
 
-          <FormSection title="Schedule" description={`Dates are in the studio's timezone (${timeZone}). The editing deadline drives Overdue and Due today.`}>
-            <div className="grid gap-5 sm:grid-cols-2">
-              {(
-                [
-                  ["shootDate", "Shoot date", "When the photos are taken."],
-                  ["dueDate", "Editing deadline", "When the edit is due."],
-                  ["reviewDueDate", "Review deadline", "Empty = set automatically when work is submitted."],
-                  ["deliveryDueDate", "Delivery date — visible to the client when shared", "When the client receives it."],
-                ] as const
-              ).map(([key, label, hint]) => (
-                <div key={key} data-field={key}>
-                  <FormField label={label} optional error={showErr(key)} description={hint}>
-                    <DateInput
-                      value={dates[key]}
-                      onChange={(e) => {
-                        setDates((d) => ({ ...d, [key]: e.target.value }));
-                        clearError(key);
-                      }}
-                      disabled={busy}
-                    />
-                  </FormField>
-                </div>
-              ))}
-            </div>
-            {warnings.length > 0 ? (
-              <ul className="flex flex-col gap-1 rounded-md border border-warning/25 bg-warning-soft/50 px-3 py-2 text-sm text-warning-fg" role="status">
-                {warnings.map((w) => (
-                  <li key={w}>{w}</li>
-                ))}
-              </ul>
-            ) : null}
-          </FormSection>
+      {canPickEditor ? (
+        <div data-field="editorId">
+          <FormField
+            label="Editor"
+            optional
+            error={showErr("editorId")}
+            description={chosenEditor ? `${chosenEditor.editor.name} gets it as soon as you create the job.` : "Decide later and the job waits in Needs editor."}
+          >
+            {(control) => (
+              <EditorPicker
+                {...control}
+                editors={editors}
+                value={editorId}
+                onChange={(id) => {
+                  setEditorId(id);
+                  clearError("editorId");
+                }}
+                disabled={busy}
+              />
+            )}
+          </FormField>
+        </div>
+      ) : isEditorCreator ? (
+        <div data-field="editorId">
+          <FormField label="Editor" error={showErr("editorId")} description={selfAssign === "me" ? "It lands on your desk straight away." : "It waits in Needs editor until the studio hands it out."}>
+            {(control) => (
+              <SegmentedControl
+                id={control.id}
+                aria-label="Editor"
+                value={selfAssign}
+                onValueChange={(v) => {
+                  setSelfAssign(v);
+                  clearError("editorId");
+                }}
+                options={[
+                  { value: "me", label: "Assign to me" },
+                  { value: "unassigned", label: "Leave unassigned" },
+                ]}
+                className="self-start"
+              />
+            )}
+          </FormField>
+        </div>
+      ) : null}
 
-          <FormSection title="Priority & effort" description="Priority orders queues; estimated hours feed editor workload.">
-            <FormField label="Priority">
-              {(control) => (
-                <SegmentedControl
-                  id={control.id}
-                  aria-label="Priority"
-                  options={PRIORITY_OPTIONS}
-                  value={priority}
-                  onValueChange={(v) => setPriority(v)}
-                  className="self-start"
-                />
-              )}
-            </FormField>
-            <div data-field="estimatedHours" className="sm:max-w-56">
-              <FormField label="Estimated hours" optional error={showErr("estimatedHours")} description={jobType?.defaultEstimatedHours !== null && jobType ? `Default for ${jobType.name}: ${jobType.defaultEstimatedHours}h` : undefined}>
-                <Input
-                  inputMode="decimal"
-                  value={hours}
-                  onChange={(e) => {
-                    setHours(e.target.value);
-                    setHoursTouched(true);
-                    clearError("estimatedHours");
+      {photographerMode === "required" ? (
+        <div data-field="photographerId">
+          <FormField label="Shot by" required error={showErr("photographerId")} description="They check your edit when you send it.">
+            {(control) =>
+              photographers.length > 1 ? (
+                <PersonPicker
+                  {...control}
+                  kind="photographer"
+                  people={photographers}
+                  value={photographerId}
+                  onChange={(id) => {
+                    setPhotographerId(id);
+                    clearError("photographerId");
                   }}
-                  trailing="h"
-                  mono
                   disabled={busy}
-                  autoComplete="off"
                 />
+              ) : (
+                <LockedPerson id={control.id} name={chosenPhotographer?.name ?? viewer.name} colour={chosenPhotographer?.avatarColour} />
+              )
+            }
+          </FormField>
+        </div>
+      ) : null}
+
+      <div data-field="rawUrl">
+        <FormField label="Raw files link" optional error={showErr("rawUrl") ?? (rawTouched ? rawError : null)} description="Where the editor finds the photos — Dropbox, Drive, WeTransfer, a shared folder.">
+          <Input
+            type="url"
+            inputMode="url"
+            value={rawUrl}
+            onChange={(e) => {
+              setRawUrl(e.target.value);
+              clearError("rawUrl");
+            }}
+            onBlur={() => setRawTouched(true)}
+            placeholder="https://"
+            leading={<LinkProviderIcon provider={rawProvider ?? "other"} url={rawTrimmed || null} />}
+            disabled={busy}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </FormField>
+      </div>
+
+      <div data-field="instructions">
+        <FormField label="Instructions for the editor" optional description="Style, what to prioritise, anything unusual. The editor sees this on the job.">
+          <Textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={3} maxLength={5000} disabled={busy} placeholder="e.g. Bright and airy, replace the sky on the front shots, 25 photos max." />
+        </FormField>
+      </div>
+
+      <div className="rounded-lg border border-border">
+        <button
+          type="button"
+          aria-expanded={moreOpen}
+          aria-controls={moreId}
+          onClick={() => setMoreOpen((o) => !o)}
+          className="flex w-full items-center justify-between gap-3 rounded-lg px-4 py-3 text-left text-sm font-medium text-ink hover:bg-surface-muted focus-ring"
+        >
+          <span>
+            More options
+            {!moreOpen && moreCount > 0 ? <span className="ml-2 rounded-full bg-accent-soft px-2 py-0.5 text-2xs font-semibold text-accent-ink">{moreCount} set</span> : null}
+          </span>
+          <ChevronDown aria-hidden="true" className={cn("size-4 text-ink-subtle transition-transform duration-(--motion-fast)", moreOpen && "rotate-180")} />
+        </button>
+        <div id={moreId} hidden={!moreOpen} className="flex flex-col gap-5 border-t border-border px-4 pb-5 pt-4">
+          <Checkbox label="Rush job" description="Shows a red Rush badge and sorts it to the top." checked={rush} onChange={(e) => setRush(e.target.checked)} disabled={busy} />
+
+          {showPhotographer && photographerMode === "pick" ? (
+            <div data-field="photographerId" className="sm:max-w-sm">
+              <FormField label="Photographer" error={showErr("photographerId")} description="Who shot it. They check the edits on their own shoots.">
+                {(control) => (
+                  <PersonPicker
+                    {...control}
+                    kind="photographer"
+                    people={photographers}
+                    value={photographerId}
+                    onChange={(id) => {
+                      setPhotographerId(id);
+                      clearError("photographerId");
+                    }}
+                    clearLabel="No photographer yet"
+                    disabled={busy}
+                  />
+                )}
               </FormField>
             </div>
-          </FormSection>
-
-          <FormSection title="Links" description="External links only — raw files, editing workspace, references. Nothing is uploaded here.">
-            <div data-field="links">
-              <LinksEditor links={links} kinds={props.linkKinds} onChange={(next) => { setLinks(next); clearError("links"); }} showErrors={submitted} disabled={busy} />
-            </div>
-          </FormSection>
-
-          {noteKinds.length > 0 ? (
-            <FormSection
-              title="Notes"
-              description={
-                noteKinds.some((k) => !NOTE_KIND_META[k].editorReadable)
-                  ? "Editors see photographer notes. Client notes and internal notes stay with the studio — editors never see them."
-                  : "Visible to the photographer, the editor and the studio owner."
-              }
-            >
-              {noteKinds.map((kind) => (
-                <FormField
-                  key={kind}
-                  label={NOTE_KIND_META[kind].label}
-                  optional
-                  description={NOTE_HINTS[kind]}
-                  hint={
-                    !NOTE_KIND_META[kind].editorReadable ? (
-                      <span className="inline-flex items-center gap-1">
-                        <Lock aria-hidden="true" className="size-3" /> Not visible to editors
-                      </span>
-                    ) : undefined
-                  }
-                >
-                  <Textarea value={notes[kind] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [kind]: e.target.value }))} rows={kind === "internal" ? 2 : 3} disabled={busy} />
-                </FormField>
-              ))}
-            </FormSection>
           ) : null}
 
-          <div className="sticky bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px))] z-(--z-page-sticky) -mx-4 mt-2 flex items-center justify-between gap-3 border-t border-border bg-canvas/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:mx-0 lg:rounded-t-lg lg:px-0">
-            <SubmitHint action="create" />
-            <div className="ml-auto flex items-center gap-2">
-              <Button variant="ghost" href={props.cancelHref ?? "/workspace/my"} disabled={busy}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={busy}>
-                Create job
-              </Button>
-            </div>
+          <div data-field="deliveryDueDate" className="sm:max-w-xs">
+            <FormField label="Client delivery date" optional error={showErr("deliveryDueDate")} description="Shown to the client when they use the portal.">
+              <DateInput
+                value={deliveryDueDate}
+                onChange={(e) => {
+                  setDeliveryDueDate(e.target.value);
+                  clearError("deliveryDueDate");
+                }}
+                disabled={busy}
+              />
+            </FormField>
           </div>
-        </form>
 
-        <aside aria-label="Job preview" className="hidden xl:block">
-          <div className="sticky top-20 flex flex-col gap-4 rounded-lg border border-border bg-surface p-5 shadow-xs">
-            <div>
-              <p className="eyebrow">Preview</p>
-              <p className="mt-1 text-md font-semibold leading-6 text-ink break-words">{name.trim() || <span className="text-ink-subtle">Untitled job</span>}</p>
-              <p className="mt-0.5 truncate text-sm text-ink-muted">
-                {clientProject.client ? clientProject.client.name : "No client"}
-                {clientProject.project ? ` / ${clientProject.project.name}` : ""}
+          <div data-field="links" className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink">Other links</span>
+            <p className="text-sm text-ink-muted">Floor plan, references, an editing workspace — anything that is not the raw files.</p>
+            <LinksEditor
+              links={otherLinks}
+              kinds={SIMPLE_LINK_SLOTS.other}
+              emptyText="No other links yet."
+              onChange={(next) => {
+                setOtherLinks(next);
+                clearError("links");
+              }}
+              showErrors={submitted}
+              disabled={busy}
+            />
+            {showErr("links") ? (
+              <p role="alert" className="text-sm text-danger">
+                {showErr("links")}
               </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <CategoryPill category={startsAs} size="sm" label={startsAs === "assigned" ? "Starts as Assigned" : "Starts as New"} />
-              <PriorityPill priority={priority} />
-              {dates.dueDate ? <DueChip due={endOfCivilDayIso(dates.dueDate, timeZone)} timeZone={timeZone} /> : null}
-            </div>
-            <dl className="flex flex-col gap-2.5 border-t border-border pt-4 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-muted">Photographer</dt>
-                <dd className="min-w-0">
-                  <PersonChip user={selectedPhotographer} size="xs" emptyLabel="None yet" />
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-muted">Editor</dt>
-                <dd className="min-w-0">
-                  <PersonChip user={previewEditor} size="xs" emptyLabel="Assign later" />
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-muted">Workflow</dt>
-                <dd className="truncate text-ink">{jobType?.workflow.name ?? "—"}</dd>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-muted">Links</dt>
-                <dd className="numeric text-ink">{filledLinks(links).length}</dd>
-              </div>
-            </dl>
-            <p className="border-t border-border pt-4 text-xs text-ink-subtle">
-              Everything you set here is recorded in the job&apos;s history. The job number is assigned when you create it.
-            </p>
+            ) : null}
           </div>
-        </aside>
+        </div>
       </div>
-      {clientProject.dialogs}
-    </>
+
+      <div className="sticky bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px))] z-(--z-page-sticky) -mx-4 mt-1 flex items-center justify-between gap-3 border-t border-border bg-canvas/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:mx-0 lg:rounded-t-lg lg:px-0">
+        <SubmitHint action="create" />
+        <div className="ml-auto flex w-full items-center gap-2 sm:w-auto">
+          <Button variant="ghost" href={props.cancelHref} disabled={busy} className="hidden sm:inline-flex">
+            Cancel
+          </Button>
+          <Button type="submit" loading={busy} className="w-full sm:w-auto">
+            {submitLabel}
+          </Button>
+        </div>
+      </div>
+    </form>
   );
 }
 
+function LockedPerson({ id, name, colour }: { id: string; name: string; colour?: string | null }) {
+  return (
+    <div id={id} className="flex h-9 items-center gap-2 rounded-md border border-border bg-surface-sunken px-3 text-sm text-ink">
+      <Avatar name={name} size="xs" colour={colour || undefined} />
+      <span className="truncate">{name}</span>
+      <Lock aria-hidden="true" className="ml-auto size-3.5 text-ink-subtle" />
+    </div>
+  );
+}

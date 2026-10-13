@@ -10,12 +10,12 @@ import { pluralise } from "@/lib/utils";
 import { loadOrgSettings } from "@/server/queries/metrics";
 import { listUsers } from "@/server/queries/users";
 import { getWorkloads } from "@/server/queries/workloads";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Workloads" };
 
 export default async function WorkloadsPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("workloads", "/editors"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "workloads.view_team");
   const rows = await load(() => getWorkloads(db, ctx));
   const settings = await loadOrgSettings(db, ctx);

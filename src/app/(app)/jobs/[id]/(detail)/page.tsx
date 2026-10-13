@@ -1,40 +1,25 @@
 import type { Metadata } from "next";
-import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { PageContainer } from "@/components/shell";
-import { JobClientAccessSection } from "@/components/sharing/sections";
 import {
-  ActivityTab,
-  CommentsTab,
-  FactsRail,
-  HistoryTab,
-  JobHeader,
-  JobTabs,
-  LinksTab,
-  NotesTab,
-  OverviewTab,
-  RevisionsTab,
-  TimeTab,
-  TimelineTab,
-  ACTIVITY_GROUPS,
-  isActivityGroup,
-  isJobTab,
-  type ActivityGroup,
-  type JobTab,
-  type LinkPermissions,
-  type NotePermissions,
-} from "@/components/job-detail";
-import { CATEGORY_GROUPS, NOTE_KINDS, type NoteKind } from "@/lib/constants";
-import type { DeliverContext } from "@/lib/sharing";
+  ChangesAskedSection,
+  FilesSection,
+  FromClient,
+  InstructionsSection,
+  JobHeaderSimple,
+  MessagesThread,
+  NextStepCard,
+  PrivateNotes,
+  SideColumn,
+  WhoDidWhat,
+} from "@/components/job-simple";
+import { SIMPLE_LINK_SLOTS, type LinkKind, type NoteKind } from "@/lib/constants";
 import type { CommentNode } from "@/lib/types";
-import { allowed, load, pageContext, param } from "@/server/page";
-import { NotFoundError } from "@/server/errors";
 import { loadJobRef } from "@/server/auth/job-ref";
-import { isAdmin } from "@/server/auth/permissions";
-import { getJobDetail } from "@/server/queries/jobDetail";
-import { getJobActivity, getJobHistory, getJobTimeline } from "@/server/queries/jobHistory";
+import { NotFoundError } from "@/server/errors";
+import { EDITOR_HOME_PATH, allowed, load, pageContext, param } from "@/server/page";
+import { getJobPageSimple } from "@/server/queries/jobPageSimple";
 import { getJobRowByNumber, getJobRowsByIds } from "@/server/queries/jobs";
-import { getJobClientAccess } from "@/server/queries/portal";
 
 /** "PJ-0042", "pj-42" — a human job number rather than an id. */
 const JOB_NUMBER = /^[A-Za-z]{1,8}-\d{1,8}$/;
@@ -50,10 +35,17 @@ export async function generateMetadata({ params }: PageProps<"/jobs/[id]">): Pro
   }
 }
 
-function flattenComments(nodes: readonly CommentNode[]): CommentNode[] {
-  return nodes.flatMap((n) => [n, ...flattenComments(n.replies)]);
+function flatten(nodes: readonly CommentNode[]): CommentNode[] {
+  return nodes.flatMap((n) => [n, ...flatten(n.replies)]);
 }
 
+/**
+ * The job page (docs/SIMPLIFICATION-PLAN.md §5): one scrolling page, no tabs.
+ * Header → Next step → Files → Instructions → Changes asked → Messages →
+ * Private notes → From the client → Who did what, with the details column
+ * beside it (below it on phones, where the next-step card is pinned at the
+ * bottom). The complete audit log stays one click away at /jobs/[id]/history.
+ */
 export default async function JobDetailPage({ params, searchParams }: PageProps<"/jobs/[id]">) {
   const [{ id: rawId }, sp] = await Promise.all([params, searchParams]);
   const { ctx, db } = await pageContext();
@@ -79,170 +71,87 @@ export default async function JobDetailPage({ params, searchParams }: PageProps<
     }
   }
 
-  const detail = await load(() => getJobDetail(db, ctx, id));
-  const { job, actions } = detail;
+  // Old tab links: the full audit log has its own page; every other tab is now a section of this one.
+  if (param(sp, "tab") === "history" || param(sp, "view") === "history") redirect(`/jobs/${id}/history`);
+
+  const page = await load(() => getJobPageSimple(db, ctx, id));
+  const { header, files, permissions, sideColumn } = page;
   // The complete permission ref (draft window, past editors, project sharing) — docs/ROLES.md §2.1.
-  const { ref } = await load(() => loadJobRef(db, ctx, job.id));
-  const linkPeople = isAdmin(ctx);
+  const { ref } = await load(() => loadJobRef(db, ctx, header.id));
+  const now = ctx.now();
+  const isEditor = ctx.role === "editor";
 
-  // Deliver dialog (ROLES.md §7.3): only when the viewer can deliver and the client has the portal on.
-  let deliver: DeliverContext | null = null;
-  if (actions.transitions.some((t) => t.toStatus.category === "delivered" && !t.isReopen)) {
-    const access = await getJobClientAccess(db, ctx, job.id).catch(() => null);
-    if (access && access.client.portalEnabled && !access.client.archived) {
-      deliver = {
-        clientName: access.client.name,
-        visibleToClient: access.visibleToClient,
-        canShareJob: access.can.shareJob,
-        approvedAt: job.approvedAt,
-        links: access.links,
-      };
-    }
+  // Fine-grained bits the page model does not carry.
+  const canAddRaw = allowed(ctx, "link.add", { job: ref, kind: "raw_files" });
+  const otherKinds: LinkKind[] = SIMPLE_LINK_SLOTS.other.filter((kind) => allowed(ctx, "link.add", { job: ref, kind }));
+  const instructionKind: NoteKind = isEditor ? "editor" : "photographer";
+  const addInstructionsAs = allowed(ctx, "note.add", { job: ref, kind: instructionKind }) ? instructionKind : null;
+  const privateKind = permissions.canAddPrivateNote ? (allowed(ctx, "note.add", { job: ref, kind: "internal" }) ? "internal" : "client") : null;
+  const deletable: Record<string, boolean> = {};
+  for (const c of flatten(page.messages)) {
+    deletable[c.id] = c.deletedAt === null && allowed(ctx, "comment.delete", { job: ref, authorUserId: c.author.id, createdAt: c.createdAt, deletedAt: c.deletedAt, kind: c.kind });
   }
-  // A team member without "Review submissions" (ROLES.md §4.4): the review is the owner's.
-  const reviewHint =
-    ctx.role === "photographer" && !isAdmin(ctx) && !ctx.canReviewSubmissions && CATEGORY_GROUPS.REVIEWER_HOLDS.includes(job.statusCategory)
-      ? "Your studio owner reviews this job"
-      : null;
+  const participants = [header.shotBy?.name, header.editedBy?.name].filter((n): n is string => Boolean(n));
 
-  // Tabs available to this viewer.
-  const showTime = ctx.settings.timeTrackingEnabled || detail.sessions.length > 0;
-  const readableNoteKinds: NoteKind[] = NOTE_KINDS.filter((kind) => allowed(ctx, "note.read", { job: ref, kind }));
-  const commentCount = flattenComments(detail.comments).filter((c) => c.deletedAt === null).length;
-  const tabs: { key: JobTab; count?: number }[] = [
-    { key: "overview" },
-    { key: "links", count: detail.links.filter((s) => s.current).length },
-    { key: "notes", count: detail.notes.filter((n) => n.archivedAt === null).length },
-    { key: "comments", count: commentCount },
-    { key: "revisions", count: detail.revisions.length },
-    { key: "timeline" },
-    { key: "activity" },
-    { key: "history" },
-    ...(showTime ? [{ key: "time" as const, count: detail.sessions.length }] : []),
-  ];
-  const requested = param(sp, "tab");
-  const active: JobTab = isJobTab(requested) && tabs.some((t) => t.key === requested) ? requested : "overview";
-
-  let panel: ReactNode;
-  switch (active) {
-    case "links": {
-      const permissions: Record<string, LinkPermissions> = {};
-      for (const slot of detail.links) {
-        const l = slot.current;
-        if (!l) continue;
-        const res = { job: ref, kind: l.kind, addedByUserId: l.addedBy.id };
-        permissions[l.id] = { canReplace: allowed(ctx, "link.replace", res), canRemove: allowed(ctx, "link.remove", res) };
-      }
-      panel = <LinksTab jobId={job.id} slots={detail.links} canAddKinds={actions.canAddLinkKinds} permissions={permissions} timeZone={tz} />;
-      break;
-    }
-    case "notes": {
-      const permissions: Record<string, NotePermissions> = {};
-      for (const n of detail.notes) {
-        const res = { job: ref, kind: n.kind, authorUserId: n.author.id };
-        permissions[n.id] = { canEdit: allowed(ctx, "note.edit", res), canArchive: allowed(ctx, "note.archive", res) };
-      }
-      const kind = param(sp, "kind");
-      panel = (
-        <NotesTab
-          jobId={job.id}
-          notes={detail.notes}
-          readableKinds={readableNoteKinds}
-          canAddKinds={actions.canAddNoteKinds}
-          permissions={permissions}
-          timeZone={tz}
-          initialKind={kind && (NOTE_KINDS as readonly string[]).includes(kind) ? (kind as NoteKind) : null}
-        />
-      );
-      break;
-    }
-    case "comments": {
-      const deletable: Record<string, boolean> = {};
-      for (const c of flattenComments(detail.comments)) {
-        deletable[c.id] = c.deletedAt === null && allowed(ctx, "comment.delete", { job: ref, authorUserId: c.author.id, createdAt: c.createdAt, deletedAt: c.deletedAt, kind: c.kind });
-      }
-      panel = (
-        <CommentsTab
-          jobId={job.id}
-          comments={detail.comments}
-          revisions={detail.revisions}
-          canComment={actions.canComment}
-          deletable={deletable}
-          timeZone={tz}
-          respondTo={param(sp, "respond") ?? null}
-          autoFocus={param(sp, "compose") === "1"}
-        />
-      );
-      break;
-    }
-    case "revisions":
-      panel = (
-        <RevisionsTab
-          jobId={job.id}
-          jobVersion={job.version}
-          revisions={detail.revisions}
-          comments={detail.comments}
-          timeZone={tz}
-          canEditOpen={allowed(ctx, "revision.request", ref)}
-          canWithdraw={actions.canWithdrawRevision}
-          canRespond={actions.canComment}
-        />
-      );
-      break;
-    case "timeline": {
-      let timeline = null;
-      try {
-        timeline = await getJobTimeline(db, ctx, job.id);
-      } catch {
-        timeline = null; // bottleneck flags are an enhancement; the stages come from the detail.
-      }
-      panel = <TimelineTab stages={detail.stages} timeline={timeline} timeZone={tz} now={ctx.now()} />;
-      break;
-    }
-    case "activity": {
-      const groups = (param(sp, "events") ?? "").split(",").filter(isActivityGroup) as ActivityGroup[];
-      const eventType = groups.flatMap((g) => [...ACTIVITY_GROUPS[g].types]);
-      const initial = await load(() => getJobActivity(db, ctx, job.id, { limit: 50, ...(eventType.length > 0 ? { eventType } : {}) }));
-      panel = <ActivityTab key={groups.join(",")} jobId={job.id} initial={initial} groups={groups} timeZone={tz} />;
-      break;
-    }
-    case "history": {
-      const entries = await load(() => getJobHistory(db, ctx, job.id));
-      panel = <HistoryTab entries={entries} timeZone={tz} current={job.status} />;
-      break;
-    }
-    case "time":
-      panel = <TimeTab sessions={detail.sessions} timeZone={tz} timeTrackingEnabled={ctx.settings.timeTrackingEnabled} ownOnly={!allowed(ctx, "timer.view_others", ref)} />;
-      break;
-    default:
-      panel = <OverviewTab detail={detail} timeZone={tz} readableNoteKinds={readableNoteKinds} />;
-  }
+  const back = isEditor ? { href: EDITOR_HOME_PATH, label: "Back to My jobs" } : { href: "/jobs", label: "Back to Jobs" };
 
   return (
-    <PageContainer className="gap-0 pb-36 lg:pb-8">
-      <JobHeader
-        detail={detail}
-        timeZone={tz}
-        canOverride={allowed(ctx, "job.transition_override", ref)}
-        linkPeople={linkPeople}
-        viewerId={ctx.userId}
-        timeTrackingEnabled={ctx.settings.timeTrackingEnabled}
-        deliver={deliver}
-        reviewHint={reviewHint}
-      />
-      {/* Facts sit beside the tabs only at xl (≥1280); narrower, the tab column keeps the full width and the facts follow below. */}
-      <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="min-w-0">
-          <JobTabs active={active} tabs={tabs} editHref={actions.canEditFields ? `/jobs/${job.id}/edit` : null}>
-            {panel}
-          </JobTabs>
-        </div>
-        <aside aria-label="Job facts" className="min-w-0 xl:pt-1">
-          <FactsRail detail={detail} timeZone={tz} viewerId={ctx.userId} timeTrackingEnabled={ctx.settings.timeTrackingEnabled} />
-          <div className="mt-6">
-            <JobClientAccessSection ctx={ctx} db={db} jobId={job.id} />
+    <PageContainer className="gap-5 pb-3 lg:pb-8">
+      <JobHeaderSimple page={page} timeZone={tz} backHref={back.href} backLabel={back.label} />
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="flex min-w-0 flex-col gap-5">
+          {/* Desktop: the next step leads the page. On phones it is pinned at the bottom (below). */}
+          <div className="hidden lg:block">
+            <NextStepCard page={page} timeZone={tz} now={now} />
           </div>
+
+          <FilesSection
+            jobId={header.id}
+            files={files}
+            timeZone={tz}
+            canAddRaw={canAddRaw}
+            otherKindsAllowed={otherKinds}
+            photographerName={header.shotBy?.name ?? null}
+            editorName={header.editedBy?.name ?? null}
+          />
+          <InstructionsSection
+            jobId={header.id}
+            items={page.instructions}
+            timeZone={tz}
+            addAsKind={addInstructionsAs}
+            editHref={permissions.canEditDetails ? `/jobs/${header.id}/edit` : null}
+            viewerIsEditor={isEditor}
+            photographerName={header.shotBy?.name ?? null}
+          />
+          {/* scroll-mt: the pinned bar's "See request" (phones) scrolls here. */}
+          <ChangesAskedSection rounds={page.changesAsked} timeZone={tz} className="scroll-mt-4" />
+          <MessagesThread
+            jobId={header.id}
+            messages={page.messages}
+            canComment={permissions.canComment}
+            deletable={deletable}
+            timeZone={tz}
+            viewerId={ctx.userId}
+            participants={participants}
+            viewerIsEditor={isEditor}
+            photographerName={header.shotBy?.name ?? null}
+          />
+          {page.privateNotes !== null ? <PrivateNotes jobId={header.id} notes={page.privateNotes} addAsKind={privateKind} timeZone={tz} /> : null}
+          {page.fromClient !== null ? (
+            <FromClient jobId={header.id} clientName={header.client.name} threads={page.fromClient} deliveryNotes={page.deliveryNotes ?? []} canReply={permissions.canReplyToClient} timeZone={tz} />
+          ) : null}
+          <WhoDidWhat jobId={header.id} entries={page.whoDidWhat} timeZone={tz} />
+        </div>
+
+        <aside aria-label="Job details" className="min-w-0">
+          <SideColumn side={sideColumn} timeZone={tz} jobId={header.id} version={header.version} clientName={header.client.name} canShare={permissions.canShareWithClient} className="lg:sticky lg:top-20" />
         </aside>
+      </div>
+
+      {/* Phones: the next step stays in reach at the bottom of the screen, above the tab bar. */}
+      <div className="sticky bottom-[calc(var(--tabbar-height,0px)+env(safe-area-inset-bottom,0px))] z-(--z-page-sticky) -mx-4 bg-canvas/85 px-4 pb-2 pt-2 backdrop-blur sm:-mx-6 sm:px-6 lg:hidden">
+        <NextStepCard page={page} timeZone={tz} now={now} pinned className="shadow-md" />
       </div>
     </PageContainer>
   );

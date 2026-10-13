@@ -7,7 +7,6 @@ import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { SectionCard } from "@/components/common/section-card";
 import { useMutationRunner } from "@/components/jobs/mutation";
 import { useUserOptions } from "@/components/jobs/use-user-options";
-import { WorkloadBand } from "@/components/jobs/workload-band";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -100,7 +99,7 @@ function DeactivateDialog({
   const submit = async () => {
     setError(null);
     if (hasEditorJobs && mode === "reassign" && !reassignTo) {
-      setError("Choose who takes over, or unassign the jobs instead.");
+      setError("Choose who the jobs move to, or leave them without an editor.");
       return;
     }
     setPending(true);
@@ -112,7 +111,7 @@ function DeactivateDialog({
       successDescription: hasEditorJobs
         ? mode === "reassign"
           ? `${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} handed over.`
-          : `${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} back to Ready for assignment.`
+          : `${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} back to Needs editor.`
         : "They've been signed out everywhere.",
       onConflict: (err) => {
         onOpenChange(false);
@@ -132,21 +131,21 @@ function DeactivateDialog({
         </div>
         <DialogTitle>Deactivate {profile.name}?</DialogTitle>
         <DialogDescription>
-          They’re signed out immediately and can’t sign in again. Their history, comments and completed work stay exactly as they are.
+          They are signed out straight away and cannot sign in again. Their history, messages and finished work stay exactly as they are.
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-5 pb-4">
         {hasEditorJobs ? (
           <div className="flex flex-col gap-3">
             <p className="text-sm font-medium text-ink">
-              {profile.name.split(" ")[0]} is editing <span className="numeric">{editorJobs.length}</span> open job{editorJobs.length === 1 ? "" : "s"}
+              {profile.name.split(" ")[0]} has <span className="numeric">{editorJobs.length}</span> job{editorJobs.length === 1 ? "" : "s"} on their desk
             </p>
             <JobList jobs={editorJobs} />
             <div role="radiogroup" aria-label="What happens to these jobs" className="grid gap-2 sm:grid-cols-2">
               {(
                 [
-                  ["reassign", "Reassign to an editor", "Work continues; stage time moves to the new editor."],
-                  ["unassign", "Unassign", "Jobs go back to Ready for assignment."],
+                  ["reassign", "Move their jobs to…", "Another editor picks up where they left off."],
+                  ["unassign", "Leave them without an editor", "The jobs go back to Needs editor for you to give out later."],
                 ] as const
               ).map(([value, title, desc]) => (
                 <button
@@ -166,13 +165,13 @@ function DeactivateDialog({
               ))}
             </div>
             {mode === "reassign" ? (
-              <FormField label="New editor" error={error ?? undefined}>
+              <FormField label="Move their jobs to" error={error ?? undefined}>
                 {(field) => (
-                  <div {...field} role="listbox" aria-label="New editor" className="max-h-56 overflow-y-auto rounded-md border border-border scrollbar-thin">
+                  <div {...field} role="listbox" aria-label="Move their jobs to" className="max-h-56 overflow-y-auto rounded-md border border-border scrollbar-thin">
                     {editors.loading ? (
                       <p className="px-3 py-3 text-sm text-ink-muted">Loading editors…</p>
                     ) : candidates.length === 0 ? (
-                      <p className="px-3 py-3 text-sm text-ink-muted">No other active editors. Unassign instead.</p>
+                      <p className="px-3 py-3 text-sm text-ink-muted">No other active editors. Leave the jobs without an editor instead.</p>
                     ) : (
                       candidates.map((o) => (
                         <button
@@ -188,8 +187,7 @@ function DeactivateDialog({
                         >
                           <Avatar name={o.name} colour={o.avatarColour || undefined} size="sm" />
                           <span className="min-w-0 flex-1 truncate text-ink">{o.name}</span>
-                          {o.activeJobs !== null ? <span className="text-xs text-ink-muted numeric">{o.activeJobs} active</span> : null}
-                          {o.band ? <WorkloadBand band={o.band} size="sm" /> : null}
+                          {o.activeJobs !== null ? <span className="text-xs text-ink-muted numeric">On their desk {o.activeJobs}</span> : null}
                         </button>
                       ))
                     )}
@@ -201,7 +199,7 @@ function DeactivateDialog({
             ) : null}
           </div>
         ) : (
-          <p className="rounded-md bg-surface-sunken px-3 py-2.5 text-sm text-ink-secondary">No open editing jobs — nothing needs to be handed over.</p>
+          <p className="rounded-md bg-surface-sunken px-3 py-2.5 text-sm text-ink-secondary">Nothing on their desk — no jobs need to move.</p>
         )}
 
         {photographerJobs.length > 0 ? (
@@ -209,7 +207,7 @@ function DeactivateDialog({
             <p className="text-sm font-medium text-ink">
               Photographer on <span className="numeric">{photographerJobs.length}</span> open job{photographerJobs.length === 1 ? "" : "s"}
             </p>
-            <p className="text-xs text-ink-muted">These keep {profile.name.split(" ")[0]} as photographer. Reassign them from each job if someone else should review.</p>
+            <p className="text-xs text-ink-muted">These keep {profile.name.split(" ")[0]} as the photographer. Change the photographer on each job if someone else should check them.</p>
             <JobList jobs={photographerJobs} max={4} />
           </div>
         ) : null}
@@ -310,10 +308,10 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
       <SectionCard title="Account" description="This is you.">
         <p className="text-sm text-ink-muted">
           Change your own name, avatar and password from{" "}
-          <Link href="/settings/profile" className="font-medium text-accent-ink hover:underline">
-            your profile
+          <Link href="/settings/account" className="font-medium text-accent-ink hover:underline">
+            My account
           </Link>
-          . Another admin must deactivate you; nobody can deactivate the primary owner.
+          . Another owner must deactivate you; nobody can deactivate the primary owner.
         </p>
       </SectionCard>
     );
@@ -337,13 +335,13 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
   };
 
   return (
-    <SectionCard title="Account" description="Sign-in, access and data retention." tone={profile.isActive ? "default" : "muted"}>
+    <SectionCard title="Account" description="Password, access and what happens to their jobs." tone={profile.isActive ? "default" : "muted"}>
       <div className="flex flex-col divide-y divide-border">
         {!anonymised && access.resetPassword ? (
           <div className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Reset password</p>
-              <p className="text-sm text-ink-muted">Creates a temporary password and signs them out everywhere.</p>
+              <p className="text-sm text-ink-muted">Gives them a temporary password and signs them out everywhere.</p>
             </div>
             <Button variant="outline" size="sm" leadingIcon={<KeyRound aria-hidden="true" />} onClick={() => setResetOpen(true)}>
               Reset password
@@ -356,8 +354,8 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
             <div>
               <p className="text-base font-medium text-ink">Deactivate</p>
               <p className="text-sm text-ink-muted">
-                Removes access immediately{editorJobs.length > 0 ? ` and hands over ${editorJobs.length} open job${editorJobs.length === 1 ? "" : "s"}` : ""}.
-                {targetIsAdmin ? " It also removes their admin access; reactivating brings them back as a team member." : ""}
+                Removes access straight away{editorJobs.length > 0 ? ` and moves the ${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} on their desk` : ""}.
+                {targetIsAdmin ? " They stop being a co-owner; reactivating brings them back as a photographer." : ""}
               </p>
             </div>
             <Button variant="danger" size="sm" leadingIcon={<UserMinus aria-hidden="true" />} onClick={() => setDeactivateOpen(true)}>
@@ -368,7 +366,7 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
           <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Reactivate</p>
-              <p className="text-sm text-ink-muted">Restores sign-in. Jobs handed over at deactivation stay with their new editors.</p>
+              <p className="text-sm text-ink-muted">They can sign in again. Jobs moved when they were deactivated stay with their new editors.</p>
             </div>
             <Button variant="outline" size="sm" leadingIcon={<RotateCcw aria-hidden="true" />} onClick={() => setReactivateOpen(true)}>
               Reactivate

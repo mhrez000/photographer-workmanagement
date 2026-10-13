@@ -20,7 +20,7 @@ import { cn, formatPercent } from "@/lib/utils";
 import { getAnalyticsOverview } from "@/server/queries/analytics";
 import { getBottlenecks } from "@/server/queries/bottlenecks";
 import { getReport } from "@/server/queries/reports";
-import { allowed, guard, load, pageContext, param } from "@/server/page";
+import { advancedPageContext, allowed, guard, load, param } from "@/server/page";
 
 export const metadata: Metadata = { title: "Reports" };
 
@@ -63,7 +63,7 @@ function isKind(v: string | undefined): v is ReportKind {
 
 export default async function ReportsPage({ searchParams }: PageProps<"/insights/reports">) {
   const sp = await searchParams;
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("reports", "/editors"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "reports.view");
   const tz = ctx.settings.timezone;
   const kindParam = param(sp, "kind");

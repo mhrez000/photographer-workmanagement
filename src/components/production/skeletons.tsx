@@ -41,20 +41,12 @@ export function ListPageSkeleton({ columns = 7 }: { columns?: number }) {
   );
 }
 
-/** Client / project detail skeleton: header, stat tiles, two-column body. */
+/** Client / project detail skeleton: header, then the jobs list beside the side column. */
 export function DetailPageSkeleton() {
   return (
     <PageContainer aria-busy="true">
       <HeaderSkeleton />
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {Array.from({ length: 4 }, (_, i) => (
-          <div key={i} className="rounded-md border border-border bg-surface px-3.5 py-3">
-            <Skeleton className="h-2.5 w-16" />
-            <Skeleton className="mt-2.5 h-6 w-10" />
-          </div>
-        ))}
-      </div>
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="rounded-lg border border-border bg-surface">
           <SkeletonTable rows={6} columns={5} />
         </div>

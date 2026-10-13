@@ -6,6 +6,7 @@ import {
   fakeClock,
   insertJobFixture,
   makeTestDb,
+  optInAllNotifications,
   seedMinimalOrg,
   systemContextFor,
   type SeedIds,
@@ -24,6 +25,8 @@ beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
+  // The simplified defaults (plan §8) turn most per-type notices off; these tests check the notices themselves.
+  await optInAllNotifications(db, ids);
 });
 afterEach(() => fakeClock.reset());
 

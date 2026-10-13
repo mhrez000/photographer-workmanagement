@@ -6,7 +6,8 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 import { execRows, type Db } from "@/db/index";
-import { STATUS_CATEGORIES } from "@/lib/constants";
+import { DEFAULT_JOB_TYPES, DEMO_ACCOUNTS, STATUS_CATEGORIES } from "@/lib/constants";
+import { ACTIVE_STAGE_CATEGORIES, STAGES, STAGE_TABS, stageOf, type Stage } from "@/lib/stages";
 import { addCivilDays, civilDate, startOfCivilDayIso } from "@/lib/dates";
 import { buildContextFromDb } from "@/server/auth/session";
 import { computeWorkloads } from "@/server/queries/workloads";
@@ -304,6 +305,95 @@ export async function buildReport(db: Db, organisationId: string, nowMs: number)
       check(`bottleneck ${kind} fires`, alerts.some((a) => a.kind === kind), alerts.find((a) => a.kind === kind)?.message ?? "not firing");
     }
   }
+
+  return { lines, checks, ok: checks.every((c) => c.ok || !c.hard) };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Seed profile "small" (SIMPLIFICATION-PLAN §8 demo)                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Report + hard checks for the small demo: every one of the five stages is represented, late jobs, a
+ * Round 2, a Done-not-sent, a cancelled job, one portal client with shared delivered work and a feedback
+ * thread, time tracking OFF, no automations, Advanced tools OFF, the four login-box accounts. The §39
+ * minimums do not apply (they describe the 160-job fixture).
+ */
+export async function buildSmallReport(db: Db, organisationId: string, nowMs: number): Promise<SeedReport> {
+  const rows = <T extends Record<string, unknown>>(text: string, ...params: unknown[]): Promise<T[]> => execRows<T>(db, rawSql(text, params));
+  const one = async <T = number>(text: string, ...params: unknown[]): Promise<T> => {
+    const [row] = await rows(text, ...params);
+    return (row ? Object.values(row)[0] : 0) as T;
+  };
+  const lines: string[] = [];
+  const checks: Check[] = [];
+  const check = (label: string, ok: boolean, detail: string, hard = true) => checks.push({ label, ok, detail, hard });
+  const org = organisationId;
+  const nowIso = new Date(nowMs).toISOString();
+
+  const byCat = new Map<string, number>(
+    (await rows<{ c: string; n: number }>("SELECT status_category AS c, COUNT(*) AS n FROM jobs WHERE organisation_id = ? GROUP BY status_category", org)).map(
+      (r) => [r.c, r.n],
+    ),
+  );
+  const byStage: Record<Stage, number> = { needs_editor: 0, with_editor: 0, ready_to_check: 0, changes_asked: 0, done: 0, cancelled: 0 };
+  for (const c of STATUS_CATEGORIES) byStage[stageOf(c)] += byCat.get(c) ?? 0;
+  const total = Object.values(byStage).reduce((a, b) => a + b, 0);
+  lines.push(`Northlight (small) jobs by stage (${total}): ${STAGES.map((s) => `${s}=${byStage[s]}`).join("  ")}`);
+  lines.push("  by status: " + STATUS_CATEGORIES.map((c) => `${c}=${byCat.get(c) ?? 0}`).join("  "));
+
+  const active = ACTIVE_STAGE_CATEGORIES.map((c) => `'${c}'`).join(",");
+  const late = await one(`SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category IN (${active}) AND due_date < ?`, org, nowIso);
+  const round2 = await one("SELECT COUNT(*) FROM jobs WHERE organisation_id = ? AND status_category = 'resubmitted' AND revision_count >= 1", org);
+  const notSent = byCat.get("approved") ?? 0;
+  const users = await rows<{ email: string; role: string; is_admin: boolean }>("SELECT email, role, is_admin FROM users WHERE organisation_id = ? ORDER BY email", org);
+  const automations = await one("SELECT COUNT(*) FROM automations WHERE organisation_id = ?", org);
+  const [settings] = await rows<{ time_tracking_enabled: boolean; advanced_tools_enabled: boolean }>(
+    "SELECT time_tracking_enabled, advanced_tools_enabled FROM organisation_settings WHERE organisation_id = ?",
+    org,
+  );
+  const portalVisible = await one(
+    `SELECT COUNT(*) FROM jobs j WHERE j.organisation_id = ? AND j.status_category IN ('delivered','completed')
+       AND (j.shared_with_client OR EXISTS (SELECT 1 FROM projects p WHERE p.id = j.project_id AND p.shared_with_client))
+       AND EXISTS (SELECT 1 FROM job_links l WHERE l.job_id = j.id AND l.shared_with_client AND l.superseded_at IS NULL AND l.removed_at IS NULL)`,
+    org,
+  );
+  const deliveryNotes = await one("SELECT COUNT(*) FROM job_notes WHERE organisation_id = ? AND kind = 'delivery' AND archived_at IS NULL", org);
+  const feedbackThreads = await one("SELECT COUNT(*) FROM job_comments WHERE organisation_id = ? AND kind = 'client_feedback' AND parent_comment_id IS NULL", org);
+  const feedbackReplies = await one("SELECT COUNT(*) FROM job_comments WHERE organisation_id = ? AND kind = 'client_feedback' AND parent_comment_id IS NOT NULL", org);
+  const projects = await one("SELECT COUNT(*) FROM projects WHERE organisation_id = ?", org);
+  const lateSummaries = await one("SELECT COUNT(*) FROM notifications WHERE organisation_id = ? AND type = 'job_overdue'", org);
+  const usualDays = await one("SELECT COUNT(*) FROM job_types WHERE organisation_id = ? AND usual_days_to_edit IS NOT NULL", org);
+
+  lines.push(
+    `Totals: users=${users.length}, projects=${projects}, late=${late}, round2=${round2}, approved(not sent)=${notSent}, automations=${automations}, late summaries=${lateSummaries}`,
+  );
+
+  for (const stage of STAGE_TABS) check(`stage ${stage} represented`, byStage[stage] >= 1, String(byStage[stage]));
+  check("a cancelled job", byStage.cancelled >= 1, String(byStage.cancelled));
+  check("about 20 jobs (15–30)", total >= 15 && total <= 30, String(total));
+  check("≥ 3 late jobs (red chip + filter)", late >= 3, String(late));
+  check("a Round 2 ready to check", round2 >= 1, String(round2));
+  check("a Done · not sent to client (Approved)", notSent >= 1, String(notSent));
+  check("a Delivered job", (byCat.get("delivered") ?? 0) >= 1, String(byCat.get("delivered") ?? 0));
+  check("≥ 1 shared delivered job with a client-visible link", portalVisible >= 1, String(portalVisible));
+  check("a delivery note", deliveryNotes >= 1, String(deliveryNotes));
+  check("a feedback thread with a reply", feedbackThreads >= 1 && feedbackReplies >= 1, `threads=${feedbackThreads} replies=${feedbackReplies}`);
+  check("time tracking OFF", settings?.time_tracking_enabled === false, String(settings?.time_tracking_enabled));
+  check("NO automations", automations === 0, String(automations));
+  check("Advanced tools OFF", settings?.advanced_tools_enabled === false, String(settings?.advanced_tools_enabled));
+  check("every type of shoot has usual days to edit", usualDays === DEFAULT_JOB_TYPES.length, `${usualDays}/${DEFAULT_JOB_TYPES.length}`);
+  const emails = new Set(users.map((u) => u.email));
+  for (const demo of DEMO_ACCOUNTS) check(`login box account ${demo.email}`, emails.has(demo.email), emails.has(demo.email) ? "present" : "missing");
+  check("1 owner + 1 extra photographer + 3 editors + 1 client user", users.length === 6, users.map((u) => `${u.email}:${u.role}${u.is_admin ? "(admin)" : ""}`).join(" "));
+  const extra = users.find((u) => u.email === "photographer01@studio.test");
+  check("the extra photographer is not an admin", extra !== undefined && !extra.is_admin, String(extra?.is_admin));
+  const badPrimary = await one(
+    "SELECT COUNT(*) FROM organisation_settings s WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = s.primary_owner_user_id AND u.organisation_id = s.organisation_id AND u.role = 'photographer' AND u.is_admin AND u.is_active)",
+  );
+  check("exactly one primary owner per org, an active admin", badPrimary === 0, `${badPrimary} org(s) without a valid primary owner`);
+  const legacyRoles = await one("SELECT COUNT(*) FROM users WHERE role NOT IN ('photographer', 'editor', 'client')");
+  check("0 users with legacy roles", legacyRoles === 0, String(legacyRoles));
 
   return { lines, checks, ok: checks.every((c) => c.ok || !c.hard) };
 }

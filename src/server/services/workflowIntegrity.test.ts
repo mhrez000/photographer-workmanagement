@@ -11,7 +11,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { first, setDbOverride, type Tx } from "@/db/index";
 import { activityEvents, jobAssignments, jobRevisions, jobs, notifications } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, optInAllNotifications, seedMinimalOrg, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
 import { verifyDerived } from "@/db/verify";
 import type { AuthContext, Job, Notification } from "@/lib/types";
 import { AppError } from "@/server/errors";
@@ -46,6 +46,8 @@ beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
+  // The simplified defaults (plan §8) turn most per-type notices off; these tests check the notices themselves.
+  await optInAllNotifications(db, ids);
 });
 afterEach(() => fakeClock.reset());
 
@@ -109,7 +111,7 @@ describe("updateRevision: a new assignee takes over the job", () => {
     }
     const toNew = after.filter((n) => n.userId === ids.users.editor2);
     expect(toNew.map((n) => n.type)).toEqual(["revision_requested"]);
-    expect(toNew[0].title).toMatch(/Revision #1 on PJ-\d+ is now assigned to you/);
+    expect(toNew[0].title).toMatch(/PJ-\d+ was given to you with changes asked \(round 1\)/);
     const expectedVersion = await v(job.id);
     await as("editor2", (tx, ctx) => resolveRevision(tx, ctx, { revisionId, expectedVersion }));
     expect((await jobRow(job.id)).statusCategory).toBe("resubmitted");
@@ -180,7 +182,7 @@ describe("assignEditor with an open revision", () => {
     expect((await jobRow(job.id)).editorId).toBe(ids.users.editor1);
     const rev2 = await first(db.select().from(jobRevisions).where(and(eq(jobRevisions.jobId, job.id), eq(jobRevisions.revisionNumber, 2))));
     expect(rev2?.assigneeUserId).toBe(ids.users.editor1);
-    const forRev2 = (await noticesOn(job.id)).filter((n) => n.userId === ids.users.editor1 && n.title.startsWith("Revision #2"));
+    const forRev2 = (await noticesOn(job.id)).filter((n) => n.userId === ids.users.editor1 && n.title.includes("(round 2)"));
     expect(forRev2.map((n) => n.type)).toEqual(["revision_requested"]);
     await expectClean();
   });

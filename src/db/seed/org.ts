@@ -248,6 +248,16 @@ export async function enableTimeTracking(rt: SeedRuntime, ownerId: string): Prom
   await rt.act(ownerId, (tx, ctx) => updateSettings(tx, ctx, { timeTrackingEnabled: true }));
 }
 
+/**
+ * Settings → Studio → Advanced tools ON (SIMPLIFICATION-PLAN §8 safety rule): the full fixture is "an
+ * existing studio that already uses custom workflows and automations", so it keeps every Advanced page.
+ * Migration 0004 flips this for real databases; a seed runs on an empty one, so the owner does it here
+ * through the same service (one audited `settings.updated` event). The small demo never calls this.
+ */
+export async function enableAdvancedTools(rt: SeedRuntime, ownerId: string): Promise<void> {
+  await rt.act(ownerId, (tx, ctx) => updateSettings(tx, ctx, { advancedToolsEnabled: true }));
+}
+
 export async function createSeedTeam(
   rt: SeedRuntime,
   actorId: string,

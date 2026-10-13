@@ -17,8 +17,8 @@ export interface ActivityEventGroup {
 export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
   {
     key: "status",
-    label: "Status & workflow",
-    description: "Status moves, starts, submissions, approvals, completions",
+    label: "Stage moves",
+    description: "Given to an editor, started, sent for checking, approved, done, cancelled",
     types: [
       "job.status_changed", "job.accepted", "job.declined", "job.work_started", "job.paused", "job.resumed", "job.submitted",
       "job.review_started", "job.approved", "job.delivered", "job.completed", "job.cancelled", "job.reopened", "job.restored",
@@ -26,32 +26,32 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
     ],
   },
   { key: "created", label: "Jobs created", description: "New jobs", types: ["job.created"] },
-  { key: "assignments", label: "Assignments", description: "Editors and photographers assigned or removed", types: ["assignment.created", "assignment.ended"] },
+  { key: "assignments", label: "Who has the job", description: "Editors and photographers given or taken off a job", types: ["assignment.created", "assignment.ended"] },
   {
     key: "deadlines",
-    label: "Deadlines & priority",
-    description: "Due dates, shoot dates, priority, overdue flags",
+    label: "Dates & Rush",
+    description: "Due dates, shoot dates, Rush, late flags",
     types: [
       "job.due_date_changed", "job.review_due_date_changed", "job.delivery_due_date_changed", "job.shoot_date_changed",
       "job.priority_changed", "job.became_overdue", "job.review_overdue",
     ],
   },
-  { key: "edits", label: "Job edits", description: "Name, client, project, type, hours, completion", types: ["job.field_changed"] },
-  { key: "revisions", label: "Revisions", description: "Requested, resolved, withdrawn", types: ["revision.requested", "revision.resolved", "revision.withdrawn", "revision.updated"] },
-  { key: "comments", label: "Comments", description: "Comments, edits, mentions", types: ["comment.added", "comment.edited", "comment.deleted", "comment.mentioned"] },
-  { key: "notes", label: "Notes", description: "Notes added, edited, archived", types: ["note.added", "note.edited", "note.archived", "note.restored"] },
-  { key: "links", label: "Links", description: "Work links added, replaced, removed", types: ["link.added", "link.replaced", "link.removed"] },
+  { key: "edits", label: "Job details", description: "Name, client, address, type of shoot", types: ["job.field_changed"] },
+  { key: "revisions", label: "Changes asked", description: "Asked, fixed, withdrawn", types: ["revision.requested", "revision.resolved", "revision.withdrawn", "revision.updated"] },
+  { key: "comments", label: "Messages", description: "Messages, edits, @mentions", types: ["comment.added", "comment.edited", "comment.deleted", "comment.mentioned"] },
+  { key: "notes", label: "Instructions & notes", description: "Notes added, edited, archived", types: ["note.added", "note.edited", "note.archived", "note.restored"] },
+  { key: "links", label: "Files", description: "Links added, replaced, removed", types: ["link.added", "link.replaced", "link.removed"] },
   { key: "time", label: "Time tracking", description: "Timers started and stopped", types: ["work_session.started", "work_session.ended"] },
   {
     key: "structure",
-    label: "Clients & projects",
+    label: "Clients",
     description: "Created, edited, archived",
     types: ["client.created", "client.updated", "client.archived", "client.restored", "project.created", "project.updated", "project.archived", "project.restored"],
   },
   {
     key: "people",
-    label: "People & teams",
-    description: "Invites, roles, capacity, teams, sign-ins",
+    label: "People & sign-ins",
+    description: "Invites, roles, people settings, sign-ins",
     management: true,
     types: [
       "user.created", "user.updated", "user.role_changed", "user.deactivated", "user.reactivated", "user.password_changed",
@@ -62,8 +62,8 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
   },
   {
     key: "admin",
-    label: "Settings & automations",
-    description: "Workflows, job types, automations, settings",
+    label: "Studio",
+    description: "Studio settings, types of shoot, workflows, automations",
     management: true,
     types: [
       "workflow.created", "workflow.updated", "workflow.archived", "status.created", "status.updated", "status.archived", "status.reordered",
@@ -87,6 +87,18 @@ export function eventTypesForGroups(keys: readonly string[]): EventType[] {
   const out = new Set<EventType>();
   for (const key of keys) for (const t of GROUP_BY_KEY.get(key)?.types ?? []) out.add(t);
   return [...out];
+}
+
+/** Plain-word category chip on a history row (UX-13): what kind of thing changed, not who may see it. */
+export type HistoryCategory = "Sign-in" | "Job" | "People" | "Studio" | "Client";
+
+export function historyCategoryOf(type: string): HistoryCategory {
+  if (type.startsWith("auth.")) return "Sign-in";
+  if (type.startsWith("user.") || type.startsWith("team.")) return "People";
+  if (type.startsWith("client.") || type.startsWith("project.")) return "Client";
+  const group = groupOfEventType(type);
+  if (group?.key === "admin") return "Studio";
+  return "Job";
 }
 
 /** The group an event type belongs to (for the row icon / tone). */

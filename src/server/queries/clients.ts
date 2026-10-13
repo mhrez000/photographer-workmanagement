@@ -2,11 +2,13 @@
  * Clients list + detail (ARCHITECTURE.md §10 `/clients`, `/clients/[id]`;
  * docs/ROLES.md §2.4, §3.4).
  *
- * client.view: admins and team members every client of the org; editors only
- * clients with at least one job visible to them (others look missing → 404)
- * and only the name + colour (contact name, email, phone and notes are
- * private; their `q` matches the name only). Clients (portal users) never
- * reach these reads (client.view → 403). Counts and job rows go through
+ * client.view: admins (and members with ⚑See all jobs) every client of the
+ * org; an extra photographer only the clients on the jobs they can see or
+ * that they created (SIMPLIFICATION-PLAN §2 "only the clients on those jobs";
+ * others look missing → 404); editors only clients with at least one job
+ * visible to them and only the name + colour (contact name, email, phone and
+ * notes are private; their `q` matches the name only). Clients (portal users)
+ * never reach these reads (client.view → 403). Counts and job rows go through
  * `visibleJobsWhere` (`resolveMetricScope(ctx, null)`: admins and ⚑all
  * members see every job anyway).
  */
@@ -14,11 +16,12 @@ import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { first, type DbLike } from "@/db/index";
 import { clients, jobs, projects } from "@/db/schema";
-import type { AuthContext, ClientDetail, ClientListItem } from "@/lib/types";
-import { assertCan, can, visibleJobsWhere } from "@/server/auth/permissions";
+import type { AuthContext, ClientDetail, ClientListItem, SimpleJobRow } from "@/lib/types";
+import { assertCan, isAdmin } from "@/server/auth/permissions";
 import { resolveMetricScope } from "@/server/view-scope";
 import { NotFoundError } from "@/server/errors";
 import { loadClientInOrg, parseInput } from "@/server/services/_shared";
+import { selectSimpleRows, simpleBounds } from "./jobsSimple";
 import { binaryAsc, EMPTY_COUNTS, jobCountsBy, loadUserRefs } from "./metrics";
 import { DETAIL_JOB_LIMIT, hasVisibleJobSql, listProjects } from "./projects";
 import { likeSql, selectJobRows } from "./scope";
@@ -54,6 +57,28 @@ function redactClient<T extends { contactName: string | null; email: string | nu
   return { ...client, contactName: null, email: null, phone: null };
 }
 
+/**
+ * The clients a non-admin staff member may see (null = every client): editors those with a visible
+ * job; extra photographers (no ⚑See all jobs) those with a visible job or that they created themselves.
+ */
+export function clientScopeSql(ctx: AuthContext): SQL | null {
+  if (ctx.isSystem || isAdmin(ctx) || ctx.userId === null) return null;
+  if (ctx.role === "editor") return hasVisibleJobSql(ctx, "clientId", clients.id);
+  if (ctx.canViewAllJobs) return null;
+  return or(hasVisibleJobSql(ctx, "clientId", clients.id), eq(clients.createdByUserId, ctx.userId)) as SQL;
+}
+
+/** `getClientDetail` / `listClientJobsSimple`: 404 (never a 403 that confirms the name) for a client outside the actor's scope. */
+async function assertClientInScope(db: DbLike, ctx: AuthContext, client: { id: string; organisationId: string; createdByUserId: string | null }): Promise<void> {
+  const scope = clientScopeSql(ctx);
+  if (!scope) {
+    assertCan(ctx, "client.view", { organisationId: client.organisationId, createdByUserId: client.createdByUserId ?? undefined });
+    return;
+  }
+  const hit = await first(db.select({ one: sql<number>`1` }).from(clients).where(and(eq(clients.id, client.id), scope)).limit(1));
+  if (hit === undefined) throw new NotFoundError("Client");
+}
+
 /** Job-count metric scope for client/project lists: never the scope switch (§8 "does not apply"). */
 function countScope(ctx: AuthContext): "org" | "visible" {
   return resolveMetricScope(ctx, null).metric;
@@ -85,7 +110,7 @@ export async function listClients(db: DbLike, ctx: AuthContext, input: unknown =
     // Editors: name only (contact name / email are private, §2.4).
     parts.push(ctx.role === "editor" ? likeSql(clients.name, f.q) : or(likeSql(clients.name, f.q), likeSql(clients.contactName, f.q), likeSql(clients.email, f.q)));
   }
-  if (ctx.role === "editor") parts.push(hasVisibleJobSql(ctx, "clientId", clients.id));
+  parts.push(clientScopeSql(ctx) ?? undefined);
   const rows = await db
     .select(CLIENT_FIELDS)
     .from(clients)
@@ -104,14 +129,7 @@ export async function listClients(db: DbLike, ctx: AuthContext, input: unknown =
 export async function getClientDetail(db: DbLike, ctx: AuthContext, clientId: string): Promise<ClientDetail> {
   assertCan(ctx, "client.view");
   const client = await loadClientInOrg(db, ctx, clientId);
-  const hasVisibleJob =
-    ctx.role === "editor"
-      ? (await first(db.select({ one: sql<number>`1` }).from(jobs).where(and(eq(jobs.clientId, client.id), visibleJobsWhere(ctx))).limit(1))) !== undefined
-      : undefined;
-  if (!can(ctx, "client.view", { organisationId: client.organisationId, createdByUserId: client.createdByUserId ?? undefined, hasVisibleJob })) {
-    if (ctx.role === "editor") throw new NotFoundError("Client");
-    assertCan(ctx, "client.view");
-  }
+  await assertClientInScope(db, ctx, client);
   const counts = await jobCountsBy(db, ctx, "clientId", { scope: countScope(ctx), where: eq(jobs.clientId, client.id) });
   const projectList = await listProjects(db, ctx, { clientId: client.id, includeArchived: true });
   const createdBy = client.createdByUserId ? ((await loadUserRefs(db, ctx, [client.createdByUserId])).get(client.createdByUserId) ?? null) : null;
@@ -139,4 +157,17 @@ export async function getClientDetail(db: DbLike, ctx: AuthContext, clientId: st
     projects: projectList,
     jobs: jobRows,
   };
+}
+
+/**
+ * The simplified client page (SIMPLIFICATION-PLAN §3 "Clients"): every visible job of the client as a
+ * SimpleJobRow (stage, waiting on, due, project address), soonest due first. The page groups them by
+ * address. Same visibility and 404 rules as `getClientDetail`.
+ */
+export async function listClientJobsSimple(db: DbLike, ctx: AuthContext, clientId: string): Promise<SimpleJobRow[]> {
+  assertCan(ctx, "client.view");
+  const client = await loadClientInOrg(db, ctx, clientId);
+  await assertClientInScope(db, ctx, client);
+  const bounds = await simpleBounds(db, ctx);
+  return selectSimpleRows(db, ctx, bounds, { where: eq(jobs.clientId, client.id), limit: DETAIL_JOB_LIMIT });
 }

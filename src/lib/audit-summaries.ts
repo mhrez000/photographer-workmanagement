@@ -261,7 +261,9 @@ export function summarise(
       return "started the review";
     case "job.approved": {
       const onTime = bag(meta).onTime;
-      return onTime === false ? "approved the work (late)" : "approved the work";
+      // SIMPLIFICATION-PLAN §12.3: an owner approving their own edit says so, forever.
+      const own = bool(meta, "selfApproved") ? " they edited themselves" : "";
+      return onTime === false ? `approved the work${own} (late)` : `approved the work${own}`;
     }
     case "job.delivered":
       return "delivered the job to the client";

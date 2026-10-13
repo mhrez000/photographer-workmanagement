@@ -15,9 +15,12 @@ import {
   NOTE_KINDS,
   PERMISSIONS,
   PERSONAS,
+  PHOTOGRAPHER_PRESET_META,
   PRIMARY_OWNER_PROTECTED_ACTIONS,
+  SELF_APPROVAL_CONFIRM_ACTIONS,
   SELF_REVIEW_ACTIONS,
   personaMayEver,
+  photographerPresetOf,
   type Action,
   type EditorFlag,
   type MemberFlag,
@@ -29,17 +32,21 @@ import { ForbiddenError } from "@/server/errors";
 import {
   POLICY,
   SYSTEM_ACTION_ALLOWLIST,
+  actionNeedsSelfApprovalConfirm,
   assertCan,
   can,
   canSeeManagementEvents,
   canViewJob,
   controlsJob,
   hardRuleDenial,
+  inviteSwitchesFor,
   managesJob,
   permissionMatrix,
   personaOf,
   portalJobsWhere,
   ruleMeta,
+  selfReviewBlocked,
+  selfReviewNeedsConfirm,
   visibleJobsWhere,
   type ResourceOf,
 } from "./permissions";
@@ -169,7 +176,8 @@ type PhotoSit = keyof typeof PHOTO_SITS;
 const PHOTO_ALL = Object.keys(PHOTO_SITS) as PhotoSit[];
 const MANAGED: PhotoSit[] = ["own", "shotFor", "creator", "managedWorkedOn"];
 const OWNS: PhotoSit[] = ["own", "creator", "managedWorkedOn"];
-const NOT_WORKED: PhotoSit[] = PHOTO_ALL.filter((s) => !["workedOn", "wasEditor", "managedWorkedOn"].includes(s));
+/** Admins approve everywhere; "worked on" situations need the confirm flag at the service (not a `can()` matter). */
+const ADVANCED_ON = { settings: { timezone: "Australia/Sydney", timeTrackingEnabled: true, automationsEnabled: true, advancedToolsEnabled: true } };
 
 /** Situations seen from an editor persona. Draft situations force their own category. */
 const EDITOR_SITS = {
@@ -227,15 +235,16 @@ const JOB_MATRIX: Partial<Record<Action, JobRow>> = {
   "job.submit": { category: "in_progress", photo: { admin: PHOTO_ALL, ...none }, editor: sameEditors(["assigned", "draftHeld"]) },
   "job.decline": { category: "assigned", photo: { admin: [], ...none }, editor: sameEditors(["assigned"]) },
   "job.pause": { category: "in_progress", photo: { admin: PHOTO_ALL, ...none }, editor: sameEditors(["assigned", "draftHeld"]) },
-  "job.begin_review": { category: "submitted", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
-  "job.approve": { category: "submitted", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
-  "job.deliver": { category: "approved", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
-  "job.complete": { category: "delivered", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
-  "revision.request": { category: "submitted", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
-  "revision.withdraw": { category: "revision", photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  // SIMPLIFICATION-PLAN §12.3: admins MAY review a job they edited (the service asks them to confirm); members never.
+  "job.begin_review": { category: "submitted", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  "job.approve": { category: "submitted", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  "job.deliver": { category: "approved", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  "job.complete": { category: "delivered", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  "revision.request": { category: "submitted", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
+  "revision.withdraw": { category: "revision", photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) }, editor: noEditor },
   "client_feedback.to_revision": {
     category: "delivered",
-    photo: { admin: NOT_WORKED, ...reviewMembers(["own", "shotFor", "creator"]) },
+    photo: { admin: PHOTO_ALL, ...reviewMembers(["own", "shotFor", "creator"]) },
     editor: noEditor,
   },
   "job.reopen": { category: "completed", photo: { admin: PHOTO_ALL, ...reviewMembers(MANAGED) }, editor: noEditor },
@@ -345,6 +354,7 @@ const GLOBAL: [Action, ActorKey[]][] = [
   ["saved_view.share", ["admin"]],
   ["search.global", ["admin", "member", "memberBare", "memberAll", "editor", "editorTeam", "editorNoCreate"]],
   ["view.business_scope", ["admin", "memberAll"]],
+  ["advanced.view", []],
   ["system.sweep", ["admin"]],
   ["system.integrity", ["admin"]],
 ];
@@ -353,6 +363,21 @@ describe("resource-less actions per persona", () => {
   const cases = GLOBAL.flatMap(([action, allowed]) => ALL_ACTORS.map((a) => [action, a, allowed.includes(a)] as const));
   it.each(cases)("%s · %s → %s", (action, a, expected) => {
     expect(check(actor(a), action, undefined)).toBe(expected);
+  });
+
+  it("advanced.view: nobody while the studio's switch is off; while on, hidden fields / APIs for every staff persona but the Advanced PAGES (Board, Timeline, Reports, Workflows, …) only for admins (plan §3, §8); clients never", () => {
+    for (const a of [...PHOTO_ACTORS, ...EDITOR_ACTORS]) {
+      expect(can(actor(a), "advanced.view", { feature: "kanban" }), a).toBe(false);
+      expect(can(actor(a), "advanced.view", { feature: "time_tracking" }), a).toBe(false);
+      expect(can(actor(a, ADVANCED_ON), "advanced.view"), a).toBe(true);
+      expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: "time_tracking" }), a).toBe(true);
+      expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: "workloads" }), a).toBe(true);
+      for (const page of ["kanban", "timeline", "analytics", "reports", "workflows", "automations", "projects"] as const) {
+        expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: page }), `${a} ${page}`).toBe(a === "admin");
+      }
+    }
+    expect(can(actor("client", ADVANCED_ON), "advanced.view", { feature: "kanban" })).toBe(false);
+    expect(can(actor("client", ADVANCED_ON), "advanced.view")).toBe(false);
   });
 
   it("project.create: members with ⚑create; editors only inline from New job", () => {
@@ -699,13 +724,13 @@ function resourcesFor(action: Action): unknown[] {
 function personaVariants(p: Persona): AuthContext[] {
   switch (p) {
     case "admin":
-      return [actor("admin"), actor("admin", { isPrimaryOwner: true })];
+      return [actor("admin"), actor("admin", { isPrimaryOwner: true }), actor("admin", ADVANCED_ON)];
     case "member":
-      return [actor("memberBare"), actor("member"), actor("memberAll")];
+      return [actor("memberBare"), actor("member"), actor("memberAll"), actor("memberAll", ADVANCED_ON)];
     case "editor":
-      return [actor("editorNoCreate"), actor("editor"), actor("editorTeam")];
+      return [actor("editorNoCreate"), actor("editor"), actor("editorTeam"), actor("editorTeam", ADVANCED_ON)];
     case "client":
-      return [actor("client"), actor("clientNoFeedback")];
+      return [actor("client"), actor("clientNoFeedback"), actor("client", ADVANCED_ON)];
   }
 }
 
@@ -761,11 +786,13 @@ describe("memberFlag / editorFlag are set exactly on flag-gated cells", () => {
     for (const action of ACTIONS) {
       const rule = ruleMeta(action);
       const resources = resourcesFor(action);
+      // advanced.view is gated by the studio switch, not a person's switch: test it with the switch on.
+      const over = action === "advanced.view" ? ADVANCED_ON : {};
       if (!rule.memberFlag && personaMayEver("member", action)) {
-        expect(resources.some((r) => check(actor("memberBare"), action, r)), `${action} member`).toBe(true);
+        expect(resources.some((r) => check(actor("memberBare", over), action, r)), `${action} member`).toBe(true);
       }
       if (!rule.editorFlag && personaMayEver("editor", action)) {
-        expect(resources.some((r) => check(actor("editorNoCreate"), action, r)), `${action} editor`).toBe(true);
+        expect(resources.some((r) => check(actor("editorNoCreate", over), action, r)), `${action} editor`).toBe(true);
       }
     }
   });
@@ -814,18 +841,50 @@ describe("hard rules", () => {
     expect(can(actor("admin", { userId: null }), "job.view", PHOTO_SITS.other("new"))).toBe(false);
   });
 
-  it("self-review: nobody who edited the job may review it — every § action, every persona, incl. an admin ex-editor", () => {
+  it("self-review (SIMPLIFICATION-PLAN §12.3): editors and non-admin photographers who edited the job never review it; owners / co-owners may, after confirming", () => {
     const edited = (c: StatusCategory) => ref({ statusCategory: c, photographerId: ME, createdByUserId: ME, editorId: ME, pastEditorIds: [ME] });
     const wasEditor = (c: StatusCategory) => ref({ statusCategory: c, photographerId: ME, createdByUserId: ME, pastEditorIds: [ME, E2] });
+    const nonAdmins = ALL_ACTORS.filter((a) => a !== "admin");
     for (const action of SELF_REVIEW_ACTIONS)
-      for (const a of ALL_ACTORS)
-        for (const c of ["submitted", "review", "resubmitted", "approved", "delivered", "revision"] as const) {
+      for (const c of ["submitted", "review", "resubmitted", "approved", "delivered", "revision"] as const) {
+        for (const a of nonAdmins) {
           expect(check(actor(a), action, edited(c)), `${a} ${action} ${c}`).toBe(false);
           expect(check(actor(a), action, wasEditor(c)), `${a} ${action} ${c}`).toBe(false);
         }
-    expect(hardRuleDenial(actor("admin"), "job.approve", edited("submitted"))).toBe("self_review");
+        // the admin is allowed by the policy; the service demands confirmSelfApproval for the approve-side actions
+        expect(check(actor("admin"), action, edited(c)), `admin ${action} ${c}`).toBe(true);
+        expect(check(actor("admin"), action, wasEditor(c)), `admin ${action} ${c}`).toBe(true);
+      }
+    expect(hardRuleDenial(actor("member"), "job.approve", edited("submitted"))).toBe("self_review");
+    expect(hardRuleDenial(actor("editor"), "job.approve", edited("submitted"))).toBe("self_review");
+    expect(hardRuleDenial(actor("admin"), "job.approve", edited("submitted"))).toBeNull();
+    expect(selfReviewBlocked(actor("member"), edited("submitted"))).toBe(true);
+    expect(selfReviewBlocked(actor("admin"), edited("submitted"))).toBe(false);
+    expect(selfReviewNeedsConfirm(actor("admin"), edited("submitted"))).toBe(true);
+    expect(selfReviewNeedsConfirm(actor("admin"), PHOTO_SITS.own("submitted"))).toBe(false);
+    expect(selfReviewNeedsConfirm(actor("member"), edited("submitted"))).toBe(false);
+    for (const action of SELF_APPROVAL_CONFIRM_ACTIONS) expect(actionNeedsSelfApprovalConfirm(actor("admin"), action, wasEditor("submitted")), action).toBe(true);
+    expect(actionNeedsSelfApprovalConfirm(actor("admin"), "revision.request", wasEditor("submitted"))).toBe(false);
+    expect(actionNeedsSelfApprovalConfirm(actor("admin"), "job.approve", PHOTO_SITS.own("submitted"))).toBe(false);
+    // the system context never confirms anything
+    expect(selfReviewNeedsConfirm(actor("admin", { isSystem: true, userId: null }), edited("submitted"))).toBe(false);
     // a photographer approving an editor's work on a job they shot and created is the normal review
     expect(can(actor("member"), "job.approve", PHOTO_SITS.own("submitted"))).toBe(true);
+  });
+
+  it("invite presets (plan §2, decision 4): own_shoots / co_owner, explicit switches win, custom detection", () => {
+    expect(inviteSwitchesFor("own_shoots")).toEqual({
+      isAdmin: false,
+      flags: { canCreateJobs: true, canAssignEditors: true, canReviewSubmissions: true, canViewAllJobs: false, canViewTeamWorkloads: false, canViewAnalytics: false },
+    });
+    expect(inviteSwitchesFor("co_owner").isAdmin).toBe(true);
+    expect(inviteSwitchesFor("own_shoots", { flags: { canViewAllJobs: true } }).flags.canViewAllJobs).toBe(true);
+    expect(inviteSwitchesFor("co_owner", { isAdmin: false }).isAdmin).toBe(false);
+    expect(inviteSwitchesFor(undefined, { flags: { canCreateJobs: false } })).toEqual({ isAdmin: undefined, flags: { canCreateJobs: false } });
+    expect(photographerPresetOf({ role: "photographer", isAdmin: true })).toBe("co_owner");
+    expect(photographerPresetOf({ role: "photographer", isAdmin: false, ...PHOTOGRAPHER_PRESET_META.own_shoots.flags })).toBe("own_shoots");
+    expect(photographerPresetOf({ role: "photographer", isAdmin: false, ...PHOTOGRAPHER_PRESET_META.own_shoots.flags, canViewAllJobs: true })).toBe("custom");
+    expect(photographerPresetOf({ role: "editor" })).toBeNull();
   });
 
   it("assertCan throws ForbiddenError carrying the action", () => {

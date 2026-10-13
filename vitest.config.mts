@@ -19,6 +19,9 @@ export default defineConfig({
     // PGlite boots per test (~0.3 s) and the first one per worker applies the migrations.
     testTimeout: 30_000,
     hookTimeout: 60_000,
+    // Each worker runs its own in-memory PGlite (WASM, ~100 MB); at the default parallelism the workers
+    // crash under memory pressure whenever `npm run dev` is running beside the suite. Three is safe.
+    maxWorkers: 3,
   },
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
 });

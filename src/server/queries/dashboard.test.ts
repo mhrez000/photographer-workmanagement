@@ -6,7 +6,6 @@ import { contextFor, fakeClock, insertJobFixture, inviteDefaultsMember, makeTest
 import { CATEGORY_GROUPS } from "@/lib/constants";
 import type { Job } from "@/lib/types";
 import { getDashboardLayout } from "@/server/services/dashboards";
-import { KPI_DEFS } from "@/components/dashboard/kpi-strip";
 import { getDashboard, getKpis } from "./dashboard";
 import { listJobs } from "./jobs";
 import { moveJob } from "./test-history";
@@ -127,11 +126,9 @@ describe("getDashboard / KPIs", () => {
     expect(list.rows.map((r) => r.id)).not.toContain(completedLastWeekId);
     // civil bounds: completedTo is an inclusive day (Mon 5 – Sun 11 Oct)
     expect((await listJobs(db, owner, { completedFrom: "2026-10-05", completedTo: "2026-10-11" })).total).toBe(2);
-    // the KPI link carries the same bounds
-    const href = KPI_DEFS.find((d) => d.key === "completedThisWeek")?.href;
+    // the week bounds the KPI reports are the ones the list filters by (the old KPI strip's drill-down link is gone with the Dashboard)
     const k = await getKpis(db, owner);
-    const url = new URL(typeof href === "function" ? href(k) : String(href), "http://x");
-    expect((await listJobs(db, owner, Object.fromEntries(url.searchParams))).total).toBe(k.completedThisWeek);
+    expect((await listJobs(db, owner, { quick: "completed", completedFrom: k.completedWeek?.from, completedTo: k.completedWeek?.to })).total).toBe(k.completedThisWeek);
   });
 
   it("due-today and overdue lists agree with the KPI counts and flags", async () => {

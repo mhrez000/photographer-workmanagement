@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, Pencil } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import { ConflictDialog } from "@/components/jobs/conflict-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -12,7 +12,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { ApiError, api, errorMessage } from "@/lib/api-client";
 import { AVATAR_PALETTE } from "@/lib/constants";
-import { cn } from "@/lib/utils";
 
 export interface ClientFormValues {
   name: string;
@@ -20,10 +19,9 @@ export interface ClientFormValues {
   email: string;
   phone: string;
   notes: string;
-  colour: string;
 }
 
-export const EMPTY_CLIENT: ClientFormValues = { name: "", contactName: "", email: "", phone: "", notes: "", colour: AVATAR_PALETTE[1] };
+export const EMPTY_CLIENT: ClientFormValues = { name: "", contactName: "", email: "", phone: "", notes: "" };
 
 type Errors = Partial<Record<keyof ClientFormValues | "form", string>>;
 
@@ -34,67 +32,49 @@ function toErrors(err: ApiError): Errors {
   return out;
 }
 
-function ColourPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <div role="radiogroup" aria-label="Client colour" className="flex flex-wrap gap-2">
-      {AVATAR_PALETTE.map((c) => {
-        const on = c.toLowerCase() === value.toLowerCase();
-        return (
-          <button
-            key={c}
-            type="button"
-            role="radio"
-            aria-checked={on}
-            aria-label={c}
-            onClick={() => onChange(c)}
-            className={cn(
-              "flex size-7 items-center justify-center rounded-full ring-offset-2 ring-offset-surface transition-shadow focus-ring",
-              on && "ring-2 ring-ink",
-            )}
-            style={{ backgroundColor: c }}
-          >
-            {on ? <Check aria-hidden="true" className="size-3.5 text-white" /> : null}
-          </button>
-        );
-      })}
-    </div>
-  );
+/** A stable palette colour for a new client (the simple UI has no colour picker; the colour stays editable under Advanced). */
+export function clientColourFor(name: string): string {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
 }
 
-/** The client fields (shared by the create page and the edit dialog). */
+/**
+ * The client fields (plan §3 "Clients": name, contact, open jobs, late): a name, the person you deal with,
+ * and private notes. Shared by the New client dialog / page and the Edit dialog.
+ */
 export function ClientFields({
   values,
   onChange,
   errors,
   showNotes = true,
+  autoFocus = false,
 }: {
   values: ClientFormValues;
   onChange: (patch: Partial<ClientFormValues>) => void;
   errors: Errors;
   showNotes?: boolean;
+  autoFocus?: boolean;
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <FormField label="Client name" required error={errors.name} description="The agency, brand or person you shoot for.">
-        <Input value={values.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="ABC Real Estate" autoComplete="organization" maxLength={200} />
+      <FormField label="Client name" required error={errors.name} description="The agency, business or person you shoot for.">
+        <Input value={values.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Harbourline Realty" autoComplete="organization" maxLength={200} autoFocus={autoFocus} />
+      </FormField>
+      <FormField label="Contact" optional error={errors.contactName} description="Who you deal with there.">
+        <Input value={values.contactName} onChange={(e) => onChange({ contactName: e.target.value })} placeholder="e.g. Sarah Kingsley" autoComplete="name" maxLength={200} />
       </FormField>
       <div className="grid gap-4 sm:grid-cols-2">
-        <FormField label="Contact name" optional error={errors.contactName}>
-          <Input value={values.contactName} onChange={(e) => onChange({ contactName: e.target.value })} placeholder="Sarah Nguyen" autoComplete="name" maxLength={200} />
+        <FormField label="Email" optional error={errors.email}>
+          <Input value={values.email} onChange={(e) => onChange({ email: e.target.value })} placeholder="bookings@…" type="email" autoComplete="email" maxLength={254} inputMode="email" />
         </FormField>
         <FormField label="Phone" optional error={errors.phone}>
-          <Input value={values.phone} onChange={(e) => onChange({ phone: e.target.value })} placeholder="02 9000 0000" type="tel" autoComplete="tel" maxLength={50} />
+          <Input value={values.phone} onChange={(e) => onChange({ phone: e.target.value })} placeholder="04…" type="tel" autoComplete="tel" maxLength={50} inputMode="tel" />
         </FormField>
       </div>
-      <FormField label="Email" optional error={errors.email}>
-        <Input value={values.email} onChange={(e) => onChange({ email: e.target.value })} placeholder="bookings@abcrealestate.com.au" type="email" autoComplete="email" maxLength={254} />
-      </FormField>
-      <FormField label="Colour" optional error={errors.colour} description="Used on calendars and boards to tell clients apart at a glance.">
-        {() => <ColourPicker value={values.colour} onChange={(colour) => onChange({ colour })} />}
-      </FormField>
       {showNotes ? (
-        <FormField label="Notes" optional error={errors.notes} description="Preferences, access instructions, billing details. Visible to the owner, admins and photographers — never to editors or the client.">
-          <Textarea value={values.notes} onChange={(e) => onChange({ notes: e.target.value })} rows={4} maxLength={5000} />
+        <FormField label="Private notes" optional error={errors.notes} description="Access codes, how they like things, billing. Only you and your photographers see this — never editors or the client.">
+          <Textarea value={values.notes} onChange={(e) => onChange({ notes: e.target.value })} rows={3} maxLength={5000} />
         </FormField>
       ) : null}
     </div>
@@ -108,11 +88,10 @@ function payload(v: ClientFormValues) {
     email: v.email.trim() || null,
     phone: v.phone.trim() || null,
     notes: v.notes.trim() || null,
-    colour: v.colour,
   };
 }
 
-/** `/clients/new` form: POST /api/clients, then open the new client. */
+/** `/clients/new` page form: POST /api/clients, then open the new client (or return to `returnTo`). */
 export function NewClientForm({ returnTo }: { returnTo?: string }) {
   const router = useRouter();
   const [values, setValues] = React.useState<ClientFormValues>(EMPTY_CLIENT);
@@ -128,35 +107,102 @@ export function NewClientForm({ returnTo }: { returnTo?: string }) {
     setSaving(true);
     setErrors({});
     try {
-      const client = await api.post<{ id: string; name: string }>("/api/clients", payload(values));
-      toast.success(`Client “${client.name}” created`);
+      const client = await api.post<{ id: string; name: string }>("/api/clients", { ...payload(values), colour: clientColourFor(values.name.trim()) });
+      toast.success(`${client.name} added`);
       router.push(returnTo ? `${returnTo}${returnTo.includes("?") ? "&" : "?"}clientId=${client.id}` : `/clients/${client.id}`);
       router.refresh();
     } catch (err) {
       if (err instanceof ApiError && err.code === "validation") setErrors(toErrors(err));
-      else toast.error("Couldn't create the client", errorMessage(err));
+      else toast.error("Couldn't add the client", errorMessage(err));
       setSaving(false);
     }
   };
 
   return (
     <form onSubmit={submit} noValidate className="flex flex-col gap-6">
-      <ClientFields values={values} onChange={(p) => setValues((v) => ({ ...v, ...p }))} errors={errors} />
+      <ClientFields values={values} onChange={(p) => setValues((v) => ({ ...v, ...p }))} errors={errors} autoFocus />
       {errors.form ? <p className="text-sm text-danger">{errors.form}</p> : null}
       <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-end">
         <Button type="button" variant="ghost" onClick={() => router.back()}>
           Cancel
         </Button>
         <Button type="submit" loading={saving}>
-          Create client
+          Add client
         </Button>
       </div>
     </form>
   );
 }
 
+/** "New client" button + dialog on the Clients list: POST /api/clients, then open the new client. */
+export function NewClientDialog({ size = "md" }: { size?: "sm" | "md" }) {
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [values, setValues] = React.useState<ClientFormValues>(EMPTY_CLIENT);
+  const [errors, setErrors] = React.useState<Errors>({});
+  const [saving, setSaving] = React.useState(false);
+
+  const openDialog = () => {
+    setValues(EMPTY_CLIENT);
+    setErrors({});
+    setOpen(true);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!values.name.trim()) {
+      setErrors({ name: "Give the client a name" });
+      return;
+    }
+    setSaving(true);
+    setErrors({});
+    try {
+      const client = await api.post<{ id: string; name: string }>("/api/clients", { ...payload(values), colour: clientColourFor(values.name.trim()) });
+      toast.success(`${client.name} added`);
+      setOpen(false);
+      router.push(`/clients/${client.id}`);
+      router.refresh();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "validation") setErrors(toErrors(err));
+      else toast.error("Couldn't add the client", errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Button size={size} leadingIcon={<Plus aria-hidden="true" />} onClick={openDialog}>
+        New client
+      </Button>
+      <Dialog open={open} onOpenChange={(o) => (saving ? undefined : setOpen(o))} size="md">
+        {open ? (
+          <form onSubmit={submit} noValidate>
+            <DialogHeader>
+              <DialogTitle>New client</DialogTitle>
+              <DialogDescription>Just a name is enough. You can add contact details later.</DialogDescription>
+            </DialogHeader>
+            <DialogBody>
+              <ClientFields values={values} onChange={(p) => setValues((v) => ({ ...v, ...p }))} errors={errors} autoFocus />
+              {errors.form ? <p className="mt-3 text-sm text-danger">{errors.form}</p> : null}
+            </DialogBody>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setOpen(false)} disabled={saving}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={saving}>
+                Add client
+              </Button>
+            </DialogFooter>
+          </form>
+        ) : null}
+      </Dialog>
+    </>
+  );
+}
+
 export interface EditClientDialogProps {
-  client: { id: string; name: string; contactName: string | null; email: string | null; phone: string | null; colour: string; version: number };
+  client: { id: string; name: string; contactName: string | null; email: string | null; phone: string | null; version: number };
   notes: string | null;
   /** False for roles that cannot read notes (editing would blank them otherwise). */
   canSeeNotes: boolean;
@@ -173,7 +219,6 @@ export function EditClientDialog({ client, notes, canSeeNotes, timeZone }: EditC
       email: client.email ?? "",
       phone: client.phone ?? "",
       notes: notes ?? "",
-      colour: client.colour,
     }),
     [client, notes],
   );
@@ -227,7 +272,7 @@ export function EditClientDialog({ client, notes, canSeeNotes, timeZone }: EditC
         <form onSubmit={submit} noValidate>
           <DialogHeader>
             <DialogTitle>Edit client</DialogTitle>
-            <DialogDescription>Changes are recorded in the activity log with the previous values.</DialogDescription>
+            <DialogDescription>Every change is kept in the history.</DialogDescription>
           </DialogHeader>
           <DialogBody>
             <ClientFields values={values} onChange={(p) => setValues((v) => ({ ...v, ...p }))} errors={errors} showNotes={canSeeNotes} />
@@ -238,7 +283,7 @@ export function EditClientDialog({ client, notes, canSeeNotes, timeZone }: EditC
               Cancel
             </Button>
             <Button type="submit" loading={saving}>
-              Save changes
+              Save
             </Button>
           </DialogFooter>
         </form>

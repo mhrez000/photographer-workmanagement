@@ -1,35 +1,20 @@
 /**
- * POST /api/me/scope { scope: "mine" | "business" } → { scope }
- *
- * The "My shoots | Whole business" switch (docs/ROLES.md §8): stores the
- * choice in the `pwm_scope` cookie (path /, sameSite lax, httpOnly, 1 year).
- * A UI preference, like appearance — not audited. Only viewers who may switch
- * (`view.business_scope`: admins, team members with "See all jobs") can set
- * it; every list re-resolves the cookie through `resolveScope`, so a stale
- * cookie never widens anything.
+ * POST /api/me/scope — REMOVED (docs/SIMPLIFICATION-PLAN.md §8 "Removed: the My shoots / Whole
+ * business switch, its notice and its cookie"). The owner always sees everything, so the endpoint
+ * answers 404 for every method after auth, like a hidden Advanced route. The `pwm_scope` cookie is
+ * no longer written anywhere; list queries still resolve it conservatively (never a widening).
  */
-import { cookies } from "next/headers";
-import { z } from "zod";
-import { methodNotAllowed } from "@/app/api/_lib/route";
-import { VIEW_SCOPES, VIEW_SCOPE_COOKIE } from "@/lib/constants";
-import { assertCan } from "@/server/auth/permissions";
 import { requireContext } from "@/server/auth/session";
-import { bodyOrNull, handle } from "@/server/http";
-import { VIEW_SCOPE_COOKIE_OPTIONS } from "@/server/view-scope";
+import { NotFoundError } from "@/server/errors";
+import { handle } from "@/server/http";
 
-const SetScopeInput = z.strictObject({ scope: z.enum(VIEW_SCOPES) });
-
-export const POST = handle(async (req) => {
-  const ctx = await requireContext();
-  assertCan(ctx, "view.business_scope");
-  const { scope } = SetScopeInput.parse((await bodyOrNull(req)) ?? {});
-  const jar = await cookies();
-  jar.set(VIEW_SCOPE_COOKIE, scope, { ...VIEW_SCOPE_COOKIE_OPTIONS, secure: process.env.NODE_ENV === "production" });
-  return { scope };
+const gone = handle(async () => {
+  await requireContext();
+  throw new NotFoundError("Page", 'The "My shoots / Whole business" switch was removed; you always see everything you may see');
 });
 
-/** Methods this route does not implement: JSON 405 (see methodNotAllowed). */
-export const GET = methodNotAllowed(["POST"]);
-export const PUT = methodNotAllowed(["POST"]);
-export const PATCH = methodNotAllowed(["POST"]);
-export const DELETE = methodNotAllowed(["POST"]);
+export const GET = gone;
+export const POST = gone;
+export const PUT = gone;
+export const PATCH = gone;
+export const DELETE = gone;

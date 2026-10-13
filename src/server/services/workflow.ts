@@ -44,6 +44,7 @@ import {
 import {
   BOTTLENECK_DEFAULTS,
   CATEGORY_GROUPS,
+  SELF_APPROVAL_CONFIRM_MESSAGE,
   type EventAction,
   type EventCause,
   type EventType,
@@ -89,7 +90,7 @@ import {
   type EdgeLike,
   type WorkflowJobLike,
 } from "@/lib/workflow";
-import { assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
+import { actionNeedsSelfApprovalConfirm, assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
 import { loadJobRef } from "@/server/auth/job-ref";
 import { recordEvent } from "@/server/audit";
 import {
@@ -193,12 +194,13 @@ async function sendJobNotification(
   title: string,
   activityEventId: string | null,
   hash?: string,
+  body?: string,
 ): Promise<void> {
   await notify(tx, ctx, {
     userIds,
     type,
     title,
-    body: job.name,
+    body: body ?? job.name,
     jobId: job.id,
     activityEventId,
     linkPath: jobLinkPath(job.id, hash),
@@ -254,6 +256,48 @@ export async function loadVisibleJob(db: DbLike, ctx: AuthContext, jobId: string
  */
 export function assertMayMoveJob(ctx: AuthContext, ref: JobPermissionRef): void {
   if (ctx.isSystem || can(ctx, "job.transition", ref)) return;
+  throw new ForbiddenError("job.transition", moveDeniedMessage(ctx));
+}
+
+/**
+ * The actor is a PAST editor of the job (docs/ROLES.md §2.1 `past`): it was handed back or moved to
+ * someone else after they held it. They may still read the job, so nothing about it is secret to them.
+ */
+export function isPastEditorOf(ctx: Pick<AuthContext, "userId" | "role">, job: Pick<Job, "previousEditorId">, ref: JobPermissionRef): boolean {
+  if (ctx.role !== "editor" || ctx.userId === null) return false;
+  return job.previousEditorId === ctx.userId || (ref.pastEditorIds ?? []).includes(ctx.userId);
+}
+
+/**
+ * The plain 403 for a past editor whose page is up to date but who no longer holds the job
+ * (SIMPLIFICATION-PLAN §5: "This job is now with Sam. Nothing to do here."). The new holder is named
+ * only when the actor may see other editors (docs/ROLES.md §2.3, same rule as `redactOtherEditor`):
+ * an editor without "See other editors' jobs" sees "Another editor" on the page, so the message says so too.
+ */
+export async function movedOnMessage(db: DbLike, ctx: Pick<AuthContext, "userId" | "role" | "canViewTeamJobs" | "isSystem">, job: Pick<Job, "editorId">): Promise<string> {
+  if (job.editorId) {
+    const mayName = ctx.isSystem || ctx.role !== "editor" || ctx.canViewTeamJobs || job.editorId === ctx.userId;
+    if (!mayName) return "This job is now with another editor. Nothing to do here.";
+    const name = (await userNames(db, [job.editorId])).get(job.editorId);
+    if (name) return `This job is now with ${name}. Nothing to do here.`;
+  }
+  return "This job is no longer with you. Nothing to do here.";
+}
+
+/**
+ * `assertMayMoveJob` for user-initiated moves that carry `expectedVersion` (reviewer finding E2):
+ * permission first for strangers (a ⚑teamJobs editor, a member on a job they do not manage: 403, never a
+ * 409 carrying the row), BUT a PAST editor pressing Start editing / Send for checking / Can't do this one
+ * from a stale page — the job was just moved to someone else — gets the optimistic-concurrency 409 with
+ * the current row (which they may read anyway) BEFORE the permission denial, so the screen refreshes
+ * instead of blaming them. With a fresh version the denial is the plain "This job is now with <editor>".
+ */
+export async function assertMayMoveJobOrStale(db: DbLike, ctx: AuthContext, job: Job, ref: JobPermissionRef, expectedVersion: number): Promise<void> {
+  if (ctx.isSystem || can(ctx, "job.transition", ref)) return;
+  if (isPastEditorOf(ctx, job, ref)) {
+    assertVersion(job, expectedVersion);
+    throw new ForbiddenError("job.transition", await movedOnMessage(db, ctx, job));
+  }
   throw new ForbiddenError("job.transition", moveDeniedMessage(ctx));
 }
 
@@ -560,14 +604,14 @@ export async function swapEditor(tx: Tx, ctx: AuthContext, jobIn: Job, newEditor
       await notify(tx, ctx, {
         userIds: [newEditorId],
         type: "revision_requested",
-        title: `Revision #${openRevision.revisionNumber} on ${job.jobNumber} is now assigned to you`,
+        title: `${job.jobNumber} was given to you with changes asked (round ${openRevision.revisionNumber})`,
         body: [openRevision.reason, openRevision.instructions].filter((s): s is string => typeof s === "string" && s.trim() !== "").join(" — ") || job.name,
         jobId: job.id,
         activityEventId: repointedEventId,
         linkPath: jobLinkPath(job.id, `revision-${openRevision.revisionNumber}`),
       });
     } else {
-      await sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was assigned to you`, createdEventId);
+      await sendJobNotification(tx, ctx, job, "job_assigned", [newEditorId], `${job.jobNumber} was given to you`, createdEventId);
     }
     if (createdEventId) await emitAutomationEvent(tx, ctx, { eventId: createdEventId, eventType: "assignment.created", jobId: job.id });
   }
@@ -772,6 +816,12 @@ export interface ApplyMoveOptions {
   cause?: EventCause;
   /** Delivery step payload (docs/ROLES.md §7.3); only on a delivering move, else 422. */
   delivery?: DeliveryInputValue | null;
+  /**
+   * SIMPLIFICATION-PLAN §12 decision 3: an owner / co-owner reviewing a job they edited themselves must
+   * confirm ("You edited this yourself. Approve anyway?"). Without it the approve-side moves
+   * (SELF_APPROVAL_CONFIRM_ACTIONS) are a 422; with it every event of the move carries `selfApproved`.
+   */
+  confirmSelfApproval?: boolean;
 }
 
 export interface TransitionResult {
@@ -844,6 +894,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
   let isOverride = false;
   let isReopen = false;
   let isRestore = false;
+  let selfApproved = false;
   let lateral = isLateral(current, target);
   const withdraw = opts.mode === "withdraw";
 
@@ -862,6 +913,14 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
         isReopen = move.isReopen;
         isRestore = move.isRestore;
         lateral = move.isLateral;
+        // Decision 3: an admin approving / delivering / completing their own edit confirms it (recorded).
+        const moveActions = actionsForMove(ctx, current.category, target.category, isReopen, wjob) ?? [];
+        if (moveActions.some((a) => actionNeedsSelfApprovalConfirm(ctx, a, ref))) {
+          if (opts.confirmSelfApproval !== true) {
+            throw new RuleViolationError(SELF_APPROVAL_CONFIRM_MESSAGE, { formErrors: [], fieldErrors: { confirmSelfApproval: ["Required"] } });
+          }
+          selfApproved = true;
+        }
       } else if (opts.override) {
         assertCan(ctx, "job.transition_override", ref);
         isOverride = true;
@@ -1137,7 +1196,8 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
       ? job.editorId
       : undefined;
   const causeMeta = ctx.isSystem && opts.cause ? { cause: opts.cause } : {};
-  const meta = (extra: Record<string, unknown>) => jobEventMeta(job, { ...extra, ...causeMeta }, opts.batchId);
+  const selfMeta = selfApproved ? { selfApproved: true } : {};
+  const meta = (extra: Record<string, unknown>) => jobEventMeta(job, { ...extra, ...causeMeta, ...selfMeta }, opts.batchId);
   const statusEventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
@@ -1240,7 +1300,9 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
         metadata: meta({ noteId, editCount: 0, revisionId }),
       });
     }
-    await sendJobNotification(tx, ctx, job, "revision_requested", [job.editorId], `Revision #${revisionNumber} requested on ${job.jobNumber}`, revEvent, `revision-${revisionNumber}`);
+    // The editor's one must-act notice carries the request itself (first line), not just the job name.
+    const asked = (p.description || p.instructions || p.reason || "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+    await sendJobNotification(tx, ctx, job, "revision_requested", [job.editorId], `Changes asked on ${job.jobNumber} (round ${revisionNumber})`, revEvent, `revision-${revisionNumber}`, asked ? `${job.name} — ${asked}` : undefined);
     await emitAutomationEvent(tx, ctx, { eventId: revEvent, eventType: "revision.requested", jobId: job.id });
   }
 
@@ -1258,7 +1320,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
     if (declined) {
       const evt = await milestone("job.declined", "declined", { reason, previousEditorId: before.editorId });
       const admins = await adminsOf(tx, ctx.organisationId);
-      await sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...admins], `${job.jobNumber} was declined by the editor`, evt);
+      await sendJobNotification(tx, ctx, job, "job_declined", [job.photographerId, ...admins], `${job.jobNumber} needs an editor again (the editor can't do this one)`, evt);
     }
     switch (target.category) {
       case "accepted":
@@ -1269,7 +1331,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
         break;
       case "submitted": {
         const evt = await milestone("job.submitted", "submitted", { resubmission: false, ...(onBehalfOf ? { onBehalfOf } : {}) });
-        await sendJobNotification(tx, ctx, job, "work_submitted", photographerAndCreator, `${job.jobNumber} was submitted for review`, evt);
+        await sendJobNotification(tx, ctx, job, "work_submitted", photographerAndCreator, `${job.jobNumber} is ready to check`, evt);
         if ((await currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"])).length === 0) {
           warnings.push("No finished-files or editing-workspace link is attached yet");
         }
@@ -1287,7 +1349,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
           job,
           "work_resubmitted",
           [resolved?.requestedByUserId, ...photographerAndCreator],
-          `${job.jobNumber} was resubmitted`,
+          `${job.jobNumber} is ready to check again${resolved?.revisionNumber ? ` (round ${resolved.revisionNumber + 1})` : ""}`,
           evt,
         );
         if ((await currentLinkIds(tx, job.id, ["finished_files", "editing_workspace"])).length === 0) {
@@ -1315,7 +1377,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
       }
       case "completed": {
         const evt = await milestone("job.completed", "completed");
-        await sendJobNotification(tx, ctx, job, "job_completed", [job.photographerId, job.editorId], `${job.jobNumber} was completed`, evt);
+        await sendJobNotification(tx, ctx, job, "job_completed", [job.photographerId, job.editorId], `${job.jobNumber} is done`, evt);
         break;
       }
       case "cancelled": {
@@ -1372,7 +1434,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
 export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(TransitionInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const target = await resolveTransitionTarget(tx, ctx, job, graph, p);
   assertVersion(job, p.expectedVersion);
@@ -1384,6 +1446,7 @@ export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unkno
     startTimer: p.startTimer,
     delivery: p.delivery ?? null,
     cause: ctx.isSystem ? p.cause : undefined,
+    confirmSelfApproval: p.confirmSelfApproval,
   });
 }
 
@@ -1466,7 +1529,7 @@ export async function getAvailableActions(db: DbLike, ctx: AuthContext, jobId: s
 export async function restoreJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<TransitionResult> {
   const p = parseInput(RestoreInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
   assertVersion(job, p.expectedVersion);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const current = statusIn(graph, job.statusId);
@@ -1563,24 +1626,35 @@ export async function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown):
 async function moveToCategory(
   tx: Tx,
   ctx: AuthContext,
-  p: { jobId: string; expectedVersion: number; toStatusId?: string; reason?: string | null; startTimer?: boolean; delivery?: DeliveryInputValue },
+  p: {
+    jobId: string;
+    expectedVersion: number;
+    toStatusId?: string;
+    reason?: string | null;
+    startTimer?: boolean;
+    delivery?: DeliveryInputValue;
+    confirmSelfApproval?: boolean;
+  },
   category: StatusCategory,
   extra: { revision?: RevisionInputValue | null } = {},
 ): Promise<TransitionResult> {
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  // Strangers: 403 first (never a 409 carrying the row). A PAST editor from a stale page (the job was just
+  // moved to someone else): 409 "someone else just changed this job", never "only the assigned editor".
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
+  assertVersion(job, p.expectedVersion);
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, job.workflowId);
   const target = await resolveTransitionTarget(tx, ctx, job, graph, p.toStatusId ? { toStatusId: p.toStatusId } : { toCategory: category });
   if (target.category !== category) {
     throw new ValidationError(`That status is not a "${category}" status`, { formErrors: [], fieldErrors: { toStatusId: ["Wrong category"] } });
   }
-  assertVersion(job, p.expectedVersion);
   return applyMove(tx, ctx, job, target, graph, {
     mode: "user",
     reason: p.reason,
     startTimer: p.startTimer,
     revision: extra.revision ?? null,
     delivery: p.delivery ?? null,
+    confirmSelfApproval: p.confirmSelfApproval,
   });
 }
 

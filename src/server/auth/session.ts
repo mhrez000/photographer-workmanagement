@@ -110,7 +110,7 @@ export function sessionKindForRole(role: Role): SessionKind {
 }
 
 export async function signSessionToken(payload: SessionPayload): Promise<string> {
-  return new SignJWT(payload.k ? { sv: payload.sv, k: payload.k } : { sv: payload.sv })
+  return new SignJWT({ sv: payload.sv, ...(payload.k ? { k: payload.k } : {}), ...(payload.r ? { r: payload.r } : {}) })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(payload.sub)
     .setIssuedAt()
@@ -127,7 +127,8 @@ export async function verifySessionToken(token: string | null | undefined): Prom
     if (typeof payload.sub !== "string" || payload.sub.length === 0) return null;
     if (typeof sv !== "number" || !Number.isInteger(sv)) return null;
     const k = payload.k === "client" ? "client" : "staff";
-    return { sub: payload.sub, sv, k };
+    const r = payload.r === "editor" || payload.r === "client" || payload.r === "photographer" ? payload.r : undefined;
+    return { sub: payload.sub, sv, k, ...(r ? { r } : {}) };
   } catch {
     return null;
   }
@@ -147,9 +148,12 @@ function cookieOptions(maxAge: number) {
   };
 }
 
-/** Sets the session cookie (route handlers / server actions only). `kind` defaults to staff. */
-export async function createSession(userId: string, sessionVersion: number, kind: SessionKind = "staff"): Promise<void> {
-  const token = await signSessionToken({ sub: userId, sv: sessionVersion, k: kind });
+/**
+ * Sets the session cookie (route handlers / server actions only). `kind` defaults to staff; `role` is
+ * the optional landing hint (`r` claim) the proxy uses to send editors to /my-jobs.
+ */
+export async function createSession(userId: string, sessionVersion: number, kind: SessionKind = "staff", role?: Role): Promise<void> {
+  const token = await signSessionToken({ sub: userId, sv: sessionVersion, k: kind, ...(role ? { r: role } : {}) });
   const jar = await cookies();
   jar.set(SESSION_COOKIE_NAME, token, cookieOptions(SESSION_TTL_SECONDS));
 }
@@ -185,6 +189,7 @@ export function settingsToContext(row: OrganisationSettings | undefined): Contex
     timeTrackingEnabled: row.timeTrackingEnabled,
     automationsEnabled: row.automationsEnabled,
     auditNotifications: row.auditNotifications,
+    advancedToolsEnabled: row.advancedToolsEnabled,
   };
 }
 

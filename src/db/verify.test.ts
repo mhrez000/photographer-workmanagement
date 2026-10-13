@@ -9,7 +9,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Tx } from "@/db/index";
-import { jobs, users } from "@/db/schema";
+import { jobs, organisationSettings, users } from "@/db/schema";
 import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
 import type { AuthContext, Job } from "@/lib/types";
 import { withTx } from "@/server/services/_shared";
@@ -32,7 +32,7 @@ import {
 } from "@/server/services/workflow";
 import { verifyDerived } from "./verify";
 import { runSeed } from "./seed/index";
-import { buildReport } from "./seed/summary";
+import { buildReport, buildSmallReport } from "./seed/summary";
 
 let db: TestDb;
 let ids: SeedIds;
@@ -176,15 +176,44 @@ describe("verifyDerived on a small service-driven organisation", () => {
 describe("demo seed", () => {
   afterEach(() => fakeClock.reset());
 
-  it("drives the full §12 plan through the services with zero drift", async () => {
+  it("profile full: drives the full §12 plan through the services with zero drift", async () => {
     const seedDb = await makeTestDb();
     const now = new Date("2026-10-09T01:30:00.000Z"); // Friday 12:30 in Sydney
-    const result = await runSeed(seedDb, { now, bcryptCost: 4 });
+    const result = await runSeed(seedDb, { now, bcryptCost: 4, profile: "full" });
     expect(result.skipped).toEqual([]);
     const integrity = await verifyDerived(seedDb);
     expect(integrity.drift).toEqual([]);
     expect(integrity.structural).toEqual([]);
     const report = await buildReport(seedDb, result.northlightId, now.getTime());
     expect(report.checks.filter((c) => !c.ok)).toEqual([]);
+    // SIMPLIFICATION-PLAN §8 safety rule: a studio with custom workflows + enabled automations keeps its Advanced
+    // pages (the full fixture is the e2e suite's database), while the isolated Other Studio stays at the default.
+    const switches = await seedDb
+      .select({ organisationId: organisationSettings.organisationId, advancedToolsEnabled: organisationSettings.advancedToolsEnabled })
+      .from(organisationSettings);
+    expect(switches.find((s) => s.organisationId === result.northlightId)?.advancedToolsEnabled).toBe(true);
+    expect(switches.find((s) => s.organisationId === result.otherStudioId)?.advancedToolsEnabled).toBe(false);
+  }, 600_000);
+
+  it("profile small (the default): the SIMPLIFICATION-PLAN §8 demo covers every stage with zero drift, no automations, Advanced off", async () => {
+    const seedDb = await makeTestDb();
+    const now = new Date("2026-10-13T01:30:00.000Z"); // Tuesday 12:30 in Sydney
+    const result = await runSeed(seedDb, { now, bcryptCost: 4 });
+    expect(result.skipped).toEqual([]);
+    const integrity = await verifyDerived(seedDb);
+    expect(integrity.drift).toEqual([]);
+    expect(integrity.structural).toEqual([]);
+    const report = await buildSmallReport(seedDb, result.northlightId, now.getTime());
+    expect(report.checks.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`)).toEqual([]);
+    // the login box accounts exist in both orgs' shapes: owner, photographer01, editor01, client (+ Other Studio)
+    const emails = (await seedDb.select({ email: users.email }).from(users)).map((u) => u.email).sort();
+    expect(emails).toEqual(
+      ["client@other.test", "client@studio.test", "editor01@studio.test", "editor02@studio.test", "editor03@studio.test", "editor@other.test", "owner@other.test", "owner@studio.test", "photographer01@studio.test"].sort(),
+    );
+    // the late summary ran once per person (dedupe key per civil day)
+    const { notifications } = await import("@/db/schema");
+    const late = await seedDb.select().from(notifications).where(eq(notifications.type, "job_overdue"));
+    expect(late.length).toBeGreaterThan(0);
+    expect(new Set(late.map((n) => n.dedupeKey)).size).toBe(late.length);
   }, 600_000);
 });

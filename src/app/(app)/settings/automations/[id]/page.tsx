@@ -16,7 +16,7 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { formatDateTime, formatRelative } from "@/lib/dates";
 import type { AutomationRunView } from "@/lib/types";
 import { getAutomationDetail } from "@/server/queries/automations";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export async function generateMetadata({ params }: PageProps<"/settings/automations/[id]">): Promise<Metadata> {
   const { id } = await params;
@@ -106,7 +106,7 @@ function RunsTable({ runs, timeZone, lookup }: { runs: AutomationRunView[]; time
 }
 
 export default async function AutomationDetailPage({ params }: PageProps<"/settings/automations/[id]">) {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("automations", "/settings/studio"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "automation.manage");
   const { id } = await params;
   const tz = ctx.settings.timezone;

@@ -31,16 +31,20 @@ import {
   PORTAL_CANCELLED_VISIBLE_DAYS,
   PRIMARY_OWNER_PROTECTED_ACTIONS,
   REVIEW_GATED_CATEGORIES,
+  SELF_APPROVAL_CONFIRM_ACTIONS,
   SELF_REVIEW_ACTIONS,
   STAFF_ROLES,
   personaMayEver,
+  presetSwitches,
   type Action,
+  type AdvancedFeature,
   type CommentKind,
   type EditorFlag,
   type LinkKind,
   type MemberFlag,
   type NoteKind,
   type Persona,
+  type PhotographerPreset,
   type Role,
   type StatusCategory,
 } from "@/lib/constants";
@@ -183,6 +187,33 @@ type UserTargetAction =
   | "org.transfer_primary_owner";
 type SelfAction = "notification.read" | "notification.prefs" | "saved_view.manage" | "dashboard.customise";
 type PortalAction = "portal.view_job" | "portal.give_feedback";
+type AdvancedAction = "advanced.view";
+
+/** One hidden feature (SIMPLIFICATION-PLAN §8); `undefined` = "any advanced page". */
+export interface AdvancedFeatureRef {
+  feature: AdvancedFeature;
+}
+
+/**
+ * The Advanced PAGES belong to the owner / co-owners (SIMPLIFICATION-PLAN §3: the Advanced group appears in
+ * the owner's menu; editors "no longer see Projects, Clients, Activity, Board, Timeline"; §8: the switch is
+ * "owner only"). Hidden FIELDS and APIs (time tracking, pause / resume, completion %, extra kinds, own-row
+ * workloads, saved views) stay available to any staff member while the switch is on, so an editor's timer
+ * or density setting still works for a studio that turned Advanced tools on.
+ */
+const ADMIN_ONLY_ADVANCED_PAGES: ReadonlySet<AdvancedFeature> = new Set<AdvancedFeature>([
+  "kanban",
+  "timeline",
+  "analytics",
+  "bottlenecks",
+  "reports",
+  "performance",
+  "workflows",
+  "automations",
+  "teams",
+  "permissions",
+  "projects",
+]);
 
 /** Resource type each action is checked against (`undefined` = no resource). */
 export type ResourceOf<A extends Action> = A extends JobAction
@@ -201,7 +232,9 @@ export type ResourceOf<A extends Action> = A extends JobAction
               ? SelfRef
               : A extends PortalAction
                 ? PortalJobRef
-                : undefined;
+                : A extends AdvancedAction
+                  ? AdvancedFeatureRef
+                  : undefined;
 
 /* ------------------------------------------------------------------ */
 /*  Rule shape                                                         */
@@ -321,9 +354,51 @@ export function hasBusinessView(ctx: AuthContext): boolean {
   return isAdmin(ctx) || (ctx.role === "photographer" && ctx.canViewAllJobs);
 }
 
-/** Hard self-review rule (§3.4): I am or was an editor of this job. */
+/** Self-review rule (§3.4): I am or was an editor of this job. */
 export function workedOnJob(ctx: Pick<AuthContext, "userId">, job: JobPermissionRef): boolean {
   return ctx.userId !== null && (job.editorId === ctx.userId || (job.pastEditorIds ?? []).includes(ctx.userId));
+}
+
+/**
+ * Self-review, roles v2 + SIMPLIFICATION-PLAN §12 decision 3: an editor or a non-admin photographer who
+ * edited the job can never review it (hard denial). An owner / co-owner (`is_admin`) may — the policy
+ * allows it, and the SERVICE requires `confirmSelfApproval` for the approve-side actions
+ * (`selfReviewNeedsConfirm`), recording `selfApproved` in history.
+ */
+export function selfReviewBlocked(ctx: AuthContext, job: JobPermissionRef): boolean {
+  return !isAdmin(ctx) && workedOnJob(ctx, job);
+}
+
+/** An admin reviewing their own edit: the UI shows "You edited this yourself. Approve anyway?" and sends `confirmSelfApproval`. */
+export function selfReviewNeedsConfirm(ctx: AuthContext, job: JobPermissionRef): boolean {
+  return isAdmin(ctx) && !ctx.isSystem && workedOnJob(ctx, job);
+}
+
+const SELF_APPROVAL_CONFIRM: ReadonlySet<Action> = new Set<Action>(SELF_APPROVAL_CONFIRM_ACTIONS);
+
+/** True when `action` on `job` by `ctx` must carry `confirmSelfApproval` (admin reviewing their own edit). */
+export function actionNeedsSelfApprovalConfirm(ctx: AuthContext, action: Action, job: JobPermissionRef): boolean {
+  return SELF_APPROVAL_CONFIRM.has(action) && selfReviewNeedsConfirm(ctx, job);
+}
+
+/** The org's Advanced tools switch (SIMPLIFICATION-PLAN §8): hidden pages / APIs exist only while it is on. */
+export function advancedToolsOn(ctx: Pick<AuthContext, "settings">): boolean {
+  return ctx.settings.advancedToolsEnabled === true;
+}
+
+/**
+ * Invite preset → the switch columns an invite sets (plan §2: "Only their own shoots" or "Everything
+ * (co-owner)"). Explicit `isAdmin` / `flags` in the invite override the preset's values.
+ */
+export function inviteSwitchesFor(
+  preset: PhotographerPreset | undefined,
+  explicit: { isAdmin?: boolean; flags?: Partial<Record<MemberFlag, boolean>> } = {},
+): { isAdmin: boolean | undefined; flags: Partial<Record<MemberFlag, boolean>> } {
+  if (!preset) return { isAdmin: explicit.isAdmin, flags: { ...(explicit.flags ?? {}) } };
+  const base = presetSwitches(preset);
+  const flags: Partial<Record<MemberFlag, boolean>> = { ...base.flags };
+  for (const [k, v] of Object.entries(explicit.flags ?? {}) as [MemberFlag, boolean | undefined][]) if (v !== undefined) flags[k] = v;
+  return { isAdmin: explicit.isAdmin ?? base.isAdmin, flags };
 }
 
 /** The `job.view` rule (also the base of every job-scoped read). Clients never: they use the portal. */
@@ -841,6 +916,11 @@ export const POLICY = {
     memberFlag: "canViewAllJobs",
     allow: (ctx) => hasBusinessView(ctx),
   },
+  "advanced.view": {
+    label: "Open the Advanced tools (Board, Timeline, Reports & stats, Workflows, Automations, …)",
+    scope: STAFF_SCOPE("while Advanced tools is on; the Advanced PAGES are the owner's, hidden fields / APIs (timers, own-row workloads, …) any staff; the feature's own permission still applies"),
+    allow: (ctx, ref) => advancedToolsOn(ctx) && (ref === undefined || isAdmin(ctx) || !ADMIN_ONLY_ADVANCED_PAGES.has(ref.feature)),
+  },
   "portal.view_job": {
     label: "See shared work in the portal",
     scope: { client: "jobs shared with their client" },
@@ -905,9 +985,13 @@ export function roleCanEver(role: Role, action: Action): boolean {
   return personas.some((p) => personaMayEver(p, action));
 }
 
-/** Why `can()` would deny on a hard rule (UI hints); null = decided by the rule. */
+/**
+ * Why `can()` would deny on a hard rule (UI hints); null = decided by the rule. Self-review denies
+ * editors and non-admin photographers only (SIMPLIFICATION-PLAN §12.3: admins confirm instead —
+ * `selfReviewNeedsConfirm`).
+ */
 export function hardRuleDenial(ctx: AuthContext, action: Action, resource?: unknown): "self_review" | "primary_owner" | null {
-  if (SELF_REVIEW.has(action) && isJobRef(resource) && workedOnJob(ctx, resource)) return "self_review";
+  if (SELF_REVIEW.has(action) && isJobRef(resource) && selfReviewBlocked(ctx, resource)) return "self_review";
   if (PRIMARY_OWNER_PROTECTED.has(action) && isRecord(resource) && resource.isPrimaryOwner === true && resource.id !== ctx.userId) {
     return "primary_owner";
   }

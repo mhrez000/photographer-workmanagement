@@ -8,28 +8,43 @@
  *     - reduced projection (`id, name, title, role, isAdmin, isPrimaryOwner,
  *       avatarColour, isActive`); client portal users never appear for
  *       non-admins (`role=client` → 400 for them);
+ *     - the studio roster is never revealed to people who do not work with it
+ *       (SIMPLIFICATION-PLAN §2, reviewer finding E17 — `rosterScopeSql`):
+ *         admins                      everyone;
+ *         non-admin photographers     every editor (they assign), themselves, the
+ *                                     owner / co-owners and the photographers on jobs
+ *                                     they can see (everyone with ⚑See all jobs);
+ *         editors                     themselves, the owner / co-owners and the
+ *                                     photographers on their jobs (for @mentions);
  *     - `role=photographer` (active photographers) is open to anyone who can
- *       `job.create` (an editor picks the photographer of a job they create);
+ *       `job.create` (an editor with "Can add their own jobs" has to pick the
+ *       photographer of the job they create — the one exception to the scope);
  *     - `jobId` reveals who can view a job, so it requires `comment.mention`
- *       on that job (404 when the job is not visible, else 403).
+ *       on that job (404 when the job is not visible, else 403); the roster
+ *       scope still applies on top.
  *   GET /api/clients/options?q=           → `{ id, name, colour }` of non-archived clients
+ *     - admins every client; an extra photographer the clients on their jobs or
+ *       created by them (plan §2; `clientScopeSql` — the New job form lets them
+ *       type a new name instead); editors who can `job.create` every client (they
+ *       create jobs for clients they have never worked for), other editors the
+ *       clients of visible jobs.
  *   GET /api/projects/options?clientId=&q= → `{ id, name, clientId, clientName }` of non-archived projects
- *     - to anyone who can `job.create` (every client: an editor creates jobs
- *       for clients they have never worked for); otherwise the `client.view` /
- *       `project.view` scope (editors: clients / projects of visible jobs).
+ *     - to anyone who can `job.create`; otherwise the `project.view` scope
+ *       (editors: projects of visible jobs).
  * Clients (portal users) get 403 everywhere.
  */
-import { and, asc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { DbLike } from "@/db/index";
-import { clients, projects, users } from "@/db/schema";
+import { clients, jobs, projects, users } from "@/db/schema";
 import { ROLES, STAFF_ROLES } from "@/lib/constants";
 import type { AuthContext, ClientOption, ProjectOption, UserOption } from "@/lib/types";
-import { assertCan, can, isAdmin } from "@/server/auth/permissions";
+import { assertCan, can, isAdmin, visibleJobsWhere } from "@/server/auth/permissions";
 import { ForbiddenError } from "@/server/errors";
 import { userCanViewJob } from "@/server/services/_collab";
 import { parseInput } from "@/server/services/_shared";
 import { binaryAsc } from "./metrics";
+import { clientScopeSql } from "./clients";
 import { hasVisibleJobSql } from "./projects";
 import { assertStaffRead, likeSql, loadVisibleJob } from "./scope";
 import { primaryOwnerIdOf, reducedUser } from "./users";
@@ -61,6 +76,21 @@ export const UserOptionsQuerySchema = z.object({ role: z.preprocess(toList, z.ar
 /** Team members / editors: staff roles only (`role=client` → 400, §3.4). */
 export const StaffUserOptionsQuerySchema = z.object({ role: z.preprocess(toList, z.array(z.enum(STAFF_ROLES)).optional()), ...userOptionFields });
 
+/**
+ * The people a non-admin staff member may see in a picker (file header; null = no restriction): themselves,
+ * the owner / co-owners, the photographers (shooter or creator) of the jobs visible to them, and — for
+ * photographers, who assign — every editor. Rows are later filtered to STAFF roles anyway.
+ */
+export function rosterScopeSql(ctx: AuthContext): SQL | null {
+  if (isAdmin(ctx) || ctx.userId === null) return null;
+  // ⚑See all jobs: every job is theirs to read, so the roster is nothing new to them.
+  if (ctx.role === "photographer" && ctx.canViewAllJobs) return null;
+  const onMyJobs = sql`${users.role} = 'photographer' and (${users.id} in (select ${jobs.photographerId} from ${jobs} where ${visibleJobsWhere(ctx)}) or ${users.id} in (select ${jobs.createdByUserId} from ${jobs} where ${visibleJobsWhere(ctx)}))`;
+  const parts: SQL[] = [eq(users.id, ctx.userId), sql`(${users.role} = 'photographer' and ${users.isAdmin} = true)`, onMyJobs];
+  if (ctx.role === "photographer") parts.push(eq(users.role, "editor"));
+  return or(...parts) as SQL;
+}
+
 /** People picker (reduced projection; editors carry workload when the actor may see team workloads). */
 export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<UserOption[]> {
   assertStaffRead(ctx);
@@ -69,7 +99,8 @@ export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknow
   const roles = f.role && f.role.length > 0 ? [...new Set(f.role)] : null;
   const photographersOnly = roles !== null && roles.length === 1 && roles[0] === "photographer";
   // The job-create photographer picker is open to creators; every other list needs user.view.
-  if (!(photographersOnly && can(ctx, "job.create"))) assertCan(ctx, "user.view");
+  const createPicker = photographersOnly && can(ctx, "job.create");
+  if (!createPicker) assertCan(ctx, "user.view");
 
   let jobRef = null;
   if (f.jobId) {
@@ -81,6 +112,8 @@ export async function getUserOptions(db: DbLike, ctx: AuthContext, input: unknow
   const parts: (SQL | undefined)[] = [eq(users.organisationId, ctx.organisationId), isNull(users.anonymisedAt)];
   parts.push(inArray(users.role, roles ?? (admin ? [...ROLES] : [...STAFF_ROLES])));
   if (!admin) parts.push(inArray(users.role, [...STAFF_ROLES]));
+  // Roster scope (E17): the job-create photographer picker is the one list that may name every photographer.
+  if (!(createPicker && ctx.role === "editor")) parts.push(rosterScopeSql(ctx) ?? undefined);
   if (!f.includeInactive || photographersOnly) parts.push(eq(users.isActive, true));
   if (f.q) parts.push(admin ? or(likeSql(users.name, f.q), likeSql(users.email, f.q)) : likeSql(users.name, f.q));
   const rows = (
@@ -125,7 +158,8 @@ export async function getClientOptions(db: DbLike, ctx: AuthContext, input: unkn
         eq(clients.organisationId, ctx.organisationId),
         isNull(clients.archivedAt),
         q ? likeSql(clients.name, q) : undefined,
-        !creator && ctx.role === "editor" ? hasVisibleJobSql(ctx, "clientId", clients.id) : undefined,
+        // Editors who create jobs pick any client; everyone else sees their own clients (file header).
+        creator && ctx.role === "editor" ? undefined : (clientScopeSql(ctx) ?? undefined),
       ),
     )
     .orderBy(binaryAsc(clients.name), asc(clients.id));

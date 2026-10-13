@@ -28,7 +28,7 @@ import { formatDateTime, formatTime } from "@/lib/dates";
 import type { ActivityFeedItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { buildDiff, type DiffRow, type DiffValue } from "./activity-diff";
-import { groupOfEventType } from "./event-groups";
+import { groupOfEventType, historyCategoryOf } from "./event-groups";
 
 const GROUP_ICONS: Record<string, LucideIcon> = {
   status: CircleDot,
@@ -161,6 +161,8 @@ export function ActivityItem({ item, timeZone, people, hideJob }: ActivityItemPr
   const [open, setOpen] = React.useState(false);
   const rows = React.useMemo(() => buildDiff(item, { timeZone, people }), [item, timeZone, people]);
   const group = groupOfEventType(item.eventType);
+  // Plain words for what changed (UX-13): Sign-in / Job / People / Studio / Client. "Job" is implied on a job's own history.
+  const category = historyCategoryOf(item.eventType);
   const automated = item.metadata.cause === "automation";
   const detailsId = `activity-${item.id}-details`;
   const exact = formatDateTime(item.createdAt, timeZone);
@@ -187,9 +189,9 @@ export function ActivityItem({ item, timeZone, people, hideJob }: ActivityItemPr
         <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <Sentence item={item} hideJob={hideJob} />
           <div className="flex shrink-0 items-center gap-2">
-            {item.visibility === "management" ? (
-              <Badge size="sm" variant="outline" title="Visible to the owner and admins only">
-                Management
+            {!(hideJob && category === "Job") ? (
+              <Badge size="sm" variant="outline" data-history-category={category} title={item.visibility === "management" ? "Only the owner and co-owners see this entry" : undefined}>
+                {category}
               </Badge>
             ) : null}
             {automated ? (
@@ -212,7 +214,7 @@ export function ActivityItem({ item, timeZone, people, hideJob }: ActivityItemPr
               className="inline-flex items-center gap-1 rounded-xs text-xs font-medium text-ink-muted hover:text-ink focus-ring"
             >
               <ChevronDown aria-hidden="true" className={cn("size-3.5 transition-transform duration-(--motion-fast)", open && "rotate-180")} />
-              {open ? "Hide details" : "Before → after"}
+              {open ? "Hide details" : rows.some((r) => r.before && r.after) ? "Before → after" : "Details"}
             </button>
             {open ? (
               <div id={detailsId} className="mt-2 animate-fade-in">

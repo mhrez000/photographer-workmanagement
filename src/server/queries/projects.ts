@@ -20,6 +20,12 @@ import { binaryAsc, EMPTY_COUNTS, jobCountsBy, loadUserRefs } from "./metrics";
 import { likeSql, selectJobRows } from "./scope";
 
 export const DETAIL_JOB_LIMIT = 200;
+/**
+ * Rows the Advanced /projects PAGE renders (the API stays unbounded). The page draws every project twice
+ * (table + phone list); a studio with ~900 projects took 25 s and 10 MB to render, so the page shows the
+ * most urgent LIST_PAGE_LIMIT and says how to find the rest (search / client filter).
+ */
+export const LIST_PAGE_LIMIT = 100;
 
 const flag = z.preprocess((v) => (Array.isArray(v) ? v[0] : v), z.union([z.boolean(), z.enum(["1", "0", "true", "false"])]).optional()).transform(
   (v) => v === true || v === "1" || v === "true",

@@ -44,6 +44,8 @@ export async function getNotificationPrefs(db: DbLike, ctx: AuthContext): Promis
   const forClient = ctx.role === "client";
   return NOTIFICATION_TYPES.filter((type) => clientTypes.includes(type) === forClient).map((type) => {
     const meta = NOTIFICATION_TYPE_META[type];
-    return { type, label: meta.label, mandatory: meta.mandatory, enabled: meta.mandatory ? true : (byType.get(type) ?? true) };
+    // No row → the type's default (plan §8: 8 groups on, the rest off; portal types on), exactly as `notify` decides.
+    const defaultOn = meta.defaultOn || forClient;
+    return { type, label: meta.label, mandatory: meta.mandatory, enabled: meta.mandatory ? true : (byType.get(type) ?? defaultOn) };
   });
 }

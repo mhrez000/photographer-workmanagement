@@ -71,7 +71,7 @@ describe("buildContextFromDb", () => {
       clientId: null,
       clientFeedbackEnabled: false,
     });
-    expect(ctx?.settings).toEqual({ timezone: "Australia/Sydney", timeTrackingEnabled: true, automationsEnabled: true, auditNotifications: false });
+    expect(ctx?.settings).toEqual({ timezone: "Australia/Sydney", timeTrackingEnabled: true, automationsEnabled: true, auditNotifications: false, advancedToolsEnabled: false });
     expect(ctx?.now()).toBe("2026-10-08T00:00:00.000Z");
     fakeClock.advanceMinutes(1);
     expect(ctx?.now()).toBe("2026-10-08T00:01:00.000Z");

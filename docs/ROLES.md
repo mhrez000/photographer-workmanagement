@@ -321,7 +321,9 @@ CREATE TRIGGER org_primary_owner BEFORE INSERT OR UPDATE OF primary_owner_user_i
 `/settings/users` shows admins a dismissible card while `roles_v2_notice_dismissed_at IS NULL` and the org has a `0003_roles_v2_data` migration event:
 - "**N former managers are now team members.** They keep every team-member switch but manage only their own jobs. Make any of them an admin?" — one row per ex-manager (from the `user.role_changed` events with `formerRole = manager`) who is still an active non-admin, each with **Make admin** (`POST /api/users/:id/admin`, audited as usual).
 - When the org had `editors_see_team_jobs` on: "Editors used to see their teammates' jobs. That switch is now per editor and covers all editors' jobs. Turn on **See other editors' jobs** for: …" (the editors from the migration event), each with a toggle (`POST /api/users/:id/permissions`).
-- **Dismiss** → `POST /api/settings/roles-notice/dismiss` (admin) sets the column, event `settings.updated`.
+- **Dismiss** → sets the column, event `settings.updated`.
+
+> **Removed (SIMPLIFICATION-PLAN §8):** the notice card, its `/api/settings/roles-notice/dismiss` route and the `getRolesNotice` query are gone. The column stays; the `dismissRolesNotice` service remains for its tests only.
 
 ---
 
@@ -1262,10 +1264,10 @@ Recorded by the users-services pass. These refine the contract and do not change
 - **`transferPrimaryOwner`** lives in `services/users.ts`, and `expectedVersion` is the `organisation_settings.version`.
 - **Client portal users**: `listClientPortalUsers(db, ctx, { clientId })` in `services/users.ts`, served at `GET /api/clients/:id/portal-users` (admin, `client.manage_portal`).
 - **Notification prefs**: `getNotificationPrefs` lists only the types the user can receive. That is `CLIENT_NOTIFICATION_TYPES` for client users and every other type for staff. Setting a type outside that list is a 400.
-- **Settings**: `defaultPhotographerUserId` can be edited through `PATCH /api/settings` (null, or an active photographer of the org; otherwise 422 `invalid_target`; foreign id 404). The event metadata carries `previousName` / `nextName`. `dismissRolesNotice` is served at `POST /api/settings/roles-notice/dismiss` (idempotent). The four deprecated visibility switches, `primaryOwnerUserId` and `rolesV2NoticeDismissedAt` are unknown keys and return 400.
+- **Settings**: `defaultPhotographerUserId` can be edited through `PATCH /api/settings` (null, or an active photographer of the org; otherwise 422 `invalid_target`; foreign id 404). The event metadata carries `previousName` / `nextName`. `dismissRolesNotice` no longer has a route (the roles notice card was removed; the service and its tests remain). The four deprecated visibility switches, `primaryOwnerUserId` and `rolesV2NoticeDismissedAt` are unknown keys and return 400.
 - **Login**: when a client user has the portal off or the client is archived, the login also writes `auth.login_failed` (`reason = "portal_closed"`) and counts toward the rate limiter. The response is the same generic 401.
 - **Teams**: a team member or lead who is a client user is rejected with 422 (`not_staff`).
-- **Routes added**: `POST /api/users/:id/admin`, `POST /api/users/:id/permissions`, `POST /api/organisation/primary-owner`, `POST /api/settings/roles-notice/dismiss`, `GET /api/clients/:id/portal-users`. `/api/users/:id/visibility` is deleted (§6.1).
+- **Routes added**: `POST /api/users/:id/admin`, `POST /api/users/:id/permissions`, `POST /api/organisation/primary-owner`, `GET /api/clients/:id/portal-users` (`POST /api/settings/roles-notice/dismiss` was added and later removed with the notice card). `/api/users/:id/visibility` is deleted (§6.1).
 
 ## Job / workflow / collaboration services notes (packages B + C)
 

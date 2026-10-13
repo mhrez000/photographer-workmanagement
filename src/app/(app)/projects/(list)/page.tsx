@@ -12,9 +12,9 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import type { ProjectListItem } from "@/lib/types";
-import { allowed, guard, load, pageContext, param } from "@/server/page";
+import { advancedPageContext, allowed, guard, load, param } from "@/server/page";
 import { getClientOptions } from "@/server/queries/options";
-import { listProjects } from "@/server/queries/projects";
+import { LIST_PAGE_LIMIT, listProjects } from "@/server/queries/projects";
 
 export const metadata: Metadata = { title: "Projects" };
 
@@ -30,22 +30,25 @@ function byUrgency(a: ProjectListItem, b: ProjectListItem): number {
 }
 
 export default async function ProjectsPage({ searchParams }: PageProps<"/projects">) {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("projects", "/jobs"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "project.view");
   const sp = await searchParams;
   const q = param(sp, "q")?.trim() || undefined;
   const clientId = param(sp, "clientId") || undefined;
   const includeArchived = param(sp, "archived") === "1";
   const tz = ctx.settings.timezone;
-  const projects = (await load(() => listProjects(db, ctx, { q, clientId, includeArchived }))).sort(byUrgency);
+  const all = (await load(() => listProjects(db, ctx, { q, clientId, includeArchived }))).sort(byUrgency);
+  // Render cap (see LIST_PAGE_LIMIT): the most urgent first; the counts in the header still cover every project.
+  const projects = all.slice(0, LIST_PAGE_LIMIT);
+  const hidden = all.length - projects.length;
   const clients = await load(() => getClientOptions(db, ctx));
   const canCreate = allowed(ctx, "project.create");
   const filtered = Boolean(q || clientId || includeArchived);
   const clientName = clientId ? (clients.find((c) => c.id === clientId)?.name ?? null) : null;
   const newHref = clientId ? `/projects/new?clientId=${clientId}` : "/projects/new";
 
-  const openTotal = projects.reduce((n, p) => n + p.counts.open, 0);
-  const overdueTotal = projects.reduce((n, p) => n + p.counts.overdue, 0);
+  const openTotal = all.reduce((n, p) => n + p.counts.open, 0);
+  const overdueTotal = all.reduce((n, p) => n + p.counts.overdue, 0);
 
   return (
     <PageContainer>
@@ -53,9 +56,9 @@ export default async function ProjectsPage({ searchParams }: PageProps<"/project
         eyebrow="Production"
         title={clientName ? `Projects · ${clientName}` : "Projects"}
         description={
-          projects.length > 0 ? (
+          all.length > 0 ? (
             <span className="numeric">
-              {projects.length} project{projects.length === 1 ? "" : "s"} · {openTotal} open job{openTotal === 1 ? "" : "s"}
+              {all.length} project{all.length === 1 ? "" : "s"} · {openTotal} open job{openTotal === 1 ? "" : "s"}
               {overdueTotal > 0 ? <span className="text-danger-fg"> · {overdueTotal} overdue</span> : null}
             </span>
           ) : (
@@ -107,6 +110,11 @@ export default async function ProjectsPage({ searchParams }: PageProps<"/project
         </Card>
       ) : (
         <Card flush className="overflow-hidden">
+          {hidden > 0 ? (
+            <p className="border-b border-border px-4 py-2 text-sm text-ink-muted numeric" data-testid="projects-cap-notice">
+              Showing the {projects.length} most urgent of {all.length} projects. Search or pick a client to find the rest.
+            </p>
+          ) : null}
           <div className="hidden md:block">
             <Table density="default">
               <THead>

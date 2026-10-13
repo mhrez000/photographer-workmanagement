@@ -61,7 +61,9 @@ export function personaLabel(user: { role: Role; isAdmin?: boolean | null }): st
 export function displayRoleLabel(user: { role: Role; isAdmin?: boolean | null; title?: string | null }): string {
   const base = personaLabel(user);
   const title = user.title?.trim();
-  return title ? `${base} · ${title}` : base;
+  // A title that only repeats the persona ("Editor · Editor", "Owner / Photographer · Owner / Photographer") adds nothing.
+  if (!title || title.toLowerCase() === base.toLowerCase() || base.toLowerCase().split(" / ").includes(title.toLowerCase())) return base;
+  return `${base} · ${title}`;
 }
 
 /**
@@ -202,9 +204,9 @@ export const EDITOR_FLAG_META: Record<EditorFlag, PermissionFlagMeta> = {
   canCreateJobs: {
     key: "canCreateJobs",
     column: "can_create_jobs",
-    label: "Create jobs",
-    description: "Can create jobs (with a photographer) and pick up jobs they created.",
-    inviteDefault: true,
+    label: "Can add their own jobs",
+    description: "Can add jobs (naming the photographer) and pick up jobs they added. Off by default (SIMPLIFICATION-PLAN §2); existing editors keep what they have.",
+    inviteDefault: false,
     migratedDefault: true,
     short: "create",
   },
@@ -375,13 +377,16 @@ export const CLIENT_MILESTONE_CANCELLED_LABEL = "Cancelled";
 export const PORTAL_CANCELLED_VISIBLE_DAYS = 30;
 
 export const KANBAN_COLUMN_META: Record<KanbanColumn, { label: string; categories: readonly StatusCategory[] }> = {
-  new: { label: "New", categories: ["new", "ready"] },
-  assigned: { label: "Assigned", categories: ["assigned", "accepted"] },
-  in_progress: { label: "In Progress", categories: ["in_progress"] },
-  review: { label: "Review", categories: ["submitted", "review", "resubmitted"] },
-  revision: { label: "Revision", categories: ["revision"] },
-  approved: { label: "Approved", categories: ["approved", "delivered"] },
-  completed: { label: "Completed", categories: ["completed"] },
+  // Labels use the five stage words (SIMPLIFICATION-PLAN §4, §8): the Board is an Advanced tool, but it
+  // must read the same as the Jobs list. "With editor" and "Done" keep their sub-labels as two columns
+  // so a drop still maps onto one status category.
+  new: { label: "Needs editor", categories: ["new", "ready"] },
+  assigned: { label: "With editor · Not started", categories: ["assigned", "accepted"] },
+  in_progress: { label: "With editor · Editing", categories: ["in_progress"] },
+  review: { label: "Ready to check", categories: ["submitted", "review", "resubmitted"] },
+  revision: { label: "Changes asked", categories: ["revision"] },
+  approved: { label: "Done · Not sent to client", categories: ["approved", "delivered"] },
+  completed: { label: "Done", categories: ["completed"] },
 };
 
 /* ------------------------------------------------------------------ */
@@ -405,15 +410,27 @@ export const PRIORITY_META: Record<Priority, { label: string; colour: string; he
 export const LINK_KINDS = ["raw_files", "editing_workspace", "finished_files", "gallery", "client_delivery", "reference", "other"] as const;
 export type LinkKind = (typeof LINK_KINDS)[number];
 
+/**
+ * Plain-English labels (SIMPLIFICATION-PLAN §5 "Files"): the three slots the simple job page shows are
+ * Raw files (photographer), Finished photos (editor) and Other links (everything else, collapsed).
+ * Internal keys never change.
+ */
 export const LINK_KIND_META: Record<LinkKind, { label: string; finishedWork: boolean }> = {
   raw_files: { label: "Raw files", finishedWork: false },
   editing_workspace: { label: "Editing workspace", finishedWork: false },
-  finished_files: { label: "Finished files", finishedWork: true },
-  gallery: { label: "Gallery", finishedWork: true },
-  client_delivery: { label: "Client delivery", finishedWork: true },
-  reference: { label: "Reference material", finishedWork: false },
-  other: { label: "Other", finishedWork: false },
+  finished_files: { label: "Finished photos", finishedWork: true },
+  gallery: { label: "Online gallery", finishedWork: true },
+  client_delivery: { label: "Client download", finishedWork: true },
+  reference: { label: "Reference", finishedWork: false },
+  other: { label: "Other link", finishedWork: false },
 };
+
+/** The simple job page's three file slots (plan §5): which kinds fall into each. */
+export const SIMPLE_LINK_SLOTS = {
+  raw: ["raw_files"] as readonly LinkKind[],
+  finished: ["finished_files", "gallery", "client_delivery"] as readonly LinkKind[],
+  other: ["editing_workspace", "reference", "other"] as readonly LinkKind[],
+} as const;
 
 /** Link kinds an editor may add while working (photographers may add any kind; draft also allows raw_files, §3.3). */
 export const EDITOR_LINK_KINDS: readonly LinkKind[] = ["editing_workspace", "finished_files", "gallery", "reference", "other"];
@@ -568,38 +585,90 @@ export const NOTIFICATION_TYPES = [
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
-export const NOTIFICATION_TYPE_META: Record<NotificationType, { label: string; /** cannot be switched off in preferences */ mandatory: boolean }> = {
-  job_assigned: { label: "Job assigned to me", mandatory: true },
-  job_reassigned: { label: "Job reassigned", mandatory: true },
-  job_unassigned: { label: "Job unassigned from me", mandatory: true },
-  job_declined: { label: "Editor declined a job", mandatory: false },
-  deadline_changed: { label: "Deadline changed", mandatory: false },
-  priority_changed: { label: "Priority changed", mandatory: false },
-  comment_added: { label: "New comment", mandatory: false },
-  mentioned: { label: "I was @mentioned", mandatory: true },
-  revision_requested: { label: "Revision requested", mandatory: true },
-  work_submitted: { label: "Work submitted for review", mandatory: false },
-  work_resubmitted: { label: "Work resubmitted", mandatory: false },
-  work_approved: { label: "Work approved", mandatory: false },
-  job_overdue: { label: "Job became overdue", mandatory: false },
-  review_overdue: { label: "Review deadline passed", mandatory: false },
-  job_completed: { label: "Job completed", mandatory: false },
-  job_reopened: { label: "Job reopened", mandatory: false },
-  job_cancelled: { label: "Job cancelled", mandatory: false },
-  job_paused: { label: "Editor paused work", mandatory: false },
-  workload_threshold: { label: "Editor workload threshold", mandatory: false },
-  editor_unavailable: { label: "Editor unavailable", mandatory: false },
-  automation: { label: "Automation notices", mandatory: false },
-  client_feedback: { label: "Client left feedback", mandatory: false },
-  client_work_shared: { label: "Work shared with you", mandatory: false },
-  client_work_delivered: { label: "Your work is ready", mandatory: false },
-  client_feedback_reply: { label: "The studio replied", mandatory: false },
-  job_created: { label: "Editor created a job that needs an editor", mandatory: false },
+export interface NotificationTypeMeta {
+  /** Plain-English label (SIMPLIFICATION-PLAN §8 glossary). */
+  label: string;
+  /** Cannot be switched off in preferences. */
+  mandatory: boolean;
+  /**
+   * Simplified defaults (plan §8 "8 notifications on by default"): with NO user_notification_prefs row,
+   * `notify()` sends the type only when this is true. An explicit row always wins; mandatory types ignore
+   * both. Client-portal types stay on (the portal is unchanged).
+   */
+  defaultOn: boolean;
+  /** The plan's default group this type belongs to (null = a hidden / advanced notice). */
+  group: NotificationGroup | null;
+}
+
+/** The 8 default notifications of plan §8, in the plan's order. */
+export const NOTIFICATION_GROUPS = [
+  "job_given",
+  "ready_to_check",
+  "changes_asked",
+  "approved",
+  "message",
+  "client_feedback",
+  "late_summary",
+  "taken_off",
+] as const;
+export type NotificationGroup = (typeof NOTIFICATION_GROUPS)[number];
+
+export const NOTIFICATION_GROUP_LABELS: Record<NotificationGroup, string> = {
+  job_given: "A job was given to you",
+  ready_to_check: "Ready to check",
+  changes_asked: "Changes asked",
+  approved: "Approved",
+  message: "New message or @mention",
+  client_feedback: "Client feedback",
+  late_summary: "A daily \"late jobs\" summary",
+  taken_off: "A job was taken off you or cancelled",
+};
+
+export const NOTIFICATION_TYPE_META: Record<NotificationType, NotificationTypeMeta> = {
+  job_assigned: { label: "A job was given to you", mandatory: true, defaultOn: true, group: "job_given" },
+  job_reassigned: { label: "A job was moved to another editor", mandatory: true, defaultOn: true, group: "taken_off" },
+  job_unassigned: { label: "A job was taken off you", mandatory: true, defaultOn: true, group: "taken_off" },
+  job_declined: { label: "An editor said \"Can't do this one\"", mandatory: false, defaultOn: false, group: null },
+  deadline_changed: { label: "A due date changed", mandatory: false, defaultOn: false, group: null },
+  priority_changed: { label: "A job was marked Rush (or un-marked)", mandatory: false, defaultOn: false, group: null },
+  comment_added: { label: "New message on a job", mandatory: false, defaultOn: true, group: "message" },
+  mentioned: { label: "You were @mentioned", mandatory: true, defaultOn: true, group: "message" },
+  revision_requested: { label: "Changes asked", mandatory: true, defaultOn: true, group: "changes_asked" },
+  work_submitted: { label: "Ready to check", mandatory: false, defaultOn: true, group: "ready_to_check" },
+  work_resubmitted: { label: "Ready to check again (Round 2+)", mandatory: false, defaultOn: true, group: "ready_to_check" },
+  work_approved: { label: "Approved", mandatory: false, defaultOn: true, group: "approved" },
+  job_overdue: { label: "Late jobs (one summary a day)", mandatory: false, defaultOn: true, group: "late_summary" },
+  review_overdue: { label: "A check is overdue", mandatory: false, defaultOn: false, group: null },
+  job_completed: { label: "A job was closed", mandatory: false, defaultOn: false, group: null },
+  job_reopened: { label: "A job was reopened", mandatory: false, defaultOn: false, group: null },
+  job_cancelled: { label: "A job was cancelled", mandatory: false, defaultOn: true, group: "taken_off" },
+  job_paused: { label: "An editor paused work", mandatory: false, defaultOn: false, group: null },
+  workload_threshold: { label: "An editor is near capacity", mandatory: false, defaultOn: false, group: null },
+  editor_unavailable: { label: "A deactivated editor still holds jobs", mandatory: false, defaultOn: false, group: null },
+  automation: { label: "Automation notices", mandatory: false, defaultOn: false, group: null },
+  client_feedback: { label: "Feedback from a client", mandatory: false, defaultOn: true, group: "client_feedback" },
+  client_work_shared: { label: "Work shared with you", mandatory: false, defaultOn: true, group: null },
+  client_work_delivered: { label: "Your work is ready", mandatory: false, defaultOn: true, group: null },
+  client_feedback_reply: { label: "The studio replied", mandatory: false, defaultOn: true, group: "client_feedback" },
+  job_created: { label: "An editor created a job that needs an editor", mandatory: false, defaultOn: false, group: null },
 };
 
 /** The only notification types client users receive (and staff never do). */
 export const CLIENT_NOTIFICATION_TYPES = ["client_work_shared", "client_work_delivered", "client_feedback_reply"] as const satisfies readonly NotificationType[];
 export type ClientNotificationType = (typeof CLIENT_NOTIFICATION_TYPES)[number];
+
+/** Staff notification types that are ON without a preference row (the 8 groups of plan §8, 13 internal types). */
+export const DEFAULT_ON_NOTIFICATION_TYPES: readonly NotificationType[] = NOTIFICATION_TYPES.filter(
+  (t) => NOTIFICATION_TYPE_META[t].defaultOn && !(CLIENT_NOTIFICATION_TYPES as readonly NotificationType[]).includes(t),
+);
+/** Staff types hidden by default ("Mark old updates as read" targets these; still selectable in My account). */
+export const DEFAULT_OFF_NOTIFICATION_TYPES: readonly NotificationType[] = NOTIFICATION_TYPES.filter(
+  (t) => !NOTIFICATION_TYPE_META[t].defaultOn && !(CLIENT_NOTIFICATION_TYPES as readonly NotificationType[]).includes(t),
+);
+/** Types of one default group (for the My account → Notifications list). */
+export function notificationTypesOfGroup(group: NotificationGroup): NotificationType[] {
+  return NOTIFICATION_TYPES.filter((t) => NOTIFICATION_TYPE_META[t].group === group);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Automations                                                        */
@@ -922,6 +991,8 @@ export const PERMISSIONS = {
   "dashboard.customise": STAFF_P,
   "search.global": STAFF_P,
   "view.business_scope": AM,
+  // simplified UI (plan §8): every hidden page / API needs the org's Advanced tools switch
+  "advanced.view": STAFF_P,
   // portal
   "portal.view_job": [C],
   "portal.give_feedback": [C],
@@ -938,7 +1009,12 @@ export function personaMayEver(persona: Persona, action: Action): boolean {
   return (PERMISSIONS[action] as readonly Persona[]).includes(persona);
 }
 
-/** Actions denied to anyone who edited the job (hard self-review rule, §3.4). */
+/**
+ * Self-review rule (ROLES.md §3.4, loosened by SIMPLIFICATION-PLAN §12 decision 3): these actions are
+ * denied to an editor or non-admin photographer who edited the job. Owners / co-owners (`is_admin`) MAY
+ * perform them on a job they edited themselves — the approve-side ones only after an explicit
+ * `confirmSelfApproval` (`SELF_APPROVAL_CONFIRM_ACTIONS`), recorded in history as `selfApproved`.
+ */
 export const SELF_REVIEW_ACTIONS = [
   "job.begin_review",
   "job.approve",
@@ -948,6 +1024,9 @@ export const SELF_REVIEW_ACTIONS = [
   "revision.withdraw",
   "client_feedback.to_revision",
 ] as const satisfies readonly Action[];
+
+/** The self-review actions an admin must confirm ("You edited this yourself. Approve anyway?"). */
+export const SELF_APPROVAL_CONFIRM_ACTIONS = ["job.begin_review", "job.approve", "job.deliver", "job.complete"] as const satisfies readonly Action[];
 
 /** Actions on the primary owner only the primary owner may perform on themselves (§3.4). */
 export const PRIMARY_OWNER_PROTECTED_ACTIONS = [
@@ -964,13 +1043,14 @@ export const PRIMARY_OWNER_PROTECTED_ACTIONS = [
 /*  Login page demo accounts (docs/ROLES.md §13)                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The four accounts the login page offers (SIMPLIFICATION-PLAN §8 demo, seed profile "small"). The same
+ * four exist in the "full" fixture seed, so the box is right for either profile.
+ */
 export const DEMO_ACCOUNTS: readonly { email: string; shownAs: string; note: string }[] = [
-  { email: "owner@studio.test", shownAs: "Owner / Photographer", note: "runs the business, shoots, reviews" },
-  { email: "photographer01@studio.test", shownAs: "Photographer (team member)", note: "sees all jobs, workloads & analytics" },
-  { email: "photographer02@studio.test", shownAs: "Photographer (team member)", note: "own jobs; reviews their own shoots" },
-  { email: "photographer12@studio.test", shownAs: "Photographer (team member)", note: "junior: the owner reviews her work" },
-  { email: "editor01@studio.test", shownAs: "Editor", note: "assigned jobs; can create jobs" },
-  { email: "editor02@studio.test", shownAs: "Editor", note: "+ sees other editors' jobs" },
+  { email: "owner@studio.test", shownAs: "Owner", note: "runs the studio, shoots, checks edits" },
+  { email: "photographer01@studio.test", shownAs: "Photographer", note: "only their own shoots" },
+  { email: "editor01@studio.test", shownAs: "Editor", note: "edits the jobs given to them" },
   { email: "client@studio.test", shownAs: "Client", note: "Harbourline Realty portal" },
 ];
 export const DEMO_PASSWORD = "Password123!";
@@ -1056,3 +1136,249 @@ export type ReportKind = (typeof REPORT_KINDS)[number];
 
 /** Reporting range presets (mirrors `RangePreset` in src/lib/dates.ts). */
 export const RANGE_PRESETS = ["today", "this_week", "this_month", "last_month", "last_7_days", "last_30_days", "custom"] as const;
+
+/* ------------------------------------------------------------------ */
+/*  Simplified UI (docs/SIMPLIFICATION-PLAN.md) — registries           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything "hidden, not deleted" behind Settings → Studio → Advanced tools (plan §8). The key is what
+ * `requireAdvanced` / `requireAdvancedApi` / `isAdvancedRoute` gate on; `routes` are page-path prefixes,
+ * `apiPrefixes` the `/api/*` prefixes that 404 while the switch is off. Features without a page of their
+ * own (pause/resume, completion %, …) list no routes: the UI simply does not render them.
+ */
+export const ADVANCED_FEATURES = [
+  "kanban",
+  "timeline",
+  "analytics",
+  "bottlenecks",
+  "reports",
+  "workloads",
+  "performance",
+  "workflows",
+  "automations",
+  "teams",
+  "permissions",
+  "saved_views",
+  "bulk_ui",
+  "projects",
+  "time_tracking",
+  "pause_resume",
+  "completion_percent",
+  "priority_levels",
+  "review_due_dates",
+  "extra_kinds",
+  "keyboard_chords",
+  "appearance_density",
+] as const;
+export type AdvancedFeature = (typeof ADVANCED_FEATURES)[number];
+
+export interface AdvancedFeatureMeta {
+  key: AdvancedFeature;
+  label: string;
+  /** Page-path prefixes this feature owns (hidden pages 404 while Advanced tools is off). */
+  routes: readonly string[];
+  /** `/api/*` prefixes this feature owns (404 JSON while off; internal service calls are unaffected). */
+  apiPrefixes: readonly string[];
+}
+
+export const ADVANCED_FEATURE_META: Record<AdvancedFeature, AdvancedFeatureMeta> = {
+  kanban: { key: "kanban", label: "Board", routes: ["/workspace/kanban"], apiPrefixes: ["/api/kanban"] },
+  timeline: { key: "timeline", label: "Timeline", routes: ["/workspace/timeline"], apiPrefixes: ["/api/timeline"] },
+  analytics: { key: "analytics", label: "Reports & stats", routes: ["/insights/analytics"], apiPrefixes: ["/api/analytics"] },
+  bottlenecks: { key: "bottlenecks", label: "Bottlenecks", routes: ["/insights/bottlenecks"], apiPrefixes: ["/api/bottlenecks"] },
+  reports: { key: "reports", label: "Reports", routes: ["/insights/reports"], apiPrefixes: ["/api/reports"] },
+  workloads: { key: "workloads", label: "Workloads (capacity & bands)", routes: ["/team/workloads"], apiPrefixes: ["/api/workloads"] },
+  performance: { key: "performance", label: "Performance", routes: ["/team/performance"], apiPrefixes: ["/api/performance"] },
+  workflows: {
+    key: "workflows",
+    label: 'Workflows (custom statuses, "Move to any status")',
+    routes: ["/settings/workflows"],
+    apiPrefixes: ["/api/workflows", "/api/statuses", "/api/transitions"],
+  },
+  automations: { key: "automations", label: "Automations", routes: ["/settings/automations"], apiPrefixes: ["/api/automations", "/api/automation-runs"] },
+  teams: { key: "teams", label: "Teams", routes: ["/settings/teams"], apiPrefixes: ["/api/teams"] },
+  permissions: { key: "permissions", label: "Full permission table & individual switches", routes: ["/settings/roles"], apiPrefixes: ["/api/settings/permissions"] },
+  saved_views: { key: "saved_views", label: "Saved views & dashboard layouts", routes: [], apiPrefixes: ["/api/views", "/api/dashboard/layout"] },
+  bulk_ui: { key: "bulk_ui", label: "Group by, column chooser, bulk actions", routes: [], apiPrefixes: ["/api/jobs/bulk"] },
+  projects: { key: "projects", label: "Projects page", routes: ["/projects"], apiPrefixes: [] },
+  time_tracking: { key: "time_tracking", label: "Time tracking", routes: [], apiPrefixes: ["/api/me/timer"] },
+  pause_resume: { key: "pause_resume", label: "Pause / resume", routes: [], apiPrefixes: [] },
+  completion_percent: { key: "completion_percent", label: "Completion %", routes: [], apiPrefixes: [] },
+  priority_levels: { key: "priority_levels", label: "Four priority levels (simple UI: one Rush tick)", routes: [], apiPrefixes: [] },
+  review_due_dates: { key: "review_due_dates", label: "Review due and revision due dates", routes: [], apiPrefixes: [] },
+  extra_kinds: { key: "extra_kinds", label: "Extra link, note and message kinds", routes: [], apiPrefixes: [] },
+  keyboard_chords: { key: "keyboard_chords", label: "Keyboard chords & the shortcuts sheet", routes: [], apiPrefixes: [] },
+  appearance_density: { key: "appearance_density", label: "Appearance density", routes: ["/settings/appearance"], apiPrefixes: [] },
+};
+
+/** Per-job API sub-paths that are advanced only (`/api/jobs/:id/<sub>`). */
+export const ADVANCED_JOB_SUBPATHS: Readonly<Record<string, AdvancedFeature>> = {
+  timer: "time_tracking",
+  sessions: "time_tracking",
+  pause: "pause_resume",
+  resume: "pause_resume",
+  "migrate-workflow": "workflows",
+};
+
+/** Simple UI priority mapping (plan §5): the single "Rush job" tick is `priority = "urgent"`, else "normal". */
+export const RUSH_PRIORITY: Priority = "urgent";
+export const NON_RUSH_PRIORITY: Priority = "normal";
+export function priorityForRush(rush: boolean): Priority {
+  return rush ? RUSH_PRIORITY : NON_RUSH_PRIORITY;
+}
+export function isRushPriority(priority: Priority): boolean {
+  return priority === RUSH_PRIORITY;
+}
+
+/* ---------------- photographer presets (plan §2, decision 4) ---------------- */
+
+/**
+ * The six member switches become ONE choice at invite time (plan §2): "Only their own shoots" or
+ * "Everything (co-owner)". A photographer whose switches match neither shows as "custom" until edited.
+ * Decision 4: an extra photographer checks the edits on their own shoots (review ON); the owner can
+ * always step in.
+ */
+export const PHOTOGRAPHER_PRESETS = ["own_shoots", "co_owner"] as const;
+export type PhotographerPreset = (typeof PHOTOGRAPHER_PRESETS)[number];
+export type PhotographerPresetOrCustom = PhotographerPreset | "custom";
+
+export interface PhotographerPresetDef {
+  key: PhotographerPreset;
+  label: string;
+  description: string;
+  isAdmin: boolean;
+  flags: Readonly<Record<MemberFlag, boolean>>;
+}
+
+export const PHOTOGRAPHER_PRESET_META: Record<PhotographerPreset, PhotographerPresetDef> = {
+  own_shoots: {
+    key: "own_shoots",
+    label: "Only their own shoots",
+    description: "Creates jobs for their own shoots, gives them to editors and checks the edits on those shoots. Sees only their jobs and the clients on them.",
+    isAdmin: false,
+    flags: {
+      canCreateJobs: true,
+      canAssignEditors: true,
+      canReviewSubmissions: true,
+      canViewAllJobs: false,
+      canViewTeamWorkloads: false,
+      canViewAnalytics: false,
+    },
+  },
+  co_owner: {
+    key: "co_owner",
+    label: "Everything (co-owner)",
+    description: "Sees and does everything the owner can, except transferring ownership.",
+    isAdmin: true,
+    flags: {
+      canCreateJobs: true,
+      canAssignEditors: true,
+      canReviewSubmissions: true,
+      canViewAllJobs: true,
+      canViewTeamWorkloads: true,
+      canViewAnalytics: true,
+    },
+  },
+};
+
+/** Switch values for an invite with `preset` (`isAdmin` + the six member switches). */
+export function presetSwitches(preset: PhotographerPreset): { isAdmin: boolean; flags: Record<MemberFlag, boolean> } {
+  const def = PHOTOGRAPHER_PRESET_META[preset];
+  return { isAdmin: def.isAdmin, flags: { ...def.flags } };
+}
+
+/**
+ * The preset a photographer's switches correspond to, or "custom". Admins are always "co_owner" (their
+ * stored switches are ignored while `is_admin`). Editors and clients have no preset (null).
+ */
+export function photographerPresetOf(
+  user: { role: Role; isAdmin?: boolean | null } & Partial<Record<MemberFlag, boolean | null>>,
+): PhotographerPresetOrCustom | null {
+  if (user.role !== "photographer") return null;
+  if (user.isAdmin) return "co_owner";
+  const own = PHOTOGRAPHER_PRESET_META.own_shoots.flags;
+  const matches = MEMBER_FLAGS.every((f) => (user[f] ?? false) === own[f]);
+  return matches ? "own_shoots" : "custom";
+}
+
+/* ---------------- silent projects (plan §5 "Projects disappear from the form") ---------------- */
+
+/**
+ * The New job form has no project field: a project is reused when the client AND the address / job name
+ * match (case- and whitespace-insensitive, on the project's name or its address), else one is created from
+ * the address. The portal's "grouped by property" view keeps working.
+ */
+export const AUTO_PROJECT_RULE = {
+  matchOn: ["name", "address"] as const,
+  caseInsensitive: true,
+  collapseWhitespace: true,
+  /** The created project's name AND address are the typed address. */
+  createFrom: "address",
+} as const;
+
+/** Normalises an address / project name for the AUTO_PROJECT_RULE comparison. */
+export function normaliseProjectKey(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Default "usual days to edit" of a job type with none set (plan §5: shoot date + 1). */
+export const DEFAULT_USUAL_DAYS_TO_EDIT = 1;
+
+/* ---------------- simple job actions (plan §5) ---------------- */
+
+/** Tap-to-add chips of the "What needs changing?" box; joined they become the revision `reason`. */
+export const SIMPLE_CHANGE_CHIPS = ["Sky", "Straighten", "Colour", "Remove items", "Crop", "Missing photos"] as const;
+export type SimpleChangeChip = (typeof SIMPLE_CHANGE_CHIPS)[number];
+/** `reason` of an Ask-for-changes request without chips. */
+export const SIMPLE_CHANGES_DEFAULT_REASON = "Changes";
+/** "Needed back by" defaults to tomorrow (civil days in the org timezone). */
+export const SIMPLE_CHANGES_DEFAULT_DAYS = 1;
+
+/** The one Reopen on a Done job (plan §5 ⋯ menu): two reasons. */
+export const SIMPLE_REOPEN_REASONS = ["client_changes", "fix_delivery_link"] as const;
+export type SimpleReopenReason = (typeof SIMPLE_REOPEN_REASONS)[number];
+export const SIMPLE_REOPEN_REASON_LABELS: Record<SimpleReopenReason, string> = {
+  client_changes: "Client wants changes",
+  fix_delivery_link: "Fix the delivery link",
+};
+
+/** Approve (plan §12 decision 2): ask when the client uses the portal; "n/a" when they do not. */
+export const APPROVE_SHARE_CHOICES = ["send", "only", "n/a"] as const;
+export type ApproveShareChoice = (typeof APPROVE_SHARE_CHOICES)[number];
+
+/** Message shown with the admin self-approval check (plan §12 decision 3). */
+export const SELF_APPROVAL_CONFIRM_MESSAGE = "You edited this yourself. Approve anyway?";
+
+/** Editors page (plan §7): below this many finished jobs the percentages read "Not enough jobs yet". */
+export const MIN_JOBS_FOR_RATES = 5;
+
+/** Daily late summary (plan §8 notification 7): one `job_overdue` notice per user per civil day. */
+export function lateSummaryDedupeKey(userId: string, civilDate: string): string {
+  return `late_summary:${userId}:${civilDate}`;
+}
+export const LATE_SUMMARY_LINK_PATH = "/jobs?late=1";
+
+/* ---------------- stage pill tones (plan §4) ---------------- */
+
+/**
+ * The six stage colour tokens (`--stage-<tone>`, `-soft`, `-fg` in src/app/globals.css; Tailwind
+ * `bg-stage-<tone>-soft` …). STAGE_META in src/lib/stages.ts names the tone per stage.
+ */
+export const STAGE_TONES = ["grey", "blue", "amber", "red", "green", "slate"] as const;
+export type StageTone = (typeof STAGE_TONES)[number];
+export const STAGE_TONE_CLASSES: Record<StageTone, { pill: string; dot: string }> = {
+  grey: { pill: "bg-stage-grey-soft text-stage-grey-fg", dot: "bg-stage-grey" },
+  blue: { pill: "bg-stage-blue-soft text-stage-blue-fg", dot: "bg-stage-blue" },
+  amber: { pill: "bg-stage-amber-soft text-stage-amber-fg", dot: "bg-stage-amber" },
+  red: { pill: "bg-stage-red-soft text-stage-red-fg", dot: "bg-stage-red" },
+  green: { pill: "bg-stage-green-soft text-stage-green-fg", dot: "bg-stage-green" },
+  slate: { pill: "bg-stage-slate-soft text-stage-slate-fg", dot: "bg-stage-slate" },
+};
+
+/* ---------------- seed profiles ---------------- */
+
+/** `SEED_PROFILE`: "small" = the plan §8 demo (default); "full" = the 160-job fixture the e2e suite uses. */
+export const SEED_PROFILES = ["small", "full"] as const;
+export type SeedProfile = (typeof SEED_PROFILES)[number];
+export const DEFAULT_SEED_PROFILE: SeedProfile = "small";

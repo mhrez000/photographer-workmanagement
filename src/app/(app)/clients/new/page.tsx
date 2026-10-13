@@ -13,6 +13,7 @@ function safeReturn(value: string | undefined): string | undefined {
   return value;
 }
 
+/** New client as a page (the topbar quick action and `?returnTo=` flows); the Clients list uses the same form in a dialog. */
 export default async function NewClientPage({ searchParams }: PageProps<"/clients/new">) {
   const { ctx } = await pageContext();
   guard(ctx, "client.create");
@@ -21,11 +22,7 @@ export default async function NewClientPage({ searchParams }: PageProps<"/client
 
   return (
     <PageContainer width="narrow">
-      <PageHeader
-        eyebrow={[{ label: "Production" }, { label: "Clients", href: "/clients" }, { label: "New" }]}
-        title="New client"
-        description="Clients sit at the top of the structure: Client → Project → Jobs."
-      />
+      <PageHeader eyebrow={[{ label: "Clients", href: "/clients" }, { label: "New" }]} title="New client" description="Just a name is enough. You can add contact details later." />
       <Card>
         <CardContent className="pt-5">
           <NewClientForm returnTo={returnTo} />

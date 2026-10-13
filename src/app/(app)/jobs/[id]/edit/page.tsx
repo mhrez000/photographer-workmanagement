@@ -1,100 +1,70 @@
 import type { Metadata } from "next";
 import { forbidden } from "next/navigation";
+import { EditJobSimpleForm } from "@/components/job-simple";
+import { StagePill } from "@/components/jobs/stage-pill";
 import { PageContainer } from "@/components/shell";
 import { PageHeader } from "@/components/ui/page-header";
-import { EditJobForm } from "@/components/job-form";
-import { StatusPill, jobHref } from "@/components/jobs";
-import type { ClientOption, JobTypeView, ProjectOption } from "@/lib/types";
+import { NON_RUSH_PRIORITY, RUSH_PRIORITY } from "@/lib/constants";
 import { loadJobRef } from "@/server/auth/job-ref";
 import { allowed, load, pageContext } from "@/server/page";
-import { getJobDetail } from "@/server/queries/jobDetail";
-import { getClientOptions, getProjectOptions } from "@/server/queries/options";
+import { getJobPageSimple } from "@/server/queries/jobPageSimple";
 import { listJobTypes } from "@/server/queries/workflows";
 
-export const metadata: Metadata = { title: "Edit job" };
+export const metadata: Metadata = { title: "Edit details" };
 
 /**
- * Edit job fields (ARCHITECTURE §10 `/jobs/[id]/edit`). The page is open to
- * anyone who may change at least one field group (`JobDetail.actions` +
- * `job.edit_completion_percent`); the rest renders read-only.
+ * Edit details (docs/SIMPLIFICATION-PLAN.md §5): the simple fields only —
+ * address / job name, type of shoot, shoot date, due date, client delivery
+ * date (portal clients), Rush job, instructions. Status, people and links are
+ * changed from the job page itself.
  */
 export default async function EditJobPage({ params }: PageProps<"/jobs/[id]/edit">) {
   const { id } = await params;
   const { ctx, db } = await pageContext();
-  const detail = await load(() => getJobDetail(db, ctx, id));
-  const { job, actions } = detail;
-
+  const page = await load(() => getJobPageSimple(db, ctx, decodeURIComponent(id)));
+  const { header, sideColumn } = page;
   // Full ref (draft window, project sharing, past editors) — docs/ROLES.md §2.1.
-  const { ref } = await loadJobRef(db, ctx, job.id);
+  const { ref } = await load(() => loadJobRef(db, ctx, header.id));
   const permissions = {
-    fields: actions.canEditFields,
-    client: allowed(ctx, "job.change_client", ref),
-    deadlines: actions.canEditDeadlines,
-    priority: actions.canSetPriority,
-    completion: allowed(ctx, "job.edit_completion_percent", ref),
+    fields: allowed(ctx, "job.edit_fields", ref),
+    deadlines: allowed(ctx, "job.set_due_date", ref),
+    rush: allowed(ctx, "job.set_priority", ref),
   };
-  if (!permissions.fields && !permissions.client && !permissions.deadlines && !permissions.priority && !permissions.completion) forbidden();
+  if (!permissions.fields && !permissions.deadlines && !permissions.rush) forbidden();
 
-  // Pickers; the job's own (possibly archived) client / project / type is always present.
-  const jobTypes: JobTypeView[] = (await load(() => listJobTypes(db, ctx, { includeArchived: true }))).filter((t) => t.archivedAt === null || t.id === job.jobType.id);
-  if (!jobTypes.some((t) => t.id === job.jobType.id)) {
-    jobTypes.unshift({
-      id: job.jobType.id,
-      name: job.jobType.name,
-      colour: job.jobType.colour,
-      workflow: { id: job.workflowId, name: "" },
-      defaultEstimatedHours: null,
-      sortOrder: -1,
-      archivedAt: null,
-      version: 0,
-      openJobCount: 0,
-    });
-  }
-  const clients: ClientOption[] = permissions.client ? await load(() => getClientOptions(db, ctx)) : [];
-  if (!clients.some((c) => c.id === job.client.id)) clients.unshift({ id: job.client.id, name: job.client.name, colour: "" });
-  const projects: ProjectOption[] = permissions.client ? await load(() => getProjectOptions(db, ctx, { clientId: job.client.id })) : [];
-  if (!projects.some((p) => p.id === job.project.id)) {
-    projects.unshift({ id: job.project.id, name: job.project.name, clientId: job.client.id, clientName: job.client.name });
-  }
-  const workflowName = jobTypes.find((t) => t.id === job.jobType.id)?.workflow.name || null;
+  const types = (await load(() => listJobTypes(db, ctx, { includeArchived: true }))).filter((t) => t.archivedAt === null || t.id === sideColumn.jobType.id);
+  const jobTypes = types.map((t) => ({ id: t.id, name: t.name, archived: t.archivedAt !== null }));
+  if (!jobTypes.some((t) => t.id === sideColumn.jobType.id)) jobTypes.unshift({ id: sideColumn.jobType.id, name: sideColumn.jobType.name, archived: false });
 
   return (
-    <PageContainer>
+    <PageContainer width="narrow">
       <PageHeader
-        backHref={jobHref(job.id)}
-        backLabel={`Back to ${job.jobNumber}`}
-        eyebrow={<span className="font-mono numeric">{job.jobNumber}</span>}
-        title={`Edit ${job.name}`}
-        meta={<StatusPill status={job.status} size="sm" />}
-        description="Status, people and links are changed from the job itself. Every edit here is recorded with before and after values."
+        backHref={`/jobs/${header.id}`}
+        backLabel={`Back to ${header.name}`}
+        eyebrow={<span className="font-mono numeric">{header.jobNumber}</span>}
+        title="Edit details"
+        meta={<StagePill display={header.stage} size="md" />}
+        description="Who edits it, the stage and the files are changed from the job itself. Every edit here is kept in the history."
       />
-      <EditJobForm
-        key={job.version}
+      <EditJobSimpleForm
+        key={header.version}
         job={{
-          id: job.id,
-          jobNumber: job.jobNumber,
-          version: job.version,
-          name: job.name,
-          description: job.description,
-          clientId: job.client.id,
-          projectId: job.project.id,
-          jobTypeId: job.jobType.id,
-          workflowName,
-          priority: job.priority,
-          shootDate: job.shootDate,
-          dueDate: job.dueDate,
-          reviewDueDate: job.reviewDueDate,
-          deliveryDueDate: job.deliveryDueDate,
-          estimatedHours: job.estimatedHours,
-          completionPercent: job.completionPercent,
+          id: header.id,
+          jobNumber: header.jobNumber,
+          version: header.version,
+          name: header.name,
+          description: page.description,
+          clientName: header.client.name,
+          jobTypeId: sideColumn.jobType.id,
+          priority: header.rush ? RUSH_PRIORITY : NON_RUSH_PRIORITY,
+          shootDate: sideColumn.shootDate,
+          dueDate: sideColumn.dueDate,
+          deliveryDueDate: sideColumn.clientDeliveryDate,
         }}
         permissions={permissions}
         timeZone={ctx.settings.timezone}
         jobTypes={jobTypes}
-        clients={clients}
-        projects={projects}
-        canCreateClient={ctx.role !== "editor" && allowed(ctx, "client.create")}
-        canCreateProject={ctx.role !== "editor" && allowed(ctx, "project.create")}
+        clientHasPortal={sideColumn.clientHasPortal}
       />
     </PageContainer>
   );

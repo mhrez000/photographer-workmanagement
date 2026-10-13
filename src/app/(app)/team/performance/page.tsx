@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { formatDuration } from "@/lib/dates";
 import { pluralise } from "@/lib/utils";
 import { getPerformance } from "@/server/queries/performance";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Performance" };
 
@@ -22,7 +22,7 @@ const DEFAULT_PRESET = "last_30_days" as const;
 
 export default async function PerformancePage({ searchParams }: PageProps<"/team/performance">) {
   const sp = await searchParams;
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("performance", "/editors"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "performance.view");
   const rangeInput = rangeFromParams(sp, DEFAULT_PRESET);
   const report = await load(() => getPerformance(db, ctx, rangeInput));

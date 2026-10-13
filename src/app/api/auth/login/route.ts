@@ -3,7 +3,11 @@ import { login } from "@/server/services/auth";
 import { loginRedirectTarget } from "@/server/auth/redirect";
 import { methodNotAllowed } from "@/app/api/_lib/route";
 
-/** POST /api/auth/login `{ email, password, next? }` → `{ data: { user, redirectTo } }` + session cookie. */
+/**
+ * POST /api/auth/login `{ email, password, next? }` → `{ data: { user, redirectTo } }` + session cookie.
+ * `redirectTo` is the persona's landing page (plan §3): owner / photographer `/home`, editor `/my-jobs`,
+ * client `/portal` — never `/dashboard` (`loginRedirectTarget`).
+ */
 export const POST = handle(async (req) => {
   const body = await bodyOrNull(req);
   const fields = body && typeof body === "object" ? (body as Record<string, unknown>) : {};

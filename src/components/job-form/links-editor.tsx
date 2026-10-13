@@ -47,6 +47,8 @@ export interface LinksEditorProps {
   /** Show row errors only after the first submit attempt (or blur). */
   showErrors?: boolean;
   disabled?: boolean;
+  /** Empty-state line (default mentions raw files; the New job form's "Other links" slot passes its own). */
+  emptyText?: string;
 }
 
 /**
@@ -54,7 +56,15 @@ export interface LinksEditorProps {
  * editing workspace, reference…). Each row: kind + URL (+ optional label);
  * the provider is detected from the host as you type.
  */
-export function LinksEditor({ links, onChange, kinds = LINK_KINDS, errors, showErrors = false, disabled }: LinksEditorProps) {
+export function LinksEditor({
+  links,
+  onChange,
+  kinds = LINK_KINDS,
+  errors,
+  showErrors = false,
+  disabled,
+  emptyText = "No links yet. Add where the raw files live, the editing workspace or reference material — files stay in your own storage.",
+}: LinksEditorProps) {
   const [touched, setTouched] = React.useState<Record<string, boolean>>({});
   const update = (key: string, patch: Partial<DraftLink>) => onChange(links.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const remove = (key: string) => onChange(links.filter((l) => l.key !== key));
@@ -68,9 +78,7 @@ export function LinksEditor({ links, onChange, kinds = LINK_KINDS, errors, showE
   return (
     <div className="flex flex-col gap-3">
       {links.length === 0 ? (
-        <p className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-ink-muted">
-          No links yet. Add where the raw files live, the editing workspace or reference material — files stay in your own storage.
-        </p>
+        <p className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-ink-muted">{emptyText}</p>
       ) : (
         <ul role="list" className="flex flex-col gap-3">
           {links.map((link, index) => {

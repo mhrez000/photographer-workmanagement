@@ -8,7 +8,11 @@ export const DEFAULT_TIMEZONE = "Australia/Sydney";
 
 export type DateInput = string | Date | null | undefined;
 
-/** Intl formatters are expensive to build; day-bound math calls them in loops. */
+/**
+ * Intl formatters are expensive to build (each `new Intl.DateTimeFormat` with a timeZone costs milliseconds in
+ * Node); day-bound math and every list row's chips call them in loops, so every formatter below goes through
+ * this cache, keyed by kind + timezone.
+ */
 const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 function cachedFormat(kind: string, timeZone: string, options: () => Intl.DateTimeFormatOptions, locale: string): Intl.DateTimeFormat {
   const key = `${kind}|${timeZone}`;
@@ -233,15 +237,12 @@ export function resolveRange(
 export function localDateTimeString(value: DateInput, timeZone = DEFAULT_TIMEZONE): string | null {
   const d = toDate(value);
   if (!d) return null;
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  const parts = cachedFormat(
+    "local-datetime",
     timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).formatToParts(d);
+    () => ({ timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }),
+    "en-CA",
+  ).formatToParts(d);
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
 }
@@ -252,23 +253,23 @@ export function formatDate(value: DateInput, timeZone = DEFAULT_TIMEZONE): strin
   // A bare civil date (YYYY-MM-DD) should format as that date regardless of tz.
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const [y, m, dd] = value.split("-").map(Number);
-    return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(
+    return cachedFormat("date", "UTC", () => ({ day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }), "en-AU").format(
       new Date(Date.UTC(y, m - 1, dd)),
     );
   }
-  return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone }).format(d);
+  return cachedFormat("date", timeZone, () => ({ day: "numeric", month: "short", year: "numeric", timeZone }), "en-AU").format(d);
 }
 
 export function formatDateShort(value: DateInput, timeZone = DEFAULT_TIMEZONE): string {
   const d = toDate(value);
   if (!d) return "—";
-  return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", timeZone }).format(d);
+  return cachedFormat("date-short", timeZone, () => ({ day: "numeric", month: "short", timeZone }), "en-AU").format(d);
 }
 
 export function formatTime(value: DateInput, timeZone = DEFAULT_TIMEZONE): string {
   const d = toDate(value);
   if (!d) return "—";
-  return new Intl.DateTimeFormat("en-AU", { hour: "numeric", minute: "2-digit", hour12: true, timeZone }).format(d);
+  return cachedFormat("time", timeZone, () => ({ hour: "numeric", minute: "2-digit", hour12: true, timeZone }), "en-AU").format(d);
 }
 
 export function formatDateTime(value: DateInput, timeZone = DEFAULT_TIMEZONE): string {
@@ -280,7 +281,7 @@ export function formatDateTime(value: DateInput, timeZone = DEFAULT_TIMEZONE): s
 export function formatWeekday(value: DateInput, timeZone = DEFAULT_TIMEZONE): string {
   const d = toDate(value);
   if (!d) return "—";
-  return new Intl.DateTimeFormat("en-AU", { weekday: "short", timeZone }).format(d);
+  return cachedFormat("weekday", timeZone, () => ({ weekday: "short", timeZone }), "en-AU").format(d);
 }
 
 /** "3h ago", "in 2d", "just now" */

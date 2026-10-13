@@ -26,10 +26,12 @@ import { notify } from "./notifications";
 import {
   applyMove,
   assertMayMoveJob,
+  isPastEditorOf,
   jobEventMeta,
   jobLinkPath,
   loadVisibleJob,
   loadWorkflowGraph,
+  movedOnMessage,
   resolveTransitionTarget,
   type TransitionResult,
 } from "./workflow";
@@ -144,7 +146,7 @@ export async function updateRevision(tx: Tx, ctx: AuthContext, input: unknown): 
     await notify(tx, ctx, {
       userIds: [patch.assigneeUserId],
       type: "revision_requested",
-      title: `Revision #${revision.revisionNumber} on ${job.jobNumber} is assigned to you`,
+      title: `Changes asked on ${job.jobNumber} (round ${revision.revisionNumber}) are now yours`,
       body: revision.reason,
       jobId: job.id,
       activityEventId: eventId,
@@ -159,8 +161,15 @@ export async function resolveRevision(tx: Tx, ctx: AuthContext, input: unknown):
   const p = parseInput(ResolveRevisionInput, input);
   const revision = await loadRevisionInOrg(tx, ctx, p.revisionId);
   const { job, ref } = await loadVisibleJob(tx, ctx, revision.jobId);
-  // Permission before state and version (a read-only viewer gets 403, never a 409 carrying the row).
-  if (!can(ctx, "revision.resolve", ref)) throw new ForbiddenError("revision.resolve", "Only the assigned editor can do this");
+  // Permission before state and version (a read-only viewer gets 403, never a 409 carrying the row) —
+  // except a PAST editor on a stale page, who gets the 409 so their screen refreshes (see assertMayMoveJobOrStale).
+  if (!can(ctx, "revision.resolve", ref)) {
+    if (isPastEditorOf(ctx, job, ref)) {
+      assertVersion(job, p.expectedVersion);
+      throw new ForbiddenError("revision.resolve", await movedOnMessage(tx, ctx, job));
+    }
+    throw new ForbiddenError("revision.resolve", "Only the assigned editor can do this");
+  }
   if (revision.resolvedAt !== null) throw new ValidationError("This revision is already resolved");
   if (job.statusCategory !== "revision") {
     throw new InvalidTransitionError(job.statusCategory, "resubmitted", "The job is not waiting on this revision");

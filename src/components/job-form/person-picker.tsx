@@ -19,9 +19,11 @@ const ROLE_QUERY: Record<PersonPickerKind, string> = {
   photographer: "photographer",
 };
 
-/** "Owner / Photographer · Studio Director" — persona + title (docs/ROLES.md §6.1). */
+/** "Owner / Photographer · Studio Director" — persona + title (docs/ROLES.md §6.1); a title that repeats the persona is shown once. */
 export function personDescription(p: UserOption): string {
-  return displayRoleLabel(p);
+  const persona = displayRoleLabel({ ...p, title: null });
+  const title = p.title?.trim();
+  return title && title !== persona ? `${persona} · ${title}` : persona;
 }
 
 /** Loads `/api/users/options` for a picker kind once on mount. */

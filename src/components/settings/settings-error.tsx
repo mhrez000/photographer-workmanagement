@@ -19,7 +19,7 @@ export function SettingsError({ error, retry, what = "these settings" }: Setting
         title={`Couldn't load ${what}`}
         message="Something interrupted this page. Your saved settings are safe — try again, and if it keeps happening let the studio owner know."
         onRetry={retry}
-        homeHref="/dashboard"
+        homeHref="/"
         digest={error.digest}
       />
     </PageContainer>

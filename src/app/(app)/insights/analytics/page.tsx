@@ -17,7 +17,7 @@ import { formatPercent, pluralise } from "@/lib/utils";
 import { getAnalyticsOverview } from "@/server/queries/analytics";
 import { getReport } from "@/server/queries/reports";
 import { canViewTeamWorkloads, getWorkloads } from "@/server/queries/workloads";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Analytics" };
 
@@ -37,7 +37,7 @@ const dur = (s: number | null) => (s === null ? "—" : formatDuration(s * 1000)
 
 export default async function AnalyticsPage({ searchParams }: PageProps<"/insights/analytics">) {
   const sp = await searchParams;
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("analytics", "/editors"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "analytics.view");
   const rangeInput = rangeFromParams(sp, DEFAULT_PRESET);
   const o = await load(() => getAnalyticsOverview(db, ctx, rangeInput));

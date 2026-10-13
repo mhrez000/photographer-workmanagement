@@ -121,6 +121,28 @@
     --status-cancelled-soft: light-dark(#f2f3f5, rgb(107 114 128 / 0.18));
     --status-cancelled-fg: light-dark(#4b5563, #d1d5db);
 
+    /* Stage palette (6) — the simplified five stages + Cancelled (docs/SIMPLIFICATION-PLAN.md §4):
+       grey = Needs editor · blue = With editor · amber = Ready to check · red = Changes asked ·
+       green = Done · slate = Cancelled. base / soft background / foreground-on-soft. */
+    --stage-grey: light-dark(#64748b, #94a3b8);
+    --stage-grey-soft: light-dark(#eef1f5, rgb(148 163 184 / 0.16));
+    --stage-grey-fg: light-dark(#3f4a5a, #cbd5e1);
+    --stage-blue: light-dark(#2563eb, #60a5fa);
+    --stage-blue-soft: light-dark(#e4edfd, rgb(96 165 250 / 0.16));
+    --stage-blue-fg: light-dark(#1e40af, #bfdbfe);
+    --stage-amber: light-dark(#d97706, #fbbf24);
+    --stage-amber-soft: light-dark(#fdf1dc, rgb(251 191 36 / 0.16));
+    --stage-amber-fg: light-dark(#92400e, #fde68a);
+    --stage-red: light-dark(#dc2626, #f87171);
+    --stage-red-soft: light-dark(#fce8e8, rgb(248 113 113 / 0.16));
+    --stage-red-fg: light-dark(#991b1b, #fecaca);
+    --stage-green: light-dark(#15803d, #4ade80);
+    --stage-green-soft: light-dark(#e3f5e9, rgb(74 222 128 / 0.16));
+    --stage-green-fg: light-dark(#14532d, #bbf7d0);
+    --stage-slate: light-dark(#6b7280, #9ca3af);
+    --stage-slate-soft: light-dark(#f2f3f5, rgb(107 114 128 / 0.18));
+    --stage-slate-fg: light-dark(#374151, #d1d5db);
+
     /* Priority palette (4) */
     --priority-low: light-dark(#94a3b8, #94a3b8);
     --priority-low-soft: light-dark(#eef1f5, rgb(148 163 184 / 0.16));
@@ -278,6 +300,25 @@
   --color-status-cancelled: var(--status-cancelled);
   --color-status-cancelled-soft: var(--status-cancelled-soft);
   --color-status-cancelled-fg: var(--status-cancelled-fg);
+
+  --color-stage-grey: var(--stage-grey);
+  --color-stage-grey-soft: var(--stage-grey-soft);
+  --color-stage-grey-fg: var(--stage-grey-fg);
+  --color-stage-blue: var(--stage-blue);
+  --color-stage-blue-soft: var(--stage-blue-soft);
+  --color-stage-blue-fg: var(--stage-blue-fg);
+  --color-stage-amber: var(--stage-amber);
+  --color-stage-amber-soft: var(--stage-amber-soft);
+  --color-stage-amber-fg: var(--stage-amber-fg);
+  --color-stage-red: var(--stage-red);
+  --color-stage-red-soft: var(--stage-red-soft);
+  --color-stage-red-fg: var(--stage-red-fg);
+  --color-stage-green: var(--stage-green);
+  --color-stage-green-soft: var(--stage-green-soft);
+  --color-stage-green-fg: var(--stage-green-fg);
+  --color-stage-slate: var(--stage-slate);
+  --color-stage-slate-soft: var(--stage-slate-soft);
+  --color-stage-slate-fg: var(--stage-slate-fg);
 
   --color-priority-low: var(--priority-low);
   --color-priority-low-soft: var(--priority-low-soft);

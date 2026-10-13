@@ -37,6 +37,7 @@ import { approveJob, completeJob, startJob, submitJob } from "@/server/services/
 import { addLink } from "@/server/services/links";
 import { markRead } from "@/server/services/notifications";
 import { runSweep, type SweepResult } from "@/server/services/sweep";
+import { DEFAULT_SEED_PROFILE, type SeedProfile } from "@/lib/constants";
 import { CLIENTS, NORTHLIGHT, OTHER_STUDIO, OWNER, PORTAL_CLIENTS, SEED_PASSWORD, STAFF, TEAMS, type SeedUserDef } from "./catalog";
 import { inviteSeedClientUser, schedulePortalStory, seedOtherStudioPortal, setSeedClientPortal } from "./portal";
 import {
@@ -47,6 +48,7 @@ import {
   createSeedClient,
   createSeedTeam,
   createVideoWorkflow,
+  enableAdvancedTools,
   enableTimeTracking,
   inviteSeedUser,
 } from "./org";
@@ -63,6 +65,11 @@ export interface SeedOptions {
   log?: (line: string) => void;
   /** bcrypt cost for the shared demo password hash (default 10). */
   bcryptCost?: number;
+  /**
+   * Seed profile (SIMPLIFICATION-PLAN §8): "small" (default; `SEED_PROFILE` env) = the plan's demo
+   * (./small.ts); "full" = this file's 160-job, 25-person fixture the e2e suite and the §39 checks use.
+   */
+  profile?: SeedProfile;
 }
 
 export interface SeedResult {
@@ -76,6 +83,15 @@ export interface SeedResult {
 }
 
 export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedResult> {
+  if ((options.profile ?? DEFAULT_SEED_PROFILE) === "small") {
+    const { runSmallSeed } = await import("./small");
+    return runSmallSeed(db, options);
+  }
+  return runFullSeed(db, options);
+}
+
+/** The original large demo (ARCHITECTURE.md §12): kept unchanged as the "full" profile / test fixture. */
+export async function runFullSeed(db: Db, options: SeedOptions = {}): Promise<SeedResult> {
   const log = options.log ?? (() => {});
   const nowMs = (options.now ?? new Date()).getTime();
   const durations: Record<string, number> = {};
@@ -166,6 +182,9 @@ export async function runSeed(db: Db, options: SeedOptions = {}): Promise<SeedRe
 
     at(t0 + 3 * DAY + 9 * HOUR);
     await seedAutomations(rt, ownerId);
+    // Plan §8: a studio with custom workflows + enabled automations keeps its Advanced pages (what migration 0004 does for live data).
+    tick(2);
+    await enableAdvancedTools(rt, ownerId);
 
     at(t0 + 4 * DAY + 10 * HOUR);
     await seedSavedViews(rt, ownerId);
@@ -391,7 +410,7 @@ const OTHER_EDITOR: SeedUserDef = {
   capacityHoursPerWeek: 30,
 };
 
-async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: PreparedSecret): Promise<string> {
+export async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: PreparedSecret): Promise<string> {
   const now = rt.nowMs;
   let t = now - 60 * DAY;
   const at = (ms: number) => {
@@ -475,7 +494,7 @@ async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, secret: Pr
 /*  Notifications (~70 % read)                                         */
 /* ------------------------------------------------------------------ */
 
-async function markNotificationsRead(rt: SeedRuntime): Promise<{ read: number; total: number }> {
+export async function markNotificationsRead(rt: SeedRuntime): Promise<{ read: number; total: number }> {
   const all = await rt.db.select({ id: users.id }).from(users).where(eq(users.isActive, true)).orderBy(asc(users.createdAt), asc(users.id));
   let read = 0;
   let current = rt.iso(rt.nowMs);

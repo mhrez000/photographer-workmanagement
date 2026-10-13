@@ -49,6 +49,8 @@ export const SettingsFieldSchemas = {
    * owner. The service requires an active photographer of the organisation.
    */
   defaultPhotographerUserId: IdSchema.nullable(),
+  /** Settings → Studio → Advanced tools (SIMPLIFICATION-PLAN §8). Audited like every other field. */
+  advancedToolsEnabled: z.boolean(),
 } as const;
 
 export type SettingsField = keyof typeof SettingsFieldSchemas;

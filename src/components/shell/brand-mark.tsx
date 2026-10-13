@@ -48,7 +48,7 @@ export interface BrandProps {
 }
 
 /** Mark + "Proofline" wordmark, optionally linking home. */
-export function Brand({ compact = false, subtitle, href = "/dashboard", className }: BrandProps) {
+export function Brand({ compact = false, subtitle, href = "/", className }: BrandProps) {
   const content = (
     <>
       <BrandMark size={28} />
@@ -68,7 +68,7 @@ export function Brand({ compact = false, subtitle, href = "/dashboard", classNam
   return (
     <Link
       href={href}
-      aria-label={compact ? "Proofline — Dashboard" : undefined}
+      aria-label={compact ? "Proofline — Home" : undefined}
       className={cn(
         "flex items-center gap-2.5 rounded-sm focus-ring",
         compact && "justify-center",

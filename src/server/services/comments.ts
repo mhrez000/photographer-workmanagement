@@ -421,7 +421,7 @@ export async function addComment(tx: Tx, ctx: AuthContext, input: unknown): Prom
     if (await userCanViewJob(tx, ctx, u, ref)) candidates.push(u);
   }
   if (candidates.length > 0) {
-    let title = placement.parentCommentId ? `New reply on ${job.jobNumber}` : `New comment on ${job.jobNumber}`;
+    let title = placement.parentCommentId ? `New reply on ${job.jobNumber}` : `New message on ${job.jobNumber}`;
     if (question) {
       const author = await first(tx.select({ name: users.name }).from(users).where(eq(users.id, authorUserId)));
       title = `Question from ${author?.name ?? "an editor"} on ${job.jobNumber}`;

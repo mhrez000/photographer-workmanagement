@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Check, Laptop, Monitor, Moon, Rows3, Rows4, Sun } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import {
@@ -134,8 +135,11 @@ function OptionCard({
   );
 }
 
-/** Theme + density for this browser only (localStorage). */
-export function AppearanceSettings() {
+/**
+ * Appearance for this browser only (localStorage): Light / Dark / System. Density is an Advanced
+ * tool (SIMPLIFICATION-PLAN §8) and only shows when `showDensity` is true.
+ */
+export function AppearanceSettings({ showDensity = false }: { showDensity?: boolean } = {}) {
   const theme = usePreference<ThemePreference>(THEME_KEY, THEMES, "system");
   const density = usePreference<DensityPreference>(DENSITY_KEY, DENSITIES, "comfortable");
 
@@ -150,7 +154,7 @@ export function AppearanceSettings() {
 
   return (
     <div className="flex flex-col gap-6">
-      <SectionCard title="Theme" description="Light, dark, or match your device." actions={<Monitor aria-hidden="true" className="size-4 text-ink-subtle" />}>
+      <SectionCard id="appearance" title="Appearance" description="Light, dark, or match your device." actions={<Monitor aria-hidden="true" className="size-4 text-ink-subtle" />}>
         <div role="radiogroup" aria-label="Theme" className="grid gap-3 sm:grid-cols-3">
           {THEME_OPTIONS.map((o) => (
             <OptionCard key={o.value} selected={theme === o.value} onSelect={() => update({ theme: o.value })} icon={o.icon} label={o.label} description={o.description}>
@@ -159,7 +163,8 @@ export function AppearanceSettings() {
           ))}
         </div>
       </SectionCard>
-      <SectionCard title="Density" description="How tightly lists, tables and forms are packed.">
+      {showDensity ? (
+      <SectionCard title="Density" description="How tightly lists, tables and forms are packed." actions={<Badge variant="outline" size="sm">Advanced</Badge>}>
         <div role="radiogroup" aria-label="Density" className="grid gap-3 sm:grid-cols-2">
           {DENSITY_OPTIONS.map((o) => (
             <OptionCard key={o.value} selected={density === o.value} onSelect={() => update({ density: o.value })} icon={o.icon} label={o.label} description={o.description}>
@@ -175,8 +180,9 @@ export function AppearanceSettings() {
           ))}
         </div>
       </SectionCard>
+      ) : null}
       <p className="text-sm text-ink-muted">
-        These preferences are saved in this browser only — they don’t follow you to your phone or another computer, and clearing site data resets them.
+        This is saved in this browser only — it does not follow you to your phone or another computer, and clearing site data resets it.
       </p>
     </div>
   );

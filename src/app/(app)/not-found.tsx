@@ -22,7 +22,7 @@ export default function AppNotFound() {
           description="The link may be out of date, or this record isn't shared with you. Try searching for it instead."
           action={
             <>
-              <Button href="/dashboard">Go to dashboard</Button>
+              <Button href="/">Go home</Button>
               <Button href="/search" variant="outline">
                 Search
               </Button>
