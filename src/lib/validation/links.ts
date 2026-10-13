@@ -67,7 +67,7 @@ export const LinkUrlSchema = z
   .max(LINK_URL_MAX, `Keep links under ${LINK_URL_MAX} characters`)
   .refine(isAllowedLinkUrl, "Enter a full http:// or https:// link");
 
-const LabelSchema = z
+export const LinkLabelSchema = z
   .string()
   .trim()
   .max(LINK_LABEL_MAX, `Keep labels under ${LINK_LABEL_MAX} characters`)
@@ -78,7 +78,7 @@ export const AddLinkInput = z.strictObject({
   jobId: Id,
   kind: z.enum(LINK_KINDS),
   url: LinkUrlSchema,
-  label: LabelSchema.nullish(),
+  label: LinkLabelSchema.nullish(),
 });
 export type AddLinkInput = z.input<typeof AddLinkInput>;
 
@@ -86,7 +86,7 @@ export const ReplaceLinkInput = z.strictObject({
   linkId: Id,
   url: LinkUrlSchema,
   /** Omitted → keep the old label; null or "" → clear it. */
-  label: LabelSchema.nullish(),
+  label: LinkLabelSchema.nullish(),
 });
 export type ReplaceLinkInput = z.input<typeof ReplaceLinkInput>;
 
@@ -99,7 +99,7 @@ export const UpdateLinkInput = z
     linkId: Id,
     kind: z.enum(LINK_KINDS).optional(),
     /** Omitted → keep the old label; null or "" → clear it. */
-    label: LabelSchema.nullish(),
+    label: LinkLabelSchema.nullish(),
   })
   .refine((v) => v.kind !== undefined || v.label !== undefined, { message: "Choose a new kind or label", path: ["kind"] });
 export type UpdateLinkInput = z.input<typeof UpdateLinkInput>;

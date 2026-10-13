@@ -119,6 +119,8 @@ export type ArchiveTransitionInput = z.infer<typeof ArchiveTransitionInput>;
 /* ---------------- job types ---------------- */
 
 const HoursSchema = z.number().min(0).max(500).nullable();
+/** "Usual days to edit" of a type of shoot (SIMPLIFICATION-PLAN §5: due date = shoot date + N); null = unset (→ 1). */
+export const UsualDaysSchema = z.number().int().min(0).max(365).nullable();
 
 export const CreateJobTypeInput = z.object({
   name: NameSchema(80),
@@ -126,6 +128,7 @@ export const CreateJobTypeInput = z.object({
   /** Omitted → the organisation's default workflow. */
   workflowId: IdSchema.optional(),
   defaultEstimatedHours: HoursSchema.optional(),
+  usualDaysToEdit: UsualDaysSchema.optional(),
   sortOrder: z.number().int().min(0).max(10_000).optional(),
 });
 export type CreateJobTypeInput = z.infer<typeof CreateJobTypeInput>;
@@ -138,6 +141,7 @@ export const UpdateJobTypeInput = z.object({
   /** Affects new jobs only (jobs.workflow_id is a snapshot). */
   workflowId: IdSchema.optional(),
   defaultEstimatedHours: HoursSchema.optional(),
+  usualDaysToEdit: UsualDaysSchema.optional(),
   sortOrder: z.number().int().min(0).max(10_000).optional(),
 });
 export type UpdateJobTypeInput = z.infer<typeof UpdateJobTypeInput>;

@@ -13,9 +13,11 @@
  *   1. replay pending automation runs older than 60 s (lost after commit)
  *   2. `job.became_overdue` for DEADLINE_BOUND jobs past `due_date`, one per
  *      (job, dueDate): skipped when the job's latest such event already has
- *      this dueDate, so a deadline change re-arms it. Notifies editor +
- *      photographer (`job_overdue`, dedupe `overdue:<jobId>:<dueDate>`);
- *      `job_overdue` automations are enqueued by recordEvent.
+ *      this dueDate, so a deadline change re-arms it. Then the daily late
+ *      summary (SIMPLIFICATION-PLAN §8): ONE `job_overdue` notice per person
+ *      (editor, photographer, admins) per civil day listing every late job
+ *      (dedupe `late_summary:<userId>:<civilDate>`); `job_overdue`
+ *      automations are enqueued by recordEvent.
  *   3. `job.review_overdue` for REVIEWER_HOLDS jobs past `review_due_date`,
  *      one per (job, reviewDueDate); notifies photographer + admins.
  *   4. workload bands of active editors: `user.workload_band_changed` only
@@ -37,7 +39,15 @@
 import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import { getDb, type Db, type DbLike, type Tx } from "@/db/index";
 import { activityEvents, jobs, organisationSettings, users, type Json } from "@/db/schema";
-import { CATEGORY_GROUPS, SWEEP_MIN_INTERVAL_MINUTES, WORKLOAD_BANDS, WORKLOAD_BAND_META, type WorkloadBand } from "@/lib/constants";
+import {
+  CATEGORY_GROUPS,
+  LATE_SUMMARY_LINK_PATH,
+  SWEEP_MIN_INTERVAL_MINUTES,
+  WORKLOAD_BANDS,
+  WORKLOAD_BAND_META,
+  lateSummaryDedupeKey,
+  type WorkloadBand,
+} from "@/lib/constants";
 import { loadJobRefs } from "@/server/auth/job-ref";
 import { formatDateShort, todayCivil } from "@/lib/dates";
 import type { AuthContext, Job } from "@/lib/types";
@@ -133,7 +143,15 @@ export async function latestFlagValues(
 /*  Steps (each runs in its own transaction with the system context)   */
 /* ------------------------------------------------------------------ */
 
-/** Step 2 — `job.became_overdue`, deduped per (job, dueDate). Returns the flagged job ids. */
+/**
+ * Step 2 — `job.became_overdue`, deduped per (job, dueDate) exactly as before (the event is what
+ * metrics, bottlenecks and `job_overdue` automations key on), then the SIMPLIFICATION-PLAN §8 late
+ * notice: ONE `job_overdue` notification per person per civil day ("3 jobs are late"), covering every
+ * late job they hold (editor), shot (photographer) or oversee (admins) — never one per job. Dedupe key
+ * `late_summary:<userId>:<civilDate>`. A single late job links to that job (and to its new
+ * became-overdue event, so a `job_overdue` rule never double-notifies the same person).
+ * Returns the NEWLY flagged job ids.
+ */
 export async function flagOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[]> {
   const now = ctx.now();
   const candidates = await tx
@@ -151,6 +169,7 @@ export async function flagOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[
   if (candidates.length === 0) return [];
   const flagged = await latestFlagValues(tx, ctx.organisationId, "job.became_overdue", candidates.map((j) => j.id), "dueDate");
   const out: string[] = [];
+  const newEventByJob = new Map<string, string>();
   for (const job of candidates) {
     const dueDate = job.dueDate as string;
     if (flagged.get(job.id) === dueDate) continue;
@@ -164,19 +183,47 @@ export async function flagOverdueJobs(tx: Tx, ctx: AuthContext): Promise<string[
       newValue: { dueDate, overdueSince: dueDate },
       metadata: jobEventMeta(job, { statusCategory: job.statusCategory }),
     });
-    await notify(tx, ctx, {
-      userIds: [job.editorId, job.photographerId],
-      type: "job_overdue",
-      title: `${job.jobNumber} is overdue`,
-      body: `${job.name} — was due ${formatDateShort(dueDate, ctx.settings.timezone)}`,
-      jobId: job.id,
-      activityEventId: eventId,
-      linkPath: jobLinkPath(job.id),
-      dedupeKey: `overdue:${job.id}:${dueDate}`,
-    });
+    newEventByJob.set(job.id, eventId);
     out.push(job.id);
   }
+  await sendLateSummaries(tx, ctx, candidates, newEventByJob);
   return out;
+}
+
+/** The daily late summary (plan §8 notification 7): one notice per person per civil day. */
+async function sendLateSummaries(tx: Tx, ctx: AuthContext, late: readonly Job[], newEventByJob: ReadonlyMap<string, string>): Promise<void> {
+  if (late.length === 0) return;
+  const tz = ctx.settings.timezone;
+  const today = todayCivil(tz, new Date(ctx.now()));
+  const admins = await adminsOf(tx, ctx.organisationId);
+  const perUser = new Map<string, Job[]>();
+  const add = (userId: string | null, job: Job) => {
+    if (!userId) return;
+    const list = perUser.get(userId) ?? [];
+    if (!list.some((j) => j.id === job.id)) list.push(job);
+    perUser.set(userId, list);
+  };
+  for (const job of late) {
+    add(job.editorId, job);
+    add(job.photographerId, job);
+    for (const admin of admins) add(admin, job);
+  }
+  for (const [userId, mine] of perUser) {
+    const n = mine.length;
+    const names = mine.slice(0, 3).map((j) => j.name);
+    const body = `${names.join(" · ")}${n > 3 ? ` · and ${n - 3} more` : ""}`;
+    const single = n === 1 ? mine[0] : null;
+    await notify(tx, ctx, {
+      userIds: [userId],
+      type: "job_overdue",
+      title: n === 1 ? "1 job is late" : `${n} jobs are late`,
+      body: single ? `${single.name} — was due ${formatDateShort(single.dueDate, tz)}` : body,
+      jobId: single?.id ?? null,
+      activityEventId: single ? (newEventByJob.get(single.id) ?? null) : null,
+      linkPath: single ? jobLinkPath(single.id) : LATE_SUMMARY_LINK_PATH,
+      dedupeKey: lateSummaryDedupeKey(userId, today),
+    });
+  }
 }
 
 /**

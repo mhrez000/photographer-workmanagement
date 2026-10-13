@@ -100,8 +100,19 @@ export const InlineProjectInput = z.strictObject({
 });
 
 /**
+ * Silent project of the simplified New job form (SIMPLIFICATION-PLAN §5): the project is reused when the
+ * client + address match an existing project's name or address (AUTO_PROJECT_RULE), else created from
+ * the address (needs `project.create`, inline).
+ */
+export const AutoProjectInput = z.strictObject({
+  clientId: IdSchema,
+  address: z.string().trim().min(1, "Required").max(500),
+});
+export type AutoProjectInputValue = z.output<typeof AutoProjectInput>;
+
+/**
  * Strict (docs/ROLES.md §3.5): sharing columns (`sharedWithClient`, …) and any
- * other unknown key → 400. Exactly one of `projectId` / `newProject`
+ * other unknown key → 400. Exactly one of `projectId` / `newProject` / `autoProject`
  * (`newProject` needs `clientId`).
  */
 export const CreateJobInput = z
@@ -111,6 +122,8 @@ export const CreateJobInput = z
     projectId: IdSchema.optional(),
     /** Created in the same transaction under `clientId` (needs `project.create`). */
     newProject: InlineProjectInput.optional(),
+    /** Simplified form: reuse-or-create the project from client + address (plan §5). */
+    autoProject: AutoProjectInput.optional(),
     /** Optional with `projectId` (must equal the project's client); required with `newProject`. */
     clientId: IdSchema.optional(),
     jobTypeId: IdSchema,
@@ -131,12 +144,16 @@ export const CreateJobInput = z
     deliveryDueDate: NullableDateSchema.optional(),
     estimatedHours: EstimatedHoursSchema.optional(),
   })
-  .refine((v) => (v.projectId ? 1 : 0) + (v.newProject ? 1 : 0) === 1, {
+  .refine((v) => (v.projectId ? 1 : 0) + (v.newProject ? 1 : 0) + (v.autoProject ? 1 : 0) === 1, {
     message: "Choose a project or create a new one",
     path: ["projectId"],
   })
   .refine((v) => !v.newProject || v.clientId !== undefined, {
     message: "Choose the client of the new project",
+    path: ["clientId"],
+  })
+  .refine((v) => !v.autoProject || v.clientId === undefined || v.clientId === v.autoProject.clientId, {
+    message: "The client does not match the address's client",
     path: ["clientId"],
   });
 export type CreateJobInputValue = z.output<typeof CreateJobInput>;
@@ -203,6 +220,8 @@ export const TransitionInput = z
     delivery: DeliveryInput.optional(),
     /** Honoured for system contexts only (automation / sweep / seed). */
     cause: z.enum(EVENT_CAUSES).optional(),
+    /** Owner / co-owner approving a job they edited themselves (SIMPLIFICATION-PLAN §12.3); recorded as `selfApproved`. */
+    confirmSelfApproval: z.boolean().optional(),
   })
   .refine((v) => (v.toStatusId ? 1 : 0) + (v.toCategory ? 1 : 0) === 1, {
     message: "Give exactly one of toStatusId or toCategory",
@@ -220,6 +239,8 @@ export const CategoryMoveInput = z.object({
   startTimer: z.boolean().optional(),
   /** Deliver / complete only (docs/ROLES.md §7.3); 422 on any other move. */
   delivery: DeliveryInput.optional(),
+  /** Owner / co-owner approving a job they edited themselves (SIMPLIFICATION-PLAN §12.3). */
+  confirmSelfApproval: z.boolean().optional(),
 });
 export type CategoryMoveInputValue = z.output<typeof CategoryMoveInput>;
 

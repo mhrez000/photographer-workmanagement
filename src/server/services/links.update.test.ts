@@ -75,7 +75,7 @@ describe("updateLink", () => {
       previousValue: { linkId: link.id, kind: "reference", label: "Moodboard" },
       newValue: { linkId: updated.id, kind: "other", label: "Brief" },
     });
-    expect(evt?.summary).toContain("moved a link from reference material to other");
+    expect(evt?.summary).toContain("moved a link from reference to other link");
     expect(updated.activityEventId).toBe(evt?.id);
   });
 

@@ -29,7 +29,9 @@ import {
   users,
   workflowStatuses,
 } from "@/db/schema";
-import { CATEGORY_GROUPS, DEFAULT_JOB_NUMBER_PREFIX, JOB_NUMBER_PAD, type Action, type Priority } from "@/lib/constants";
+import { CATEGORY_GROUPS, DEFAULT_JOB_NUMBER_PREFIX, DEFAULT_USUAL_DAYS_TO_EDIT, JOB_NUMBER_PAD, normaliseProjectKey, type Action, type Priority } from "@/lib/constants";
+import { addCivilDays, civilDate } from "@/lib/dates";
+import { describeStage, type StageDisplay } from "@/lib/stages";
 import { newId } from "@/lib/ids";
 import type { AuthContext, BulkResult, Job, JobPermissionRef, Project, User } from "@/lib/types";
 import {
@@ -44,6 +46,7 @@ import {
   SetPriorityInput,
   UpdateJobInput,
   optionalDeadlineToIso,
+  type AutoProjectInputValue,
   type JobFieldsValue,
 } from "@/lib/validation/jobs";
 import { assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
@@ -86,6 +89,43 @@ export interface CreateJobResult {
   eventId: string;
   /** Present when an initial editor was assigned (job moved to `assigned`). */
   editorAssignment: AssignEditorResult | null;
+  /** The simplified stage the job landed in (SIMPLIFICATION-PLAN §4): needs_editor, or with_editor when an editor was picked. */
+  stage: StageDisplay;
+  /** Set when the job was created through `autoProject` (plan §5): whether an existing project was reused. */
+  autoProject?: { projectId: string; reused: boolean };
+}
+
+/**
+ * The silent project of the simplified New job form (plan §5 "Projects disappear from the form"): an
+ * existing non-archived project of the client whose name OR address equals the typed address
+ * (case- and whitespace-insensitive, AUTO_PROJECT_RULE; the oldest match wins), else one created from
+ * the address through `createInlineProject` (same permission, same event).
+ */
+async function resolveAutoProject(tx: Tx, ctx: AuthContext, input: AutoProjectInputValue): Promise<{ project: Project; reused: boolean }> {
+  const client = await loadClientInOrg(tx, ctx, input.clientId);
+  if (client.archivedAt) throw fieldError("That client is archived", "clientId", "Archived");
+  const key = normaliseProjectKey(input.address);
+  const rows = await tx
+    .select()
+    .from(projects)
+    .where(and(eq(projects.organisationId, ctx.organisationId), eq(projects.clientId, client.id), isNull(projects.archivedAt)))
+    .orderBy(asc(projects.createdAt), asc(projects.id));
+  const match = rows.find((p) => normaliseProjectKey(p.name) === key || normaliseProjectKey(p.address) === key);
+  if (match) return { project: match, reused: true };
+  const address = input.address.trim().replace(/\s+/g, " ");
+  return { project: await createInlineProject(tx, ctx, client.id, { name: address, address }), reused: false };
+}
+
+/**
+ * Default due date of the simplified form (plan §5): shoot date + the type's usual days to edit
+ * (DEFAULT_USUAL_DAYS_TO_EDIT when unset), as a civil date in the org timezone. Only when the caller
+ * gave a shoot date and said nothing about the due date (`undefined`; `null` clears it explicitly).
+ */
+export function defaultDueDateFor(shootDate: string | null | undefined, usualDaysToEdit: number | null | undefined, timeZone: string): string | undefined {
+  if (!shootDate) return undefined;
+  const civil = /^\d{4}-\d{2}-\d{2}$/.test(shootDate) ? shootDate : civilDate(shootDate, timeZone);
+  if (!civil) return undefined;
+  return addCivilDays(civil, usualDaysToEdit ?? DEFAULT_USUAL_DAYS_TO_EDIT);
 }
 
 async function nextJobNumber(tx: Tx, organisationId: string): Promise<string> {
@@ -225,7 +265,12 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
   }
 
   let project: Project;
-  if (p.newProject) {
+  let autoProject: CreateJobResult["autoProject"];
+  if (p.autoProject) {
+    const resolved = await resolveAutoProject(tx, ctx, p.autoProject);
+    project = resolved.project;
+    autoProject = { projectId: project.id, reused: resolved.reused };
+  } else if (p.newProject) {
     project = await createInlineProject(tx, ctx, p.clientId as string, p.newProject);
   } else {
     project = await loadProjectInOrg(tx, ctx, p.projectId as string);
@@ -275,7 +320,8 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
     photographerId,
     editorId: null,
     shootDate: optionalDeadlineToIso(p.shootDate, tz) ?? null,
-    dueDate: optionalDeadlineToIso(p.dueDate, tz) ?? null,
+    // Plan §5: due date defaults to shoot date + the type's usual days to edit when the form says nothing.
+    dueDate: optionalDeadlineToIso(p.dueDate === undefined ? defaultDueDateFor(p.shootDate, jobType.usualDaysToEdit, tz) : p.dueDate, tz) ?? null,
     reviewDueDate: optionalDeadlineToIso(p.reviewDueDate, tz) ?? null,
     deliveryDueDate: optionalDeadlineToIso(p.deliveryDueDate, tz) ?? null,
     estimatedHours: p.estimatedHours ?? null,
@@ -350,7 +396,12 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
       editorId: p.editorId ?? null,
       estimatedHours: values.estimatedHours,
     },
-    metadata: jobEventMeta(values, { transitionId, creatorRole: createdByRole, ...(p.newProject ? { newProjectId: project.id } : {}) }),
+    metadata: jobEventMeta(values, {
+      transitionId,
+      creatorRole: createdByRole,
+      ...(p.newProject ? { newProjectId: project.id } : {}),
+      ...(autoProject ? { autoProject } : {}),
+    }),
   });
   await tx.update(jobStatusTransitions).set({ activityEventId: eventId }).where(eq(jobStatusTransitions.id, transitionId));
   const assignedPhotographer = photographerAssignmentId !== null && photographerId !== null && photographerId !== creatorId ? photographerId : null;
@@ -402,7 +453,14 @@ export async function createJob(tx: Tx, ctx: AuthContext, input: unknown): Promi
       linkPath: jobLinkPath(jobId),
     });
   }
-  return { job, transitionId, eventId, editorAssignment };
+  return {
+    job,
+    transitionId,
+    eventId,
+    editorAssignment,
+    stage: describeStage({ category: job.statusCategory, revisionCount: job.revisionCount, startedAt: job.startedAt, statusEnteredAt: job.statusEnteredAt }),
+    ...(autoProject ? { autoProject } : {}),
+  };
 }
 
 /** Ref of a job just created in this transaction: never started/cancelled, no editor removed (draft window open). */

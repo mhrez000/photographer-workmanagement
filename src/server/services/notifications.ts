@@ -4,8 +4,9 @@
  * `notify()` is called by other services inside their transaction. Rules:
  *   - never notifies the actor (ctx.userId)
  *   - skips inactive users and users outside the organisation
- *   - skips users whose user_notification_prefs row disables the type,
- *     unless NOTIFICATION_TYPE_META[type].mandatory
+ *   - skips users whose user_notification_prefs row disables the type; with NO
+ *     row the type's NOTIFICATION_TYPE_META.defaultOn decides (plan §8: 8 groups
+ *     on by default, the rest off; client-portal types on); mandatory types ignore both
  *   - dedupes per (user, activityEventId, type) and per (user, dedupeKey):
  *     pre-check + INSERT … ON CONFLICT DO NOTHING (the partial unique
  *     indexes make it race-safe)
@@ -168,20 +169,17 @@ export async function notify(tx: Tx, ctx: AuthContext, input: NotifyInput): Prom
     .map((r) => r.id);
   if (eligible.length === 0) return empty;
 
-  // Preferences (missing row = enabled; mandatory types ignore prefs).
-  if (!NOTIFICATION_TYPE_META[input.type].mandatory) {
-    const disabledRows = await tx
-      .select({ userId: userNotificationPrefs.userId })
+  // Preferences (SIMPLIFICATION-PLAN §8): an explicit row wins; with no row the type's `defaultOn` decides
+  // (the 8 default groups are on, everything else off; client-portal types stay on). Mandatory types ignore both.
+  const meta = NOTIFICATION_TYPE_META[input.type];
+  if (!meta.mandatory) {
+    const prefRows = await tx
+      .select({ userId: userNotificationPrefs.userId, enabled: userNotificationPrefs.enabled })
       .from(userNotificationPrefs)
-      .where(
-        and(
-          inArray(userNotificationPrefs.userId, eligible),
-          eq(userNotificationPrefs.type, input.type),
-          eq(userNotificationPrefs.enabled, false),
-        ),
-      );
-    const disabled = new Set(disabledRows.map((r) => r.userId));
-    eligible = eligible.filter((id) => !disabled.has(id));
+      .where(and(inArray(userNotificationPrefs.userId, eligible), eq(userNotificationPrefs.type, input.type)));
+    const explicit = new Map(prefRows.map((r) => [r.userId, r.enabled]));
+    const defaultOn = meta.defaultOn || clientType;
+    eligible = eligible.filter((id) => explicit.get(id) ?? defaultOn);
   }
 
   // Dedupe pre-check (the unique indexes back this up via ON CONFLICT DO NOTHING).

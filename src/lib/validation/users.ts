@@ -8,11 +8,21 @@
  * unknown keys as before.
  */
 import { z } from "zod";
-import { NOTIFICATION_TYPES, ROLES } from "@/lib/constants";
+import { NOTIFICATION_TYPES, PHOTOGRAPHER_PRESETS, ROLES } from "@/lib/constants";
 import { EmailSchema } from "./auth";
 import { ExpectedVersionSchema, HexColourSchema, IdSchema, NameSchema, OptionalTextSchema } from "./admin-shared";
 
 const CapacitySchema = z.number().min(0).max(168).nullable();
+/** Editors: "Usually handles up to N" jobs on their desk (SIMPLIFICATION-PLAN §7); null = not set. */
+export const UsualCapacitySchema = z.number().int().min(1).max(500).nullable();
+
+/** POST /api/users/:id/usual-capacity { usualCapacityJobs, expectedVersion } (editors only; admin). */
+export const SetUsualCapacityInput = z.strictObject({
+  userId: IdSchema,
+  usualCapacityJobs: UsualCapacitySchema,
+  expectedVersion: ExpectedVersionSchema,
+});
+export type SetUsualCapacityInput = z.infer<typeof SetUsualCapacityInput>;
 
 /** Team-member switches an invite may set (omitted → invite defaults, §2.2: review ✗). */
 export const MemberFlagsInput = z.strictObject({
@@ -40,8 +50,10 @@ const inviteBase = {
 
 /**
  * POST /api/users — discriminated on `role` (§6.1):
- * - photographer: optional `isAdmin` (co-owner) and member `flags`;
- * - editor: optional editor `flags`;
+ * - photographer: optional `isAdmin` (co-owner) and member `flags`, or — the simplified invite
+ *   (SIMPLIFICATION-PLAN §2) — one `preset`: "own_shoots" | "co_owner" (explicit `isAdmin` / `flags`
+ *   override the preset's values);
+ * - editor: optional editor `flags` and the simple "Usually handles up to N" (`usualCapacityJobs`);
  * - client: REQUIRED `clientId` (a non-archived, portal-enabled client of the
  *   organisation); no flags, no capacity, no admin, no title.
  */
@@ -54,12 +66,14 @@ export const InviteUserInput = z.discriminatedUnion("role", [
     capacityHoursPerWeek: CapacitySchema.optional(),
     isAdmin: z.boolean().optional(),
     flags: MemberFlagsInput.optional(),
+    preset: z.enum(PHOTOGRAPHER_PRESETS).optional(),
   }),
   z.strictObject({
     ...inviteBase,
     role: z.literal("editor"),
     title: OptionalTextSchema(120),
     capacityHoursPerWeek: CapacitySchema.optional(),
+    usualCapacityJobs: UsualCapacitySchema.optional(),
     flags: EditorFlagsInput.optional(),
   }),
   z.strictObject({

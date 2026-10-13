@@ -126,15 +126,34 @@ describe("edge roles + action rules", () => {
     await expectClean();
   });
 
-  it("self-review: an admin who was an editor of the job cannot approve it (after a role change)", async () => {
+  it("self-review (SIMPLIFICATION-PLAN §12.3): a non-admin ex-editor can never approve; an admin ex-editor must confirm, and history says so", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" }); // editor1 did the edit
     await as("owner", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2, expectedVersion: job.version }));
-    // editor1 becomes a photographer with admin (direct writes: role changes are package D's service)
-    await db.update(users).set({ role: "photographer", isAdmin: true }).where(eq(users.id, ids.users.editor1));
-    const err = await catchErr(moveAs(ids.users.editor1, job.id, { toCategory: "approved", override: false }));
-    expect(err.status).toBe(403);
-    // the owner, who never edited it, reviews it normally
+    // editor1 becomes a (non-admin) photographer who manages the job: still blocked
+    await db.update(users).set({ role: "photographer", isAdmin: false, canReviewSubmissions: true }).where(eq(users.id, ids.users.editor1));
+    await db.update(jobs).set({ photographerId: ids.users.editor1 }).where(eq(jobs.id, job.id));
+    expect((await catchErr(moveAs(ids.users.editor1, job.id, { toCategory: "approved", override: false }))).status).toBe(403);
+    // … then an admin: allowed, but only with the explicit confirm (422 without it)
+    await db.update(users).set({ isAdmin: true }).where(eq(users.id, ids.users.editor1));
+    const unconfirmed = await catchErr(moveAs(ids.users.editor1, job.id, { toCategory: "approved" }));
+    expect(unconfirmed.status).toBe(422);
+    expect(unconfirmed.message).toBe("You edited this yourself. Approve anyway?");
+    const res = await moveAs(ids.users.editor1, job.id, { toCategory: "approved", confirmSelfApproval: true });
+    expect(res.toStatus.category).toBe("approved");
+    const approvedEvents = await db.select().from(activityEvents).where(and(eq(activityEvents.jobId, job.id), eq(activityEvents.eventType, "job.approved")));
+    expect(approvedEvents).toHaveLength(1);
+    expect(approvedEvents[0].metadata.selfApproved).toBe(true);
+    expect(approvedEvents[0].summary).toBe("approved the work they edited themselves");
+    const statusEvents = await db.select().from(activityEvents).where(and(eq(activityEvents.jobId, job.id), eq(activityEvents.eventType, "job.status_changed")));
+    expect(statusEvents.at(-1)?.metadata.selfApproved).toBe(true);
+  });
+
+  it("the owner, who never edited the job, reviews it normally (no confirm, no selfApproved flag)", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "submitted" });
     expect((await moveAs(ids.users.owner, job.id, { toCategory: "approved" })).toStatus.category).toBe("approved");
+    const approved = await db.select().from(activityEvents).where(and(eq(activityEvents.jobId, job.id), eq(activityEvents.eventType, "job.approved")));
+    expect(approved[0].metadata.selfApproved).toBeUndefined();
+    expect(approved[0].summary).toBe("approved the work");
   });
 
   it("admins act on editor-side edges on behalf of the editor (metadata.onBehalfOf)", async () => {

@@ -7,6 +7,8 @@
  * sweep), `primary_owner_user_id` (`transferPrimaryOwner` in services/users.ts),
  * `roles_v2_notice_dismissed_at` (`dismissRolesNotice`) and the four deprecated
  * org-wide visibility switches (roles v2: per-user switches).
+ * `advanced_tools_enabled` (SIMPLIFICATION-PLAN §8) IS editable here (admins; audited like every
+ * field); `setAdvancedTools` in ./simple.ts is the thin wrapper the Studio page calls.
  */
 import { and, eq } from "drizzle-orm";
 import { organisationSettings, organisations, users } from "@/db/schema";
@@ -66,6 +68,7 @@ function defaultSettingsRow(organisationId: string): OrganisationSettings {
     defaultPhotographerUserId: null,
     rolesV2NoticeDismissedAt: null,
     lastOverdueSweepAt: null,
+    advancedToolsEnabled: false,
     updatedAt: new Date(0).toISOString(),
     version: 0,
   };

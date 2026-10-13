@@ -121,7 +121,7 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
 /** Full login for route handlers / server actions: authenticate + set the cookie. */
 export async function login(raw: unknown, db: Db = getDb()): Promise<AuthenticatedUser> {
   const user = await authenticate(db, raw);
-  await createSession(user.id, user.sessionVersion, sessionKindForRole(user.role));
+  await createSession(user.id, user.sessionVersion, sessionKindForRole(user.role), user.role);
   return user;
 }
 
@@ -238,6 +238,6 @@ export async function changePasswordInDb(
 export async function changePassword(ctx: AuthContext, raw: unknown, db: Db = getDb()): Promise<{ ok: true }> {
   const prepared = await preparePasswordChange(db, ctx, raw);
   const { sessionVersion } = await withTx((tx) => changePasswordInDb(tx, ctx, prepared), { db });
-  await createSession(prepared.userId, sessionVersion, sessionKindForRole(ctx.role));
+  await createSession(prepared.userId, sessionVersion, sessionKindForRole(ctx.role), ctx.role);
   return { ok: true };
 }

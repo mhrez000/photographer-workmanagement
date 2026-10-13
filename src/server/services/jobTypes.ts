@@ -14,7 +14,7 @@ import { first, loadJobTypeInOrg, loadWorkflowInOrg, one, parseInput, type DbLik
 import { checkVersion, diffFields, ruleViolation } from "./_admin";
 import { workflowProblems } from "./workflows";
 
-const EDITABLE = ["name", "colour", "workflowId", "defaultEstimatedHours", "sortOrder"] as const;
+const EDITABLE = ["name", "colour", "workflowId", "defaultEstimatedHours", "usualDaysToEdit", "sortOrder"] as const;
 
 /** The organisation's default (non-archived) workflow. */
 export async function defaultWorkflowOf(db: DbLike, ctx: AuthContext): Promise<Workflow> {
@@ -54,7 +54,7 @@ export async function listJobTypes(db: DbLike, ctx: AuthContext, opts: { include
 }
 
 function snapshot(t: JobType) {
-  return { name: t.name, colour: t.colour, workflowId: t.workflowId, defaultEstimatedHours: t.defaultEstimatedHours, sortOrder: t.sortOrder };
+  return { name: t.name, colour: t.colour, workflowId: t.workflowId, defaultEstimatedHours: t.defaultEstimatedHours, usualDaysToEdit: t.usualDaysToEdit, sortOrder: t.sortOrder };
 }
 
 export async function createJobType(tx: Tx, ctx: AuthContext, input: unknown): Promise<JobType> {
@@ -73,6 +73,7 @@ export async function createJobType(tx: Tx, ctx: AuthContext, input: unknown): P
         ...(data.colour ? { colour: data.colour } : {}),
         workflowId: wf.id,
         defaultEstimatedHours: data.defaultEstimatedHours ?? null,
+        usualDaysToEdit: data.usualDaysToEdit ?? null,
         sortOrder,
         createdAt: now,
         updatedAt: now,

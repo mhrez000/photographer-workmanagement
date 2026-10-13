@@ -703,6 +703,13 @@ exports[`permissionMatrix > snapshot (persona columns: allowed / scope / switch)
     "-",
   ],
   [
+    "advanced.view",
+    "any",
+    "while Advanced tools is on; the feature's own permission still applies",
+    "while Advanced tools is on; the feature's own permission still applies",
+    "-",
+  ],
+  [
     "portal.view_job",
     "-",
     "-",

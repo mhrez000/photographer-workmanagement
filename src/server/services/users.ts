@@ -68,7 +68,7 @@ import {
 } from "@/lib/validation/users";
 import { recordEvent } from "@/server/audit";
 import { generateTempPassword, hashPassword } from "@/server/auth/password";
-import { assertCan, isAdmin, personaOf, type UserPermissionRef } from "@/server/auth/permissions";
+import { assertCan, inviteSwitchesFor, isAdmin, personaOf, type UserPermissionRef } from "@/server/auth/permissions";
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from "@/server/errors";
 import { first, loadUserInOrg, one, parseInput, safeUser, withTx, type Db, type DbLike, type SafeUser, type Tx } from "./_shared";
 import { UserRuleError, checkVersion, diffFields, ruleViolation } from "./_admin";
@@ -315,7 +315,14 @@ function definedOnly<T extends object>(value: T | undefined): Partial<T> {
 export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
   requireHuman(ctx, "user.invite");
-  const data = parseInput(InviteUserInput, input);
+  const parsed = parseInput(InviteUserInput, input);
+  // SIMPLIFICATION-PLAN §2: one preset ("Only their own shoots" / "Everything (co-owner)") pre-fills the
+  // switches; explicit `isAdmin` / `flags` still win.
+  const preset = parsed.role === "photographer" ? parsed.preset : undefined;
+  const data: InviteUserInput =
+    parsed.role === "photographer" && preset
+      ? { ...parsed, ...inviteSwitchesFor(preset, { isAdmin: parsed.isAdmin, flags: parsed.flags }) }
+      : parsed;
   const newRef: UserPermissionRef = { id: "new", role: data.role, isActive: true, organisationId: ctx.organisationId, nextRole: data.role };
   assertCan(ctx, "user.invite", newRef);
   const makeAdmin = data.role === "photographer" && data.isAdmin === true;
@@ -339,6 +346,7 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
           title: data.role === "client" ? null : (data.title ?? null),
           avatarColour: data.avatarColour ?? AVATAR_PALETTE[Math.floor(Date.parse(now) / 1000) % AVATAR_PALETTE.length],
           capacityHoursPerWeek: data.role === "client" ? null : (data.capacityHoursPerWeek ?? null),
+          usualCapacityJobs: data.role === "editor" ? (data.usualCapacityJobs ?? null) : null,
           isAdmin: makeAdmin,
           ...flags,
           clientId: client?.id ?? null,
@@ -363,9 +371,10 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
       clientId: row.clientId,
       title: row.title,
       capacityHoursPerWeek: row.capacityHoursPerWeek,
+      usualCapacityJobs: row.usualCapacityJobs,
       flags: pickFlags(flagsOf(row), relevantFlags(row.role, row.isAdmin)),
     },
-    metadata: { targetUserId: row.id, ...(client ? { clientName: client.name } : {}) },
+    metadata: { targetUserId: row.id, ...(client ? { clientName: client.name } : {}), ...(preset ? { preset } : {}) },
   });
   return { user: safeUser(row), tempPassword };
 }
@@ -988,7 +997,10 @@ export function notificationTypesFor(role: Role): readonly NotificationType[] {
   return role === "client" ? clientTypes : NOTIFICATION_TYPES.filter((t) => !clientTypes.includes(t));
 }
 
-/** Own preferences (missing row = enabled; mandatory types always on), for the types the user can receive. */
+/**
+ * Own preferences for the types the user can receive. Missing row = the type's `defaultOn`
+ * (SIMPLIFICATION-PLAN §8: the 8 default groups on, the rest off; client types on); mandatory types always on.
+ */
 export async function getNotificationPrefs(db: DbLike, ctx: AuthContext, userId?: string): Promise<NotificationPrefView[]> {
   const target = userId ?? ctx.userId;
   if (!target) throw new UnauthorizedError();
@@ -997,8 +1009,9 @@ export async function getNotificationPrefs(db: DbLike, ctx: AuthContext, userId?
   const rows = await db.select().from(userNotificationPrefs).where(eq(userNotificationPrefs.userId, target));
   const byType = new Map(rows.map((r) => [r.type, r.enabled]));
   return notificationTypesFor(user.role).map((type) => {
-    const mandatory = NOTIFICATION_TYPE_META[type].mandatory;
-    return { type, label: NOTIFICATION_TYPE_META[type].label, mandatory, enabled: mandatory ? true : (byType.get(type) ?? true) };
+    const meta = NOTIFICATION_TYPE_META[type];
+    const defaultOn = meta.defaultOn || user.role === "client";
+    return { type, label: meta.label, mandatory: meta.mandatory, enabled: meta.mandatory ? true : (byType.get(type) ?? defaultOn) };
   });
 }
 
@@ -1023,7 +1036,7 @@ export async function setNotificationPrefs(tx: Tx, ctx: AuthContext, input: unkn
       continue;
     }
     if (current.get(type) === enabled) continue;
-    previous[type] = current.get(type) ?? true;
+    previous[type] = current.get(type) ?? NOTIFICATION_TYPE_META[type].defaultOn;
     next[type] = enabled;
     await tx
       .insert(userNotificationPrefs)

@@ -113,6 +113,11 @@ export interface SessionPayload {
   sub: string;
   sv: number;
   k?: SessionKind;
+  /**
+   * Role at sign-in (SIMPLIFICATION-PLAN §3): a routing hint so the edge proxy can land editors on
+   * /my-jobs. Unverified in the proxy; a missing claim = photographer. Never a permission input.
+   */
+  r?: Role;
 }
 
 /**
@@ -126,6 +131,8 @@ export interface ContextSettings {
   automationsEnabled: boolean;
   /** organisation_settings.audit_notifications (write a notification.sent event per notification). */
   auditNotifications?: boolean;
+  /** organisation_settings.advanced_tools_enabled (SIMPLIFICATION-PLAN §8); missing = off. */
+  advancedToolsEnabled?: boolean;
 }
 
 /**
@@ -1472,4 +1479,473 @@ export interface UserCompletedWork {
   items: CompletedWorkItem[];
   /** Oldest → newest; `week` = civil start date of the 7-day bucket. */
   weekly: { week: string; completed: number; onTime: number; late: number }[];
+}
+
+/* ------------------------------------------------------------------ */
+/*  simplified UI — view models for the 5-stage screens                 */
+/*  (docs/SIMPLIFICATION-PLAN.md; read side in src/server/queries/      */
+/*  jobsSimple.ts, home.ts, myJobs.ts, editors.ts, jobPageSimple.ts,    */
+/*  settingsSimple.ts). Append only — never reorder this file.          */
+/* ------------------------------------------------------------------ */
+// simplified UI
+
+import type { Stage, StageDisplay, NextStep as SimpleNextStepKind } from "@/lib/stages";
+
+export type { Stage, StageDisplay, SimpleNextStepKind };
+
+/** Stage filter of the Jobs page: a stage tab or "all_active" (every active stage). */
+export type StageFilter = Stage | "all_active";
+
+/** The due chip: a civil date in the organisation timezone plus the "late" flag (active stage ∧ due day before today). */
+export interface SimpleDue {
+  /** Stored deadline instant (end of the civil day). */
+  dueDate: string | null;
+  /** Civil due day (YYYY-MM-DD, org tz). */
+  civilDate: string | null;
+  /** Days from today to the due day (negative = past). null without a due date. */
+  daysFromToday: number | null;
+  late: boolean;
+}
+
+/** A current link on a job as the simplified screens show it. */
+export interface SimpleLink {
+  id: string;
+  kind: LinkKind;
+  url: string;
+  label: string | null;
+  addedAt: string;
+}
+
+/** One row of the Jobs list / one card on Home and My jobs. */
+export interface SimpleJobRow {
+  id: string;
+  jobNumber: string;
+  name: string;
+  client: ClientRef;
+  project: { id: string; name: string; address: string | null };
+  jobTypeName: string;
+  jobTypeColour: string;
+  stage: StageDisplay;
+  /** "Waiting on: <name>" — "You" for the viewer, null when done / cancelled. */
+  waitingOn: string | null;
+  due: SimpleDue;
+  /** priority === "urgent" */
+  rush: boolean;
+  photographer: UserRef | null;
+  editor: UserRef | null;
+  /** "Round N" badge (null before any changes were asked). */
+  round: number | null;
+  finishedLink: SimpleLink | null;
+  rawLink: SimpleLink | null;
+  shootDate: string | null;
+  statusCategory: StatusCategory;
+  statusEnteredAt: string;
+  /** jobs.started_at — "Editing since …". */
+  startedAt: string | null;
+  /** Latest send-for-checking (jobs.last_submitted_at). */
+  sentAt: string | null;
+  updatedAt: string;
+  version: number;
+}
+
+export interface SimpleJobListResult {
+  rows: SimpleJobRow[];
+  nextCursor: string | null;
+  total: number;
+}
+
+/** Counts for the stage tabs + the Late / Show cancelled filters (same search / editor / client filters applied). */
+export interface StageCounts {
+  allActive: number;
+  byStage: Record<Stage, number>;
+  late: number;
+  cancelled: number;
+}
+
+export type SimpleCalendarKind = "shoot" | "due";
+
+export interface SimpleCalendarEvent {
+  id: string;
+  kind: SimpleCalendarKind;
+  at: string;
+  civilDate: string;
+  job: SimpleJobRow;
+}
+
+/** A "Ready to check" card (Home). */
+export interface ReadyToCheckCard {
+  job: SimpleJobRow;
+  /** When the editor sent it (last_submitted_at, else the stage entry). */
+  sentAt: string;
+  sentAgoSeconds: number;
+  round: number | null;
+  finishedLink: SimpleLink | null;
+  /** The viewer may approve / ask for changes (owners always; members with Review submissions on their shoots). */
+  canCheck: boolean;
+  /** Owner / co-owner who edited this job themselves: Approve asks "You edited this yourself. Approve anyway?" (plan §12.3). */
+  selfReviewNeedsConfirm: boolean;
+  /** Who checks it when the viewer cannot ("Mo will check this"). */
+  checkedBy: string | null;
+  /** The client uses the portal: Approve asks "Approve & send / Approve only" (plan §12.2). */
+  shareQuestion: boolean;
+}
+
+export type NeedsAttentionReason =
+  | { kind: "late"; daysLate: number; withName: string | null }
+  | { kind: "no_editor"; shotCivilDate: string | null }
+  | { kind: "question"; from: UserRef; excerpt: string; since: string }
+  | { kind: "client_message"; excerpt: string; since: string };
+
+export interface NeedsAttentionRow {
+  job: SimpleJobRow;
+  reason: NeedsAttentionReason;
+  /** Instant the row sorts by (oldest first inside a reason kind). */
+  since: string;
+}
+
+/** "Your editors" row on Home (a cut of EditorOverviewRow). */
+export interface HomeEditorRow {
+  editor: UserRef;
+  onDesk: number;
+  lateNow: number;
+  /** null with `notEnough` when fewer than MIN_JOBS_FOR_RATES finished this month. */
+  onTimePctThisMonth: number | null;
+  notEnough: boolean;
+  usualCapacity: number | null;
+  full: boolean;
+}
+
+export interface ComingUpItem {
+  kind: SimpleCalendarKind;
+  at: string;
+  civilDate: string;
+  job: SimpleJobRow;
+}
+
+export interface OwnerHome {
+  viewer: { id: string; name: string; isAdmin: boolean; canReview: boolean };
+  topline: { toCheck: number; late: number; needsEditor: number };
+  readyToCheck: ReadyToCheckCard[];
+  needsAttention: NeedsAttentionRow[];
+  /** Owners / co-owners only (null for an extra photographer). */
+  yourEditors: HomeEditorRow[] | null;
+  comingUp: ComingUpItem[];
+  /** Show the one-time "Proofline got simpler" card. */
+  simplerNotice: boolean;
+  /** No jobs visible at all → "No jobs yet". */
+  emptyStudio: boolean;
+  asOf: string;
+}
+
+/** The change request quoted on an editor's "Changes asked" card. */
+export interface ChangesAskedNote {
+  round: number;
+  who: UserRef;
+  when: string;
+  text: string;
+  reason: string;
+}
+
+export interface MyJobCard {
+  job: SimpleJobRow;
+  /** "New" / "Editing" label on To do cards; null elsewhere. */
+  toDoLabel: "new" | "editing" | null;
+  /** Latest open request (Changes asked cards). */
+  changesAsked: ChangesAskedNote | null;
+  nextStep: SimpleNextStepKind;
+  /** Send for checking needs a finished link first. */
+  hasFinishedLink: boolean;
+}
+
+export interface MyJobsFooter {
+  finished: number;
+  onTimePct: number | null;
+  neededChangesPct: number | null;
+  notEnough: boolean;
+}
+
+export interface MyJobs {
+  viewer: { id: string; name: string };
+  nextUp: MyJobCard | null;
+  changesAsked: MyJobCard[];
+  late: MyJobCard[];
+  toDo: MyJobCard[];
+  waitingForCheck: MyJobCard[];
+  doneRecently: MyJobCard[];
+  thisMonth: MyJobsFooter;
+  asOf: string;
+}
+
+export type EditorPeriodKey = "this_month" | "last_month" | "last_3_months";
+
+export interface EditorPeriodRange {
+  period: EditorPeriodKey;
+  from: string;
+  to: string;
+  label: string;
+}
+
+/** The five numbers (plan §7). Percentages are whole numbers 0–100 or null with `notEnough`. */
+export interface EditorFiveNumbers {
+  onDesk: number;
+  lateNow: number;
+  finished: number;
+  onTimePct: number | null;
+  neededChangesPct: number | null;
+  /** Fewer than MIN_JOBS_FOR_RATES finished in the period: show "Not enough jobs yet". */
+  notEnough: boolean;
+}
+
+export interface EditorOverviewRow extends EditorFiveNumbers {
+  editor: UserRef;
+  usualCapacity: number | null;
+  full: boolean;
+}
+
+export interface ExtraPhotographerRow {
+  photographer: UserRef;
+  shootsThisPeriod: number;
+  waitingForTheirCheck: number;
+  late: number;
+}
+
+export interface EditorsOverview {
+  period: EditorPeriodRange;
+  waitingOnYou: { count: number; oldestAgeSeconds: number | null };
+  rows: EditorOverviewRow[];
+  extraPhotographers: ExtraPhotographerRow[];
+  asOf: string;
+}
+
+export interface EditorNumberDelta {
+  current: number | null;
+  previous: number | null;
+  /** current − previous (percentage points for the rates); null when either side is missing. */
+  delta: number | null;
+}
+
+export interface EditorOnDeskJob {
+  job: SimpleJobRow;
+  canChangeEditor: boolean;
+}
+
+export interface RecentlyFinishedJob {
+  job: SimpleJobRow;
+  approvedAt: string;
+  /** Sent for checking on/before the due day (null without a due date or a submission). */
+  onTime: boolean | null;
+  /** Whole days the first send-for-checking was past the due day (0 when on time, null when not measurable). */
+  daysLate: number | null;
+  rounds: number;
+}
+
+export interface FinishedPerWeekPoint {
+  /** Civil start of the week (org tz). */
+  weekStart: string;
+  finished: number;
+}
+
+export interface EditorDetail {
+  editor: UserRef;
+  period: EditorPeriodRange;
+  numbers: EditorFiveNumbers;
+  usualCapacity: number | null;
+  full: boolean;
+  deltas: {
+    onDesk: EditorNumberDelta;
+    lateNow: EditorNumberDelta;
+    finished: EditorNumberDelta;
+    onTimePct: EditorNumberDelta;
+    neededChangesPct: EditorNumberDelta;
+  };
+  onDeskNow: EditorOnDeskJob[];
+  recentlyFinished: RecentlyFinishedJob[];
+  finishedPerWeek: FinishedPerWeekPoint[];
+  asOf: string;
+}
+
+export interface EditorsCsv {
+  fileName: string;
+  csv: string;
+}
+
+/** An editor in the Assign / Change editor picker ("On their desk 3 · Late 1"). */
+export interface EditorPickerOption {
+  editor: UserRef;
+  onDesk: number;
+  late: number;
+  usualCapacity: number | null;
+  full: boolean;
+}
+
+export type SimpleViewerRole = "reviewer" | "editor" | "other";
+
+export interface SimpleNextStep {
+  kind: SimpleNextStepKind;
+  viewer: SimpleViewerRole;
+  /** The viewer passes the server-side permission for this step. */
+  allowed: boolean;
+  /** Assign / change editor: the picker rows. */
+  editorOptions: EditorPickerOption[] | null;
+  /** Check: owner / co-owner edited this themselves → confirm first (plan §12.3). */
+  selfReviewNeedsConfirm: boolean;
+  /** Check: client uses the portal → "Approve & send / Approve only" (plan §12.2). */
+  shareQuestion: boolean;
+  /** Ready to check: when the editor sent it. */
+  sentAt: string | null;
+  /** Send for checking stays off until a finished link exists. */
+  hasFinishedLink: boolean;
+  /** The latest finished link (pre-fills the Send for checking box after changes). */
+  lastFinishedLink: SimpleLink | null;
+}
+
+export interface SimpleFiles {
+  raw: LinkView | null;
+  finished: LinkView | null;
+  /** Earlier finished links, newest first. */
+  earlierVersions: LinkView[];
+  /** Other current links (workspace, references, …). */
+  other: LinkView[];
+}
+
+export interface InstructionItem {
+  source: "description" | "photographer" | "editor" | "revision" | "delivery";
+  body: string;
+  author: UserRef | null;
+  at: string | null;
+  noteId: string | null;
+}
+
+export interface ChangesAskedRound {
+  id: string;
+  round: number;
+  what: string;
+  reason: string;
+  who: UserRef;
+  when: string;
+  status: "open" | "fixed" | "withdrawn";
+  fixedAt: string | null;
+}
+
+export type WhoDidWhatKind =
+  | "created"
+  | "given_to"
+  | "moved_to"
+  | "started"
+  | "sent_for_checking"
+  | "sent_back"
+  | "changes_asked"
+  | "approved"
+  | "sent_to_client"
+  | "closed"
+  | "cancelled"
+  | "restored"
+  | "reopened"
+  | "taken_back";
+
+export interface WhoDidWhatEntry {
+  at: string;
+  kind: WhoDidWhatKind;
+  actor: UserRef | null;
+  /** The person the job went to (given_to / moved_to). */
+  subject: UserRef | null;
+  /** sent_for_checking: on/before the due day. */
+  onTime: boolean | null;
+  /** changes_asked: the round number. */
+  round: number | null;
+}
+
+export interface SimpleJobHeader {
+  id: string;
+  jobNumber: string;
+  name: string;
+  client: ClientRef;
+  jobTypeName: string;
+  stage: StageDisplay;
+  waitingOn: string | null;
+  due: SimpleDue;
+  round: number | null;
+  rush: boolean;
+  shotBy: UserRef | null;
+  editedBy: UserRef | null;
+  version: number;
+}
+
+export interface SimpleSideColumn {
+  shootDate: string | null;
+  dueDate: string | null;
+  /** Only when the client uses the portal. */
+  clientDeliveryDate: string | null;
+  jobType: JobTypeRef;
+  rush: boolean;
+  clientHasPortal: boolean;
+  clientCanSee: boolean;
+}
+
+export interface SimpleJobPermissions {
+  canEditDetails: boolean;
+  canChangeEditor: boolean;
+  canTakeBack: boolean;
+  canCancel: boolean;
+  canRestore: boolean;
+  canReopen: boolean;
+  /** Editor: "Can't do this one". */
+  canDecline: boolean;
+  canComment: boolean;
+  canAddPrivateNote: boolean;
+  canReplyToClient: boolean;
+}
+
+export interface SimpleJobPage {
+  header: SimpleJobHeader;
+  nextStep: SimpleNextStep;
+  files: SimpleFiles;
+  instructions: InstructionItem[];
+  changesAsked: ChangesAskedRound[];
+  /** Staff thread (every comment kind except client feedback). */
+  messages: CommentNode[];
+  /** Internal / client notes — owners and photographers only (null for editors). */
+  privateNotes: NoteView[] | null;
+  /** Client feedback threads — staff only, and only when the client uses the portal (null otherwise). */
+  fromClient: CommentNode[] | null;
+  whoDidWhat: WhoDidWhatEntry[];
+  sideColumn: SimpleSideColumn;
+  permissions: SimpleJobPermissions;
+  description: string | null;
+  asOf: string;
+}
+
+/** The invite choice for a photographer who is not an admin (plan §2). */
+export type PhotographerPreset = "own_shoots" | "everything" | "custom";
+
+export interface PersonCard {
+  user: UserRef;
+  email: string | null;
+  isPrimaryOwner: boolean;
+  /** Photographers only. */
+  preset: PhotographerPreset | null;
+  /** Editors only: "Can add their own jobs". */
+  canCreateJobs: boolean | null;
+  usualCapacity: number | null;
+}
+
+export interface PeopleOverview {
+  owners: PersonCard[];
+  photographers: PersonCard[];
+  editors: PersonCard[];
+  /** Clients with the portal switched on / total active clients. */
+  clients: { withPortal: number; total: number };
+}
+
+export interface AdvancedState {
+  /** organisation_settings.advanced_tools_enabled (false until migration 0004 lands). */
+  enabled: boolean;
+  /** The column exists in this database. */
+  columnPresent: boolean;
+  /** Studio relies on advanced features: custom workflows or enabled automations (plan §8 "turns on automatically"). */
+  forcedOn: boolean;
+  forcedReasons: string[];
+  /** enabled || forcedOn */
+  effective: boolean;
+  canManage: boolean;
 }

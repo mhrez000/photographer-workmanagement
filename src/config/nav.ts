@@ -1,63 +1,73 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
-  BarChart3,
   Bell,
   Briefcase,
   Building2,
   CalendarDays,
-  Camera,
   ChartNoAxesGantt,
   CircleUser,
-  ClipboardList,
-  FolderKanban,
-  Funnel,
-  Gauge,
-  History,
-  KeyRound,
+  FolderPlus,
+  Images,
   LayoutDashboard,
-  LayoutList,
   LifeBuoy,
   ListChecks,
-  Palette,
+  Plus,
   Search,
   Settings,
   Siren,
   SlidersHorizontal,
   SquareKanban,
-  Tag,
   UserPlus,
-  Users,
-  UsersRound,
   WandSparkles,
   Workflow,
   Zap,
-  Plus,
-  FolderPlus,
-  Images,
   type LucideProps,
 } from "lucide-react";
+import { ADVANCED_FEATURES, ADVANCED_FEATURE_META, type AdvancedFeature } from "@/lib/constants";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * Roles v2 (docs/ROLES.md §10): items no longer carry role lists. Each entry
- * takes an optional `gate`; the (app) layout computes `NavGates` server-side
- * with `can()` (src/server/nav-gates.ts → `navGatesFor(ctx)`) and the shell
- * filters with `navigationFor(gates)` etc. No gate = every staff persona.
- * Clients never get this navigation: the portal uses `portalNavigation`.
+ * Simplified navigation (docs/SIMPLIFICATION-PLAN.md §3). Items carry an optional `gate`; the (app)
+ * layout computes `NavGates` server-side with `can()` (src/server/nav-gates.ts → `navGatesFor(ctx)`)
+ * and the shell filters with `navigationFor(gates)` etc. No gate = every staff persona. Clients never
+ * get this navigation: the portal uses `portalNavigation`.
+ *
+ * Who sees what (plan §3):
+ *   owner / co-owner (admin)      Home · Jobs · Editors · Clients · Settings (+ Advanced group when the
+ *                                 studio's Advanced tools switch is on: Board, Timeline, Reports & stats,
+ *                                 Automations, Workflows)
+ *   extra photographer (member)   Home · Jobs · Clients
+ *   editor                        My jobs · Calendar
  */
-export const NAV_GATES = ["admin", "createJobs", "createClients", "teamWork", "directory", "teamWorkloads", "analytics"] as const;
+export const NAV_GATES = [
+  "admin",
+  "createJobs",
+  "createClients",
+  "teamWork",
+  "directory",
+  "teamWorkloads",
+  "analytics",
+  "photographer",
+  "editor",
+  "newJob",
+  "advanced",
+] as const;
 /**
- *   admin          isAdmin (settings items, Invite, Settings quick action)
+ *   admin          isAdmin (Editors, Settings, Invite, Settings quick action)
  *   createJobs     job.create (admin; members / editors with "Create jobs")
  *   createClients  client.create (admin; members with "Create jobs")
- *   teamWork       admin ∨ member ⚑all ∨ editor ⚑teamJobs
+ *   teamWork       kept for older shells: admin ∨ member ⚑all ∨ editor ⚑teamJobs
  *   directory      team.view_members (admin, members)
  *   teamWorkloads  workloads.view_team
- *   analytics      analytics.view (also gates Performance)
+ *   analytics      analytics.view
+ *   photographer   role = photographer (admins included): Home · Jobs · Clients
+ *   editor         role = editor: My jobs · Calendar
+ *   newJob         photographer ∧ job.create (the (+) tab; editors create from My jobs)
+ *   advanced       admin ∧ the studio's Advanced tools switch is on (the Advanced group)
  */
 export type NavGate = (typeof NAV_GATES)[number];
 export type NavGates = Record<NavGate, boolean>;
@@ -71,6 +81,10 @@ export const NO_NAV_GATES: NavGates = {
   directory: false,
   teamWorkloads: false,
   analytics: false,
+  photographer: false,
+  editor: false,
+  newJob: false,
+  advanced: false,
 };
 
 export interface NavItem {
@@ -83,15 +97,17 @@ export interface NavItem {
   gate?: NavGate;
   /** Match only the exact pathname (default: prefix match). */
   exact?: boolean;
+  /** Treat every path under this prefix as "inside" the item (e.g. Settings → /settings/*). */
+  matchPrefix?: string;
   /** Optional short description for the command palette / tooltips. */
   description?: string;
-  /** Keyboard chord for the command palette, e.g. "g d". */
+  /** Keyboard chord for the command palette, e.g. "g d". Advanced only (plan §8: chords are hidden). */
   shortcut?: string;
 }
 
 export interface NavGroup {
   id: string;
-  /** Group heading. Omitted for the top-level Dashboard entry. */
+  /** Group heading. Omitted for the top-level items. */
   label?: string;
   items: NavItem[];
   /** Gate applied to the whole group. */
@@ -112,253 +128,82 @@ export interface QuickAction {
 export type IconProps = LucideProps;
 
 /* ------------------------------------------------------------------ */
-/*  Main navigation — spec §27                                         */
+/*  Main navigation — plan §3                                          */
 /* ------------------------------------------------------------------ */
 
 export const navigation: NavGroup[] = [
   {
-    id: "home",
+    id: "main",
     items: [
       {
-        id: "dashboard",
-        label: "Dashboard",
-        href: "/dashboard",
+        id: "home",
+        label: "Home",
+        href: "/home",
         icon: LayoutDashboard,
-        description: "What is happening in the business right now",
-        shortcut: "g d",
-      },
-    ],
-  },
-  {
-    id: "workspace",
-    label: "Workspace",
-    items: [
-      {
-        id: "all-work",
-        label: "All Work",
-        href: "/workspace/all",
-        icon: LayoutList,
-        description: "Every job in one sortable, filterable table",
-        shortcut: "g a",
+        gate: "photographer",
+        description: "What needs you: ready to check, late, needs an editor",
       },
       {
-        id: "my-work",
-        label: "My Work",
-        href: "/workspace/my",
+        id: "my-jobs",
+        label: "My jobs",
+        href: "/my-jobs",
         icon: ListChecks,
-        description: "Your queue: due today, overdue, awaiting review",
-        shortcut: "g m",
+        gate: "editor",
+        description: "Changes asked, late, to do, waiting for a check",
       },
-      {
-        id: "team-work",
-        label: "Team Work",
-        href: "/workspace/team",
-        icon: UsersRound,
-        gate: "teamWork",
-        description: "What everyone on the team is working on",
-      },
-      {
-        id: "kanban",
-        label: "Kanban",
-        href: "/workspace/kanban",
-        icon: SquareKanban,
-        description: "Drag jobs between workflow stages",
-        shortcut: "g k",
-      },
-      {
-        id: "calendar",
-        label: "Calendar",
-        href: "/workspace/calendar",
-        icon: CalendarDays,
-        description: "Shoot and due dates by day, week and month",
-        shortcut: "g c",
-      },
-      {
-        id: "timeline",
-        label: "Timeline",
-        href: "/workspace/timeline",
-        icon: ChartNoAxesGantt,
-        description: "Gantt view of jobs across time",
-      },
-    ],
-  },
-  {
-    id: "production",
-    label: "Production",
-    items: [
       {
         id: "jobs",
         label: "Jobs",
         href: "/jobs",
         icon: Briefcase,
-        description: "All jobs, their status and history",
-        shortcut: "g j",
+        gate: "photographer",
+        description: "Every job, by stage (List / Calendar)",
       },
       {
-        id: "projects",
-        label: "Projects",
-        href: "/projects",
-        icon: FolderKanban,
-        description: "Group jobs into client projects",
+        id: "calendar",
+        label: "Calendar",
+        href: "/calendar",
+        icon: CalendarDays,
+        gate: "editor",
+        description: "Your own due dates",
+      },
+      {
+        id: "editors",
+        label: "Editors",
+        href: "/editors",
+        icon: WandSparkles,
+        gate: "admin",
+        description: "On their desk · Late now · Finished · On time · Needed changes",
       },
       {
         id: "clients",
         label: "Clients",
         href: "/clients",
         icon: Building2,
-        description: "Agencies, developers and private clients",
+        gate: "photographer",
+        description: "Agencies and private clients (and the portal switch)",
+      },
+      {
+        id: "settings",
+        label: "Settings",
+        href: "/settings/studio",
+        icon: Settings,
+        gate: "admin",
+        matchPrefix: "/settings",
+        description: "Studio, People, Types of shoot, My account, History",
       },
     ],
   },
   {
-    id: "team",
-    label: "Team",
+    id: "advanced",
+    label: "Advanced",
+    gate: "advanced",
     items: [
-      {
-        id: "photographers",
-        label: "Photographers",
-        href: "/team/photographers",
-        icon: Camera,
-        gate: "directory",
-        description: "Photographers and the jobs they own",
-      },
-      {
-        id: "editors",
-        label: "Editors",
-        href: "/team/editors",
-        icon: WandSparkles,
-        gate: "directory",
-        description: "Editors, capacity and current queue",
-      },
-      {
-        id: "workloads",
-        label: "Workloads",
-        href: "/team/workloads",
-        icon: Gauge,
-        gate: "teamWorkloads",
-        description: "Who is healthy, near capacity or overloaded",
-      },
-      {
-        id: "performance",
-        label: "Performance",
-        href: "/team/performance",
-        icon: BarChart3,
-        gate: "analytics",
-        description: "Turnaround, on-time rate and revision rate per person",
-      },
-    ],
-  },
-  {
-    id: "insights",
-    label: "Insights",
-    items: [
-      {
-        id: "analytics",
-        label: "Analytics",
-        href: "/insights/analytics",
-        icon: Activity,
-        gate: "analytics",
-        description: "Volume, throughput and trends",
-      },
-      {
-        id: "bottlenecks",
-        label: "Bottlenecks",
-        href: "/insights/bottlenecks",
-        icon: Funnel,
-        gate: "analytics",
-        description: "Where jobs are getting stuck",
-      },
-      {
-        id: "reports",
-        label: "Reports",
-        href: "/insights/reports",
-        icon: ClipboardList,
-        gate: "analytics",
-        description: "Production, editor, photographer and business reports",
-      },
-    ],
-  },
-  {
-    id: "activity",
-    label: "Activity",
-    items: [
-      {
-        id: "activity-log",
-        label: "Activity Log",
-        href: "/activity",
-        icon: History,
-        description: "Every change, by everyone, forever",
-        shortcut: "g l",
-      },
-    ],
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    items: [
-      {
-        id: "organisation",
-        label: "Organisation",
-        href: "/settings/organisation",
-        icon: Building2,
-        gate: "admin",
-        description: "Studio name, timezone and defaults",
-      },
-      {
-        id: "users",
-        label: "Users",
-        href: "/settings/users",
-        icon: Users,
-        gate: "admin",
-        description: "Invite people and manage access",
-      },
-      {
-        id: "roles",
-        label: "Roles",
-        href: "/settings/roles",
-        icon: KeyRound,
-        gate: "admin",
-        description: "What each role can see and do",
-      },
-      {
-        id: "teams",
-        label: "Teams",
-        href: "/settings/teams",
-        icon: UsersRound,
-        gate: "admin",
-        description: "Groups, leads and memberships",
-      },
-      {
-        id: "workflows",
-        label: "Workflows",
-        href: "/settings/workflows",
-        icon: Workflow,
-        gate: "admin",
-        description: "Statuses and the transitions between them",
-      },
-      {
-        id: "job-types",
-        label: "Job Types",
-        href: "/settings/job-types",
-        icon: Tag,
-        gate: "admin",
-        description: "Real estate, portrait, commercial, …",
-      },
-      {
-        id: "automations",
-        label: "Automations",
-        href: "/settings/automations",
-        icon: Zap,
-        gate: "admin",
-        description: "When X happens, do Y",
-      },
-      {
-        id: "notifications",
-        label: "Notifications",
-        href: "/settings/notifications",
-        icon: Bell,
-        description: "What you get notified about, and how",
-      },
+      { id: "kanban", label: "Board", href: "/workspace/kanban", icon: SquareKanban, description: "Drag jobs between the five stages" },
+      { id: "timeline", label: "Timeline", href: "/workspace/timeline", icon: ChartNoAxesGantt, description: "Gantt view of jobs across time" },
+      { id: "analytics", label: "Reports & stats", href: "/insights/analytics", icon: Activity, description: "Analytics, bottlenecks and reports" },
+      { id: "automations", label: "Automations", href: "/settings/automations", icon: Zap, description: "When X happens, do Y" },
+      { id: "workflows", label: "Workflows", href: "/settings/workflows", icon: Workflow, description: "Statuses and the transitions between them" },
     ],
   },
 ];
@@ -367,11 +212,10 @@ export const navigation: NavGroup[] = [
 /*  User menu + quick actions + mobile tabs                            */
 /* ------------------------------------------------------------------ */
 
+/** Avatar menu (plan §3 topbar): My account · Help (· Log out, rendered by the shell). */
 export const userMenuItems: NavItem[] = [
-  { id: "profile", label: "Your profile", href: "/settings/profile", icon: CircleUser },
-  { id: "notification-settings", label: "Notification settings", href: "/settings/notifications", icon: Bell },
-  { id: "appearance", label: "Appearance", href: "/settings/appearance", icon: Palette },
-  { id: "help", label: "Help & shortcuts", href: "/help", icon: LifeBuoy },
+  { id: "account", label: "My account", href: "/settings/account", icon: CircleUser, description: "Your name, password and notifications" },
+  { id: "help", label: "Help", href: "/help", icon: LifeBuoy, description: "The five stages and three roles, on one page" },
 ];
 
 export const quickActions: QuickAction[] = [
@@ -381,16 +225,8 @@ export const quickActions: QuickAction[] = [
     href: "/jobs/new",
     icon: Plus,
     gate: "createJobs",
-    description: "Create a job and assign it",
+    description: "Shoot → give it to an editor",
     primary: true,
-  },
-  {
-    id: "new-project",
-    label: "New project",
-    href: "/projects/new",
-    icon: FolderPlus,
-    gate: "createClients",
-    description: "Group upcoming jobs for a client",
   },
   {
     id: "new-client",
@@ -401,17 +237,25 @@ export const quickActions: QuickAction[] = [
   },
   {
     id: "invite-user",
-    label: "Invite a user",
-    href: "/settings/users?invite=1",
+    label: "Invite someone",
+    href: "/settings/people?invite=1",
     icon: UserPlus,
     gate: "admin",
   },
   {
     id: "open-settings",
     label: "Settings",
-    href: "/settings/organisation",
+    href: "/settings/studio",
     icon: Settings,
     gate: "admin",
+  },
+  {
+    id: "new-project",
+    label: "New project",
+    href: "/projects/new",
+    icon: FolderPlus,
+    gate: "advanced",
+    description: "Projects are created silently from the address; this is the Advanced page",
   },
 ];
 
@@ -423,14 +267,26 @@ export interface MobileTab {
   href?: string;
   action?: "search" | "more";
   gate?: NavGate;
+  /** The (+) tab: rendered as the raised primary button. */
+  primary?: boolean;
+  /** Carries the "to check" red count (plan §3). */
+  badge?: "to_check";
 }
 
+/**
+ * Plan §3 phone tabs. Owner: Home · Jobs · (+) · Editors · More. Extra photographer: Home · Jobs · (+) ·
+ * More. Editor: My jobs · Calendar · Search · Me. One ordered list, filtered by gates.
+ */
 export const mobileTabs: MobileTab[] = [
-  { id: "dashboard", label: "Home", icon: LayoutDashboard, href: "/dashboard" },
-  { id: "my-work", label: "My Work", icon: ListChecks, href: "/workspace/my" },
-  { id: "kanban", label: "Kanban", icon: SquareKanban, href: "/workspace/kanban" },
-  { id: "search", label: "Search", icon: Search, action: "search" },
-  { id: "more", label: "More", icon: SlidersHorizontal, action: "more" },
+  { id: "home", label: "Home", icon: LayoutDashboard, href: "/home", gate: "photographer", badge: "to_check" },
+  { id: "my-jobs", label: "My jobs", icon: ListChecks, href: "/my-jobs", gate: "editor" },
+  { id: "jobs", label: "Jobs", icon: Briefcase, href: "/jobs", gate: "photographer" },
+  { id: "calendar", label: "Calendar", icon: CalendarDays, href: "/calendar", gate: "editor" },
+  { id: "new-job", label: "New job", icon: Plus, href: "/jobs/new", gate: "newJob", primary: true },
+  { id: "editors", label: "Editors", icon: WandSparkles, href: "/editors", gate: "admin" },
+  { id: "search", label: "Search", icon: Search, action: "search", gate: "editor" },
+  { id: "me", label: "Me", icon: CircleUser, href: "/settings/account", gate: "editor" },
+  { id: "more", label: "More", icon: SlidersHorizontal, action: "more", gate: "photographer" },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -450,6 +306,9 @@ export function navigationFor(gates: NavGates): NavGroup[] {
     .filter((group) => group.items.length > 0);
 }
 
+/** Alias kept for shells written against the roles-v2 name. */
+export const navigationForRole = navigationFor;
+
 export function quickActionsFor(gates: NavGates): QuickAction[] {
   return quickActions.filter((action) => canAccess(action, gates));
 }
@@ -468,6 +327,35 @@ export function visibleNavIds(gates: NavGates): { nav: string[]; quick: string[]
 }
 
 /* ------------------------------------------------------------------ */
+/*  Advanced routes (plan §8: hidden pages are blocked on the server)  */
+/* ------------------------------------------------------------------ */
+
+/** The advanced feature that owns `pathname`, or null for an always-available page. */
+export function advancedFeatureForRoute(pathname: string): AdvancedFeature | null {
+  for (const key of ADVANCED_FEATURES) {
+    for (const route of ADVANCED_FEATURE_META[key].routes) {
+      if (pathname === route || pathname.startsWith(`${route}/`)) return key;
+    }
+  }
+  return null;
+}
+
+/** True when `pathname` is one of the pages hidden behind Settings → Studio → Advanced tools. */
+export function isAdvancedRoute(pathname: string): boolean {
+  return advancedFeatureForRoute(pathname) !== null;
+}
+
+/** The advanced feature that owns an `/api/*` path (prefix match), or null. */
+export function advancedFeatureForApi(pathname: string): AdvancedFeature | null {
+  for (const key of ADVANCED_FEATURES) {
+    for (const prefix of ADVANCED_FEATURE_META[key].apiPrefixes) {
+      if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return key;
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Client portal navigation (docs/ROLES.md §10: Your work · Notifications · Account · Log out) */
 /* ------------------------------------------------------------------ */
 
@@ -481,10 +369,11 @@ export const portalNavigation: NavItem[] = [
 export const LOGOUT_ACTION = "/api/auth/logout";
 
 /** Whether `pathname` is "inside" the nav item. */
-export function isNavItemActive(pathname: string, item: Pick<NavItem, "href" | "exact">): boolean {
+export function isNavItemActive(pathname: string, item: Pick<NavItem, "href" | "exact" | "matchPrefix">): boolean {
   if (item.exact) return pathname === item.href;
   if (pathname === item.href) return true;
-  return pathname.startsWith(`${item.href}/`);
+  if (pathname.startsWith(`${item.href}/`)) return true;
+  return item.matchPrefix !== undefined && (pathname === item.matchPrefix || pathname.startsWith(`${item.matchPrefix}/`));
 }
 
 export interface NavMatch {
@@ -512,29 +401,48 @@ export interface RouteTitle {
 }
 
 /**
- * Routes that are not sidebar items but still need a topbar title: personal
- * pages reached from the bell / search / user menu, and dynamic detail pages.
- * Checked in order after the role-filtered nav and the user menu.
+ * Routes that are not sidebar items but still need a topbar title: the Settings tabs, detail pages,
+ * personal pages reached from the bell / search / user menu. Checked in order after the role-filtered
+ * nav and the user menu.
  */
 export const extraRouteTitles: ReadonlyArray<{ pattern: RegExp; title: string; eyebrow?: string }> = [
+  { pattern: /^\/jobs\/new(?:\/|$)/, title: "New job", eyebrow: "Jobs" },
+  { pattern: /^\/jobs\/[^/]+\/edit(?:\/|$)/, title: "Edit details", eyebrow: "Jobs" },
+  { pattern: /^\/jobs\/[^/]+(?:\/|$)/, title: "Job", eyebrow: "Jobs" },
+  { pattern: /^\/editors\/[^/]+(?:\/|$)/, title: "Editor", eyebrow: "Editors" },
+  { pattern: /^\/clients\/new(?:\/|$)/, title: "New client", eyebrow: "Clients" },
+  { pattern: /^\/clients\/[^/]+(?:\/|$)/, title: "Client", eyebrow: "Clients" },
+  { pattern: /^\/settings\/studio(?:\/|$)/, title: "Studio", eyebrow: "Settings" },
+  { pattern: /^\/settings\/people(?:\/|$)/, title: "People", eyebrow: "Settings" },
+  { pattern: /^\/settings\/shoot-types(?:\/|$)/, title: "Types of shoot", eyebrow: "Settings" },
+  { pattern: /^\/settings\/account(?:\/|$)/, title: "My account", eyebrow: "Settings" },
+  { pattern: /^\/settings\/history(?:\/|$)/, title: "History", eyebrow: "Settings" },
+  { pattern: /^\/settings\/roles(?:\/|$)/, title: "Roles", eyebrow: "Advanced" },
+  { pattern: /^\/settings\/teams(?:\/|$)/, title: "Teams", eyebrow: "Advanced" },
+  { pattern: /^\/settings\/appearance(?:\/|$)/, title: "Appearance", eyebrow: "Advanced" },
+  { pattern: /^\/insights\/bottlenecks(?:\/|$)/, title: "Bottlenecks", eyebrow: "Advanced" },
+  { pattern: /^\/insights\/reports(?:\/|$)/, title: "Reports", eyebrow: "Advanced" },
+  { pattern: /^\/projects(?:\/|$)/, title: "Projects", eyebrow: "Advanced" },
   { pattern: /^\/notifications(?:\/|$)/, title: "Notifications" },
   { pattern: /^\/search(?:\/|$)/, title: "Search" },
+  { pattern: /^\/help(?:\/|$)/, title: "Help" },
   { pattern: /^\/team\/users\/[^/]+(?:\/|$)/, title: "Team member", eyebrow: "Team" },
 ];
 
 /**
- * Resolves the topbar title for `pathname`: the longest matching nav item the
- * viewer can see (with its group as eyebrow), then the user-menu pages, then
- * `extraRouteTitles`. Null only for routes nobody has named (the shell then
- * falls back to the product name).
+ * Resolves the topbar title for `pathname`: `extraRouteTitles` (Settings tabs, detail pages) first, then
+ * the longest matching nav item the viewer can see (with its group as eyebrow), then the user-menu
+ * pages. Null only for routes nobody has named (the shell then falls back to the product name).
  */
 export function resolveRouteTitle(pathname: string, groups: NavGroup[] = navigation): RouteTitle | null {
+  // Settings tabs and detail pages name themselves before the nav match: the "Settings" item points at
+  // /settings/studio (matchPrefix /settings), yet the page is titled "Studio" under a "Settings" eyebrow.
+  const extra = extraRouteTitles.find((entry) => entry.pattern.test(pathname));
+  if (extra) return { title: extra.title, eyebrow: extra.eyebrow };
   const match = findNavMatch(pathname, groups);
   if (match) return { title: match.item.label, eyebrow: match.group.label };
   const personal = userMenuItems.find((item) => isNavItemActive(pathname, item));
   if (personal) return { title: personal.label };
-  const extra = extraRouteTitles.find((entry) => entry.pattern.test(pathname));
-  if (extra) return { title: extra.title, eyebrow: extra.eyebrow };
   return null;
 }
 

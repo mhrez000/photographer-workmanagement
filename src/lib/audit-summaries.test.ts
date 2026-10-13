@@ -24,7 +24,7 @@ describe("summarise", () => {
     );
     expect(summarise("revision.requested", null, { revisionNumber: 2, reason: "Colour" }, {})).toBe("requested revision #2: Colour");
     expect(summarise("note.added", null, { kind: "internal", body: "x" }, {})).toBe("added an internal note");
-    expect(summarise("link.replaced", null, null, { kind: "finished_files" })).toBe("replaced the finished files link");
+    expect(summarise("link.replaced", null, null, { kind: "finished_files" })).toBe("replaced the finished photos link");
     expect(summarise("user.role_changed", { role: "editor", name: "Eve" }, { role: "manager", name: "Eve" }, {})).toBe(
       "changed Eve’s role from Editor to Manager",
     );

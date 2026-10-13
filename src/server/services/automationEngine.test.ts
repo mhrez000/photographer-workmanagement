@@ -14,7 +14,7 @@ import {
   type AutomationCondition,
   type AutomationTrigger,
 } from "@/db/schema";
-import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
+import { contextFor, fakeClock, insertJobFixture, makeTestDb, optInAllNotifications, seedMinimalOrg, type FixtureUserKey, type SeedIds, type TestDb } from "@/db/test-db";
 import { verifyDerived } from "@/db/verify";
 import type { AuthContext, Automation, AutomationRun, Job } from "@/lib/types";
 import { AppError } from "@/server/errors";
@@ -34,6 +34,8 @@ beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
+  // The simplified defaults (plan §8) turn most per-type notices off; these tests check the notices themselves.
+  await optInAllNotifications(db, ids);
 });
 afterEach(() => fakeClock.reset());
 

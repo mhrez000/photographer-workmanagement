@@ -44,6 +44,7 @@ import {
 import {
   BOTTLENECK_DEFAULTS,
   CATEGORY_GROUPS,
+  SELF_APPROVAL_CONFIRM_MESSAGE,
   type EventAction,
   type EventCause,
   type EventType,
@@ -89,7 +90,7 @@ import {
   type EdgeLike,
   type WorkflowJobLike,
 } from "@/lib/workflow";
-import { assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
+import { actionNeedsSelfApprovalConfirm, assertCan, can, isAdmin, jobRefFromRow } from "@/server/auth/permissions";
 import { loadJobRef } from "@/server/auth/job-ref";
 import { recordEvent } from "@/server/audit";
 import {
@@ -772,6 +773,12 @@ export interface ApplyMoveOptions {
   cause?: EventCause;
   /** Delivery step payload (docs/ROLES.md §7.3); only on a delivering move, else 422. */
   delivery?: DeliveryInputValue | null;
+  /**
+   * SIMPLIFICATION-PLAN §12 decision 3: an owner / co-owner reviewing a job they edited themselves must
+   * confirm ("You edited this yourself. Approve anyway?"). Without it the approve-side moves
+   * (SELF_APPROVAL_CONFIRM_ACTIONS) are a 422; with it every event of the move carries `selfApproved`.
+   */
+  confirmSelfApproval?: boolean;
 }
 
 export interface TransitionResult {
@@ -844,6 +851,7 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
   let isOverride = false;
   let isReopen = false;
   let isRestore = false;
+  let selfApproved = false;
   let lateral = isLateral(current, target);
   const withdraw = opts.mode === "withdraw";
 
@@ -862,6 +870,14 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
         isReopen = move.isReopen;
         isRestore = move.isRestore;
         lateral = move.isLateral;
+        // Decision 3: an admin approving / delivering / completing their own edit confirms it (recorded).
+        const moveActions = actionsForMove(ctx, current.category, target.category, isReopen, wjob) ?? [];
+        if (moveActions.some((a) => actionNeedsSelfApprovalConfirm(ctx, a, ref))) {
+          if (opts.confirmSelfApproval !== true) {
+            throw new RuleViolationError(SELF_APPROVAL_CONFIRM_MESSAGE, { formErrors: [], fieldErrors: { confirmSelfApproval: ["Required"] } });
+          }
+          selfApproved = true;
+        }
       } else if (opts.override) {
         assertCan(ctx, "job.transition_override", ref);
         isOverride = true;
@@ -1137,7 +1153,8 @@ export async function applyMove(tx: Tx, ctx: AuthContext, jobIn: Job, targetIn: 
       ? job.editorId
       : undefined;
   const causeMeta = ctx.isSystem && opts.cause ? { cause: opts.cause } : {};
-  const meta = (extra: Record<string, unknown>) => jobEventMeta(job, { ...extra, ...causeMeta }, opts.batchId);
+  const selfMeta = selfApproved ? { selfApproved: true } : {};
+  const meta = (extra: Record<string, unknown>) => jobEventMeta(job, { ...extra, ...causeMeta, ...selfMeta }, opts.batchId);
   const statusEventId = await recordEvent(tx, ctx, {
     entityType: "job",
     entityId: job.id,
@@ -1384,6 +1401,7 @@ export async function transitionJobStatus(tx: Tx, ctx: AuthContext, input: unkno
     startTimer: p.startTimer,
     delivery: p.delivery ?? null,
     cause: ctx.isSystem ? p.cause : undefined,
+    confirmSelfApproval: p.confirmSelfApproval,
   });
 }
 
@@ -1563,7 +1581,15 @@ export async function migrateWorkflow(tx: Tx, ctx: AuthContext, input: unknown):
 async function moveToCategory(
   tx: Tx,
   ctx: AuthContext,
-  p: { jobId: string; expectedVersion: number; toStatusId?: string; reason?: string | null; startTimer?: boolean; delivery?: DeliveryInputValue },
+  p: {
+    jobId: string;
+    expectedVersion: number;
+    toStatusId?: string;
+    reason?: string | null;
+    startTimer?: boolean;
+    delivery?: DeliveryInputValue;
+    confirmSelfApproval?: boolean;
+  },
   category: StatusCategory,
   extra: { revision?: RevisionInputValue | null } = {},
 ): Promise<TransitionResult> {
@@ -1581,6 +1607,7 @@ async function moveToCategory(
     startTimer: p.startTimer,
     revision: extra.revision ?? null,
     delivery: p.delivery ?? null,
+    confirmSelfApproval: p.confirmSelfApproval,
   });
 }
 

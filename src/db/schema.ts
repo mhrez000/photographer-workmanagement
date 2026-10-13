@@ -213,6 +213,12 @@ export const organisationSettings = pgTable("organisation_settings", {
   /** Write a notification.sent event for every notification (off: keeps the feed readable). */
   auditNotifications: bool("audit_notifications", false),
   lastOverdueSweepAt: text("last_overdue_sweep_at"),
+  /**
+   * Simplified UI (docs/SIMPLIFICATION-PLAN.md §8): Settings → Studio → Advanced tools.
+   * Off = the hidden pages / APIs 404 (`requireAdvanced`). Migration 0004 turns it on for
+   * studios that already rely on custom workflows or enabled automations.
+   */
+  advancedToolsEnabled: bool("advanced_tools_enabled", false),
   updatedAt: updatedAt(),
   version: version(),
 });
@@ -260,6 +266,11 @@ export const users = pgTable(
     /** Bumped on deactivate / role change / password change → every cookie invalid. */
     sessionVersion: integer("session_version").notNull().default(1),
     lastLoginAt: text("last_login_at"),
+    // ---- simplified UI (docs/SIMPLIFICATION-PLAN.md §7, §6) ----
+    /** Editors: "Usually handles up to N" jobs on their desk (blank = not set; replaces capacity hours in the simple UI). */
+    usualCapacityJobs: integer("usual_capacity_jobs"),
+    /** The one-time "Proofline got simpler" card on Home was dismissed. */
+    simplerNoticeDismissedAt: text("simpler_notice_dismissed_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     version: version(),
@@ -482,6 +493,8 @@ export const jobTypes = pgTable(
       .notNull()
       .references(() => workflows.id, { onDelete: "restrict" }),
     defaultEstimatedHours: doublePrecision("default_estimated_hours"),
+    /** Simplified New job form: default due date = shoot date + this many days (null → DEFAULT_USUAL_DAYS_TO_EDIT). */
+    usualDaysToEdit: integer("usual_days_to_edit"),
     sortOrder: integer("sort_order").notNull().default(0),
     archivedAt: text("archived_at"),
     createdAt: createdAt(),
