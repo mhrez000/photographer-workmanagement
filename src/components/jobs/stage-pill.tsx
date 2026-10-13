@@ -27,7 +27,7 @@ export function StagePill({ display, job, timeZone, size = "sm", hideSubLabel = 
   const d = display ?? (job ? describeStage(job) : null);
   if (!d) return null;
   const tone = STAGE_TONE_CLASSES[STAGE_META[d.stage].tone];
-  const sub = hideSubLabel ? null : subLabelText(d, job?.startedAt ?? null, timeZone);
+  const sub = hideSubLabel ? null : stageSubLabelText(d, job?.startedAt ?? null, timeZone);
   return (
     <span
       className={cn(
@@ -45,7 +45,8 @@ export function StagePill({ display, job, timeZone, size = "sm", hideSubLabel = 
   );
 }
 
-function subLabelText(d: StageDisplay, startedAt: string | null, timeZone?: string): string | null {
+/** The secondary text of a stage ("Not started", "Editing since 9 Oct", "Round 2", "Not sent to client"). */
+export function stageSubLabelText(d: StageDisplay, startedAt: string | null, timeZone?: string): string | null {
   switch (d.subLabel) {
     case "not_started":
       return "Not started";

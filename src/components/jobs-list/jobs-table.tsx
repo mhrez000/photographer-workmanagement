@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Avatar } from "@/components/ui/avatar";
-import { RoundBadge, RushBadge, StagePill, WaitingOn } from "@/components/jobs/stage-pill";
+import { RoundBadge, RushBadge, StagePill, WaitingOn, stageSubLabelText } from "@/components/jobs/stage-pill";
 import type { SimpleJobRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FinishedLinkIcon } from "./finished-link-icon";
@@ -45,19 +45,22 @@ function EditorAvatar({ job }: { job: SimpleJobRow }) {
   );
 }
 
-/** The stage pill with Round / Rush beside it. Round N is the badge (plan §4), never also inside the pill. */
+/**
+ * The stage pill with Round / Rush beside it. Round N is the badge (plan §4), never also inside
+ * the pill. The pill itself carries only the stage word so narrow columns never clip it; the
+ * secondary text ("Not started", "Editing since 9 Oct", "Not sent to client") sits on its own
+ * line underneath.
+ */
 function StageCell({ job, timeZone, wrap = false }: { job: SimpleJobRow; timeZone: string; wrap?: boolean }) {
+  const sub = job.stage.subLabel === "round" ? null : stageSubLabelText(job.stage, job.startedAt, timeZone);
   return (
-    <div className={cn("flex min-w-0 items-center gap-1.5", wrap ? "flex-wrap" : "")}>
-      <StagePill
-        display={job.stage}
-        job={{ category: job.statusCategory, revisionCount: job.round ? job.round - 1 : 0, startedAt: job.startedAt }}
-        timeZone={timeZone}
-        hideSubLabel={job.stage.subLabel === "round"}
-        className="min-w-0"
-      />
-      <RoundBadge round={job.round} className="shrink-0" />
-      <RushBadge rush={job.rush} className="shrink-0" />
+    <div className="min-w-0">
+      <div className={cn("flex min-w-0 items-center gap-1.5", wrap ? "flex-wrap" : "")}>
+        <StagePill display={job.stage} hideSubLabel className="shrink-0" />
+        <RoundBadge round={job.round} className="shrink-0" />
+        <RushBadge rush={job.rush} className="shrink-0" />
+      </div>
+      {sub ? <div className="mt-0.5 truncate text-xs text-ink-muted">{sub}</div> : null}
     </div>
   );
 }
