@@ -23,11 +23,13 @@ import {
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import { StatusPill, statusColour } from "@/components/jobs";
+import { statusColour } from "@/components/jobs";
+import { StagePill } from "@/components/jobs/stage-pill";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { STATUS_CATEGORY_META } from "@/lib/constants";
+import { STATUS_CATEGORY_META, type StatusCategory } from "@/lib/constants";
 import { addCivilDays, civilDate, formatDate, formatDateTime, formatTime, formatWeekday, todayCivil } from "@/lib/dates";
+import { STAGE_META, stageOf } from "@/lib/stages";
 import type { ActivityFeedItem, HistoryEntry, StageView, StatusRef } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { formatSeconds, valueChanges } from "./format";
@@ -71,6 +73,22 @@ function Name({ children }: { children: React.ReactNode }) {
   return <strong className="font-semibold text-ink">{children}</strong>;
 }
 
+/** The stage word for a status category ("With editor" for In Progress). */
+function stageWord(category: StatusCategory): string {
+  return STAGE_META[stageOf(category)].label;
+}
+
+/** The stage pill for a recorded status, with the raw workflow status name as the tooltip (plan §4: the words are a display layer). */
+function StatusStage({ status, size = "sm" }: { status: Pick<StatusRef, "name" | "category">; size?: "sm" | "md" }) {
+  const label = STATUS_CATEGORY_META[status.category]?.label;
+  const raw = label && label.toLowerCase() !== status.name.toLowerCase() ? `${status.name} · ${label}` : status.name;
+  return (
+    <span title={raw} className="inline-flex">
+      <StagePill job={{ category: status.category, revisionCount: 0 }} size={size} hideSubLabel />
+    </span>
+  );
+}
+
 /**
  * One stage moment. `firstEditing` = no earlier stage of the job entered
  * in_progress (the first start, as opposed to a return to editing).
@@ -102,7 +120,7 @@ function stageMoment(
   if (previous && previous.durationSeconds > 0 && stage.kind !== "reattribution") {
     base.details.push(
       <>
-        after {formatSeconds(previous.durationSeconds)} in {previous.statusName}
+        after {formatSeconds(previous.durationSeconds)} in {stageWord(previous.toCategory)}
       </>,
     );
   }
@@ -117,7 +135,7 @@ function stageMoment(
       tone: "attention",
       sentence: (
         <>
-          <Name>{A}</Name> re-attributed {stage.statusName.toLowerCase()} to <Name>{editor ?? "no editor"}</Name>
+          <Name>{A}</Name> moved the open {stageWord(stage.toCategory).toLowerCase()} step to <Name>{editor ?? "no editor"}</Name>
         </>
       ),
       details: stage.reason && stage.reason !== "reassigned" ? [<>“{stage.reason}”</>] : [],
@@ -134,15 +152,15 @@ function stageMoment(
     case "new":
       return { ...base, icon: Undo2, sentence: <><Name>{A}</Name> moved the job back to draft</> };
     case "ready": {
-      if (find("job.declined")) return { ...base, icon: UserMinus, tone: "attention", sentence: <><Name>{A}</Name> declined the job</> };
+      if (find("job.declined")) return { ...base, icon: UserMinus, tone: "attention", sentence: <><Name>{A}</Name> handed the job back (can&apos;t do this one)</> };
       if (stage.fromCategory && STATUS_CATEGORY_META[stage.fromCategory].editorHolds) {
-        return { ...base, icon: UserMinus, sentence: <><Name>{A}</Name> unassigned the editor</> };
+        return { ...base, icon: UserMinus, sentence: <><Name>{A}</Name> took the job back from the editor</> };
       }
-      return { ...base, icon: Check, sentence: <><Name>{A}</Name> marked the job ready for assignment</> };
+      return { ...base, icon: Check, sentence: <><Name>{A}</Name> marked the job as needing an editor</> };
     }
     case "assigned": {
       const who = editor ?? (assignment ? "the new editor" : "an editor");
-      const verb = stage.fromCategory === "accepted" || stage.fromCategory === "assigned" ? "reassigned the job to" : "assigned the job to";
+      const verb = stage.fromCategory === "accepted" || stage.fromCategory === "assigned" ? "moved the job to" : "gave the job to";
       return { ...base, icon: UserPlus, sentence: <><Name>{A}</Name> {verb} <Name>{who}</Name></> };
     }
     case "accepted":
@@ -161,10 +179,10 @@ function stageMoment(
     }
     case "submitted": {
       const warn = find("job.submitted");
-      return { ...base, icon: Send, sentence: <><Name>{A}</Name> submitted the work for review</>, badges: warn && meta(warn, "resubmission") ? [...base.badges, { label: "Resubmission", tone: "info" }] : base.badges };
+      return { ...base, icon: Send, sentence: <><Name>{A}</Name> sent the work for checking</>, badges: warn && meta(warn, "resubmission") ? [...base.badges, { label: "Sent again", tone: "info" }] : base.badges };
     }
     case "review":
-      return { ...base, icon: Eye, sentence: <><Name>{A}</Name> started reviewing</> };
+      return { ...base, icon: Eye, sentence: <><Name>{A}</Name> started checking</> };
     case "revision": {
       const req = find("revision.requested");
       const n = (meta(req, "revisionNumber") ?? nv(req, "revisionNumber")) as number | undefined;
@@ -175,17 +193,17 @@ function stageMoment(
         tone: "danger",
         sentence: (
           <>
-            <Name>{A}</Name> {stage.isReopen ? "reopened the job and requested" : "requested"} revision{n ? ` #${n}` : ""}
+            <Name>{A}</Name> {stage.isReopen ? "reopened the job and asked for changes" : "asked for changes"}{n ? ` (round ${n})` : ""}
             {reason ? <span className="text-ink-secondary"> — {reason}</span> : null}
           </>
         ),
-        details: [...(editor ? [<>assigned to {editor}</>] : []), ...base.details],
+        details: [...(editor ? [<>with {editor}</>] : []), ...base.details],
       };
     }
     case "resubmitted": {
       const res = find("revision.resolved");
       const n = (meta(res, "revisionNumber") ?? nv(res, "revisionNumber")) as number | undefined;
-      return { ...base, icon: Send, sentence: <><Name>{A}</Name> resubmitted{n ? ` revision #${n}` : ""}</> };
+      return { ...base, icon: Send, sentence: <><Name>{A}</Name> sent the work back for checking{n ? ` (round ${n} fixed)` : ""}</> };
     }
     case "approved": {
       const appr = find("job.approved");
@@ -197,13 +215,13 @@ function stageMoment(
       return { ...base, icon: BadgeCheck, tone: "success", badges, sentence: <><Name>{A}</Name> approved the work</> };
     }
     case "delivered":
-      return { ...base, icon: PackageCheck, tone: "success", sentence: <><Name>{A}</Name> delivered the work to the client</> };
+      return { ...base, icon: PackageCheck, tone: "success", sentence: <><Name>{A}</Name> sent the work to the client</> };
     case "completed":
-      return { ...base, icon: CircleCheckBig, tone: "success", sentence: <><Name>{A}</Name> completed the job</> };
+      return { ...base, icon: CircleCheckBig, tone: "success", sentence: <><Name>{A}</Name> closed the job</> };
     case "cancelled":
       return { ...base, icon: Ban, tone: "danger", sentence: <><Name>{A}</Name> cancelled the job</> };
     default:
-      return { ...base, sentence: <><Name>{A}</Name> moved the job to {stage.statusName}</> };
+      return { ...base, sentence: <><Name>{A}</Name> moved the job to {stageWord(stage.toCategory)}</> };
   }
 }
 
@@ -356,7 +374,7 @@ export function HistoryTab({ entries, timeZone, current }: HistoryTabProps) {
   if (moments.length === 0) {
     return (
       <Card>
-        <EmptyState icon={History} title="No history yet" description="Every status change, assignment and revision will be recorded here permanently." />
+        <EmptyState icon={History} title="No history yet" description="Every step, hand-over and round of changes will be recorded here permanently." />
       </Card>
     );
   }
@@ -377,7 +395,7 @@ export function HistoryTab({ entries, timeZone, current }: HistoryTabProps) {
           <p className="text-xs text-ink-muted">{moments.length} recorded moments · oldest first · permanent and read-only</p>
         </div>
         <span className="inline-flex items-center gap-2 text-xs text-ink-muted">
-          Now <StatusPill status={current} size="sm" />
+          Now <StatusStage status={current} />
         </span>
       </div>
 
@@ -415,7 +433,7 @@ export function HistoryTab({ entries, timeZone, current }: HistoryTabProps) {
                       </p>
                       {m.status || m.details.length > 0 ? (
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted">
-                          {m.status ? <StatusPill status={m.status} size="xs" /> : null}
+                          {m.status ? <StatusStage status={m.status} /> : null}
                           {m.details.map((d, k) => (
                             <span key={k} className="min-w-0 break-words">
                               {d}

@@ -365,13 +365,19 @@ describe("resource-less actions per persona", () => {
     expect(check(actor(a), action, undefined)).toBe(expected);
   });
 
-  it("advanced.view: every staff persona while the studio's Advanced tools switch is on; nobody while off; clients never", () => {
+  it("advanced.view: nobody while the studio's switch is off; while on, hidden fields / APIs for every staff persona but the Advanced PAGES (Board, Timeline, Reports, Workflows, …) only for admins (plan §3, §8); clients never", () => {
     for (const a of [...PHOTO_ACTORS, ...EDITOR_ACTORS]) {
       expect(can(actor(a), "advanced.view", { feature: "kanban" }), a).toBe(false);
-      expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: "kanban" }), a).toBe(true);
+      expect(can(actor(a), "advanced.view", { feature: "time_tracking" }), a).toBe(false);
       expect(can(actor(a, ADVANCED_ON), "advanced.view"), a).toBe(true);
+      expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: "time_tracking" }), a).toBe(true);
+      expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: "workloads" }), a).toBe(true);
+      for (const page of ["kanban", "timeline", "analytics", "reports", "workflows", "automations", "projects"] as const) {
+        expect(can(actor(a, ADVANCED_ON), "advanced.view", { feature: page }), `${a} ${page}`).toBe(a === "admin");
+      }
     }
     expect(can(actor("client", ADVANCED_ON), "advanced.view", { feature: "kanban" })).toBe(false);
+    expect(can(actor("client", ADVANCED_ON), "advanced.view")).toBe(false);
   });
 
   it("project.create: members with ⚑create; editors only inline from New job", () => {

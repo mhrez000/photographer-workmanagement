@@ -1,6 +1,6 @@
 /**
- * Production structure UI (Organisation → Client → Project → Jobs, spec §23).
- * Server-safe display pieces + client islands for forms and archive.
+ * Clients UI for the simplified screens (docs/SIMPLIFICATION-PLAN.md §3 "Clients"), plus the project pieces
+ * the Advanced-only Projects pages still use. Server-safe display pieces + client islands for forms.
  */
 export { ProductionJobsTable, type ProductionJobsTableProps } from "./jobs-table";
 export { JobsDoneBar, CountsInline, CountCell } from "./counts";
@@ -10,6 +10,8 @@ export { ListPageSkeleton, DetailPageSkeleton, FormPageSkeleton } from "./skelet
 export { ListToolbar, type ListToolbarProps } from "./list-toolbar";
 export { UrlSearchInput, type UrlSearchInputProps } from "./url-search";
 export { ArchiveControl, type ArchiveControlProps } from "./archive-control";
-export { ClientFields, NewClientForm, EditClientDialog, EMPTY_CLIENT, type ClientFormValues, type EditClientDialogProps } from "./client-form";
+export { ClientFields, NewClientForm, NewClientDialog, EditClientDialog, EMPTY_CLIENT, clientColourFor, type ClientFormValues, type EditClientDialogProps } from "./client-form";
+export { ClientJobsByAddress, groupJobsByAddress, type AddressGroup, type ClientJobsByAddressProps } from "./client-jobs";
+export { ClientOnlineAccess, type ClientOnlineAccessProps } from "./client-online-access";
 export { ProjectFields, NewProjectForm, EditProjectDialog, type ProjectFormValues, type EditProjectDialogProps } from "./project-form";
 export { RouteError, type RouteErrorProps } from "@/components/common/route-error";

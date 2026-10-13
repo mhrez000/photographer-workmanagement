@@ -1598,7 +1598,10 @@ export type NeedsAttentionReason =
 
 export interface NeedsAttentionRow {
   job: SimpleJobRow;
+  /** The main reason (the one with the button, e.g. "No editor yet" → [Assign editor]). */
   reason: NeedsAttentionReason;
+  /** Further reasons on the SAME job, shown after the main one ("No editor yet · 1 day late"). One row per job. */
+  also: NeedsAttentionReason[];
   /** Instant the row sorts by (oldest first inside a reason kind). */
   since: string;
 }
@@ -1627,6 +1630,8 @@ export interface OwnerHome {
   topline: { toCheck: number; late: number; needsEditor: number };
   readyToCheck: ReadyToCheckCard[];
   needsAttention: NeedsAttentionRow[];
+  /** Late / no-editor jobs left off Needs attention because the list is capped ("See all N late in Jobs"). */
+  needsAttentionMore: number;
   /** Owners / co-owners only (null for an extra photographer). */
   yourEditors: HomeEditorRow[] | null;
   comingUp: ComingUpItem[];
@@ -1894,6 +1899,8 @@ export interface SimpleJobPermissions {
   canComment: boolean;
   canAddPrivateNote: boolean;
   canReplyToClient: boolean;
+  /** "Share progress" on the side column: the client uses the portal and the viewer may share the job. */
+  canShareWithClient: boolean;
 }
 
 export interface SimpleJobPage {
@@ -1906,8 +1913,10 @@ export interface SimpleJobPage {
   messages: CommentNode[];
   /** Internal / client notes — owners and photographers only (null for editors). */
   privateNotes: NoteView[] | null;
-  /** Client feedback threads — staff only, and only when the client uses the portal (null otherwise). */
+  /** Client feedback threads — staff only, only when the client uses the portal AND the job is shared (or they already wrote); null otherwise. */
   fromClient: CommentNode[] | null;
+  /** Delivery notes (what the client was told with the finished work) — staff only; never part of the editor's instructions. */
+  deliveryNotes: NoteView[] | null;
   whoDidWhat: WhoDidWhatEntry[];
   sideColumn: SimpleSideColumn;
   permissions: SimpleJobPermissions;

@@ -136,11 +136,14 @@ async function loadEditors(db: DbLike, ctx: AuthContext, extraIds: readonly stri
 
 /**
  * Rows for the Assign / Change editor picker: every active editor with
- * "On their desk N · Late N" and the optional usual capacity. Any staff
- * member who may assign editors can read it (the numbers are counts only).
+ * "On their desk N · Late N" and the optional usual capacity. Photographers
+ * (owner, co-owners, extra photographers — the people who assign) read it;
+ * editors never: the list of editors is the studio roster (plan §2, E17), and
+ * an editor who creates a job is only ever its own editor.
  */
 export async function editorPickerOptions(db: DbLike, ctx: AuthContext): Promise<EditorPickerOption[]> {
   assertStaffRead(ctx);
+  if (!ctx.isSystem && ctx.role !== "photographer") throw new ForbiddenError("job.assign_editor", "Only photographers give jobs to editors");
   const bounds = await simpleBounds(db, ctx);
   const editors = await loadEditors(db, ctx);
   const desk = await loadDeskCounts(
@@ -282,7 +285,7 @@ export async function getEditorsOverview(db: DbLike, ctx: AuthContext, input: { 
 /*  getEditorDetail                                                    */
 /* ------------------------------------------------------------------ */
 
-async function loadEditorInOrg(db: DbLike, ctx: AuthContext, editorId: string): Promise<UserRef> {
+export async function loadEditorInOrg(db: DbLike, ctx: AuthContext, editorId: string): Promise<UserRef> {
   const row = (await db.select(USER_REF).from(users).where(and(eq(users.organisationId, ctx.organisationId), eq(users.id, editorId))))[0];
   if (!row || row.role !== "editor") throw new NotFoundError("Editor");
   return row;

@@ -15,10 +15,12 @@ export interface SidebarProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   orgName: string;
+  /** Show the "[" key cap next to Collapse. Keyboard chords are Advanced only (plan §8). */
+  showChords?: boolean;
 }
 
 /** Desktop sidebar: 264px expanded, 72px icon rail when collapsed. */
-export function Sidebar({ groups, pathname, collapsed, onToggleCollapsed, orgName }: SidebarProps) {
+export function Sidebar({ groups, pathname, collapsed, onToggleCollapsed, orgName, showChords = false }: SidebarProps) {
   const ToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose;
   const toggleLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
 
@@ -37,7 +39,7 @@ export function Sidebar({ groups, pathname, collapsed, onToggleCollapsed, orgNam
       {!collapsed ? (
         <>
           <span className="flex-1 text-left">Collapse</span>
-          <Kbd keys={["["]} />
+          {showChords ? <Kbd keys={["["]} /> : null}
         </>
       ) : null}
     </button>

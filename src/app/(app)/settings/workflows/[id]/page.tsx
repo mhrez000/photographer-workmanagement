@@ -5,12 +5,12 @@ import { WorkflowEditor, WorkflowHeaderActions } from "@/components/settings/wor
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { getWorkflowGraph, listWorkflows } from "@/server/queries/workflows";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Workflow" };
 
 export default async function WorkflowDetailPage({ params }: PageProps<"/settings/workflows/[id]">) {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("workflows", "/settings/studio"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "workflow.view");
   const { id } = await params;
   const graph = await load(() => getWorkflowGraph(db, ctx, id));

@@ -10,10 +10,10 @@ export default function JobDetailError({ error, retry }: { error: Error & { dige
       <Card>
         <ErrorState
           title="This job didn't load"
-          message="Something went wrong while loading the job, its history or its links. Nothing was changed — try again, or go back to the jobs list."
+          message="Something went wrong while loading the job, its files or its messages. Nothing was changed — try again, or go back to Jobs."
           onRetry={retry}
           homeHref="/jobs"
-          homeLabel="Back to jobs"
+          homeLabel="Back to Jobs"
           digest={error.digest}
         />
       </Card>

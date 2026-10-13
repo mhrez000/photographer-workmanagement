@@ -165,6 +165,30 @@ describe("assignEditorSimple / changeEditor / takeBackFromEditor / declineJobSim
 });
 
 /* ------------------------------------------------------------------ */
+/*  Start editing                                                      */
+/* ------------------------------------------------------------------ */
+
+describe("Start editing (the engine route the simple UI uses)", () => {
+  it("a stale version is a 409 BEFORE any actor or stage check (the editor's page was out of date), then the editor starts: With editor · Editing", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "assigned" });
+    // Stale page + wrong actor: the version check wins, so the screen says "someone else just changed this job", not "only the assigned editor".
+    const stale = await catchErr(as("photographer1", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: job.version + 1, startTimer: false })));
+    expect(stale.status).toBe(409);
+    const staleEditor = await catchErr(as("editor1", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: job.version + 1, startTimer: false })));
+    expect(staleEditor.status).toBe(409);
+    // Right version, wrong actor: 403.
+    expect((await catchErr(act("photographer1", startJob, job.id, { startTimer: false }))).status).toBe(403);
+    const res = await act("editor1", startJob, job.id, { startTimer: false });
+    expect(res.job.statusCategory).toBe("in_progress");
+    expect(jobStage(res.job)).toMatchObject({ stage: "with_editor", subLabel: "editing" });
+    // The same order holds for "Can't do this one" and "Send for checking" (simple.ts): stale → 409 even for a non-actor.
+    expect((await catchErr(as("photographer1", (tx, ctx) => declineJobSimple(tx, ctx, { jobId: job.id, expectedVersion: res.job.version + 1, reason: "x" })))).status).toBe(409);
+    expect((await catchErr(as("photographer1", (tx, ctx) => sendForChecking(tx, ctx, { jobId: job.id, expectedVersion: res.job.version + 1, finishedLink: { url: FINISHED } })))).status).toBe(409);
+    await expectClean();
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  Send for checking                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -755,5 +779,62 @@ describe("inviteUser presets", () => {
     await setUserFlags(db, ids.users.photographer2, { canReviewSubmissions: false });
     const job = (await insertJobFixture(db, ids, { statusKey: "submitted", photographerId: ids.users.photographer2 })).job;
     expect((await catchErr(act("photographer2", approveJob, job.id, { share: "n/a" }))).status).toBe(403);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Stale page vs permission (reviewer finding E2)                     */
+/* ------------------------------------------------------------------ */
+
+describe("stale page vs permission on the simple actions (E2)", () => {
+  it("a PAST editor from a stale page gets 409 (the job moved to someone else); fresh → the plain 403; the current editor stale → 409; strangers 403 / 404", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 });
+    await act("editor1", sendForChecking, job.id, { finishedLink: { url: FINISHED } });
+    const sent = await jobRow(job.id);
+    // Eve's tab still shows Send for checking / Can't do this one; meanwhile the owner asks for changes and moves the round to Ed.
+    await act("owner", askForChanges, job.id, { note: "Sky too dark" });
+    const swapped = await act("owner", changeEditor, job.id, { editorId: ids.users.editor2 });
+    expect(swapped.job.editorId).toBe(ids.users.editor2);
+    const staleSend = await catchErr(as("editor1", (tx, ctx) => sendForChecking(tx, ctx, { jobId: job.id, expectedVersion: sent.version, finishedLink: { url: FINISHED_V2 } })));
+    expect([staleSend.status, staleSend.code]).toEqual([409, "conflict"]);
+    expect((staleSend.details as { current: Job }).current).toMatchObject({ id: job.id, editorId: ids.users.editor2, version: swapped.job.version });
+    const staleDecline = await catchErr(as("editor1", (tx, ctx) => declineJobSimple(tx, ctx, { jobId: job.id, expectedVersion: sent.version, reason: "Away" })));
+    expect(staleDecline.status).toBe(409);
+    // Fresh version, no longer the editor: 403 with the plain message.
+    const fresh = await catchErr(as("editor1", (tx, ctx) => sendForChecking(tx, ctx, { jobId: job.id, expectedVersion: swapped.job.version, finishedLink: { url: FINISHED_V2 } })));
+    expect([fresh.status, fresh.code, fresh.message]).toEqual([403, "forbidden", "This job is now with another editor. Nothing to do here."]);
+    // The current editor on a stale page: 409 as always.
+    expect((await catchErr(as("editor2", (tx, ctx) => sendForChecking(tx, ctx, { jobId: job.id, expectedVersion: 999, finishedLink: { url: FINISHED_V2 } })))).status).toBe(409);
+    expect((await catchErr(as("editor2", (tx, ctx) => declineJobSimple(tx, ctx, { jobId: job.id, expectedVersion: 999, reason: "Away" })))).status).toBe(409);
+    // Strangers: an editor who never held it cannot even see it (404); with ⚑see other editors' jobs it is a 403 before any version check.
+    const other = (await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 })).job;
+    expect((await catchErr(as("editor2", (tx, ctx) => sendForChecking(tx, ctx, { jobId: other.id, expectedVersion: 999, finishedLink: { url: FINISHED } })))).status).toBe(404);
+    await setUserFlags(db, ids.users.editor2, { canViewTeamJobs: true });
+    const stranger = await catchErr(as("editor2", (tx, ctx) => sendForChecking(tx, ctx, { jobId: other.id, expectedVersion: 999, finishedLink: { url: FINISHED } })));
+    expect([stranger.status, stranger.message]).toEqual([403, "Only the assigned editor can do this"]);
+    expect(JSON.stringify(stranger.details ?? null)).not.toContain("createdByUserId");
+    expect((await catchErr(as("editor2", (tx, ctx) => declineJobSimple(tx, ctx, { jobId: other.id, expectedVersion: 999, reason: "x" })))).status).toBe(403);
+    // Nothing moved.
+    expect((await jobRow(job.id)).version).toBe(swapped.job.version);
+    expect((await jobRow(other.id)).version).toBe(other.version);
+    await expectClean();
+  });
+
+  it("the reviewer-side actions keep permission first for people who may not review, and a stale page 409 for those who may", async () => {
+    const { job } = await insertJobFixture(db, ids, { statusKey: "submitted", editorId: ids.users.editor1 });
+    // The editor who did the work: never approves (403), stale or not, and never sees the row.
+    const editor = await catchErr(as("editor1", (tx, ctx) => approveJob(tx, ctx, { jobId: job.id, expectedVersion: 999, share: "n/a" })));
+    expect([editor.status, editor.code]).toEqual([403, "forbidden"]);
+    expect(JSON.stringify(editor.details ?? null)).not.toContain("current");
+    // The photographer of the job from a stale page: 409.
+    expect((await catchErr(as("photographer1", (tx, ctx) => approveJob(tx, ctx, { jobId: job.id, expectedVersion: 999, share: "n/a" })))).status).toBe(409);
+    expect((await catchErr(as("photographer1", (tx, ctx) => askForChanges(tx, ctx, { jobId: job.id, expectedVersion: 999, note: "x" })))).status).toBe(409);
+    // A photographer who does not manage the job: 403, never the row.
+    const other = await catchErr(as("photographer2", (tx, ctx) => approveJob(tx, ctx, { jobId: job.id, expectedVersion: 999, share: "n/a" })));
+    expect(other.status).toBe(404); // not even visible without ⚑see all jobs
+    await setUserFlags(db, ids.users.photographer2, { canViewAllJobs: true });
+    const visible = await catchErr(as("photographer2", (tx, ctx) => approveJob(tx, ctx, { jobId: job.id, expectedVersion: 999, share: "n/a" })));
+    expect([visible.status, visible.code]).toEqual([403, "forbidden"]);
+    await expectClean();
   });
 });

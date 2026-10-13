@@ -10,7 +10,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import type { WorkflowListItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { listWorkflows } from "@/server/queries/workflows";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Workflows" };
 
@@ -73,7 +73,7 @@ function WorkflowRow({ w }: { w: WorkflowListItem }) {
 }
 
 export default async function WorkflowsSettingsPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("workflows", "/settings/studio"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "workflow.view");
   const workflows = await load(() => listWorkflows(db, ctx));
   const canManage = allowed(ctx, "workflow.manage");

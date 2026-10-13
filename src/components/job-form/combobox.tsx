@@ -217,7 +217,15 @@ function ComboboxPanel({
           })
         )}
       </ul>
-      {footer ? <div className="border-t border-border p-1">{footer(query.trim(), () => setOpen(false))}</div> : null}
+      <ComboboxFooter footer={footer} query={query.trim()} close={() => setOpen(false)} />
     </div>
   );
+}
+
+/** Footer slot; renders nothing (no divider) when the footer has nothing to show for this query. */
+function ComboboxFooter({ footer, query, close }: { footer: ComboboxProps["footer"]; query: string; close: () => void }) {
+  if (!footer) return null;
+  const node = footer(query, close);
+  if (node === null || node === undefined || node === false) return null;
+  return <div className="border-t border-border p-1">{node}</div>;
 }

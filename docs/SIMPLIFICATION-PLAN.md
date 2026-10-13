@@ -292,7 +292,7 @@ There is one page, **Editors** (owner and co-owners only). It replaces Team Work
 
 ### Hidden: the code and data stay, behind **Settings → Studio → Advanced tools** (off by default, owner only)
 
-- Board (Kanban, using the same 5 stage columns; a drag is only allowed where the matching button would be) and Timeline
+- Board (Kanban) and Timeline. **For now the Board keeps 7 columns** — With editor and Done are each split in two (Not started / Editing; Not sent to client / Done) so a drop still lands on exactly one status category — but every column and legend chip is drawn exactly like the stage pill on the Jobs list (same words, same colours), and a drag is only allowed where the matching button would be. *Follow-up: collapse to the 5 stage columns.*
 - Reports & stats (Analytics, Bottlenecks, Reports), the 12 workload/bottleneck thresholds and the review time limit
 - Workloads with capacity hours, estimated hours and bands
 - Workflows editor, custom statuses and "Move to any status…"

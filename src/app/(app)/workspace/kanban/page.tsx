@@ -4,12 +4,12 @@ import { FilterBar } from "@/components/filters/filter-bar";
 import { KanbanBoard } from "@/components/kanban/kanban-board";
 import { kanbanLimitKey } from "@/components/kanban/shared";
 import { ShowCancelledToggle } from "@/components/kanban/kanban-controls";
-import { PageContainer, ScopeNotice } from "@/components/shell";
+import { PageContainer } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { KANBAN_COLUMNS, type QuickFilter } from "@/lib/constants";
-import { allowed, load, pageContext, param, params } from "@/server/page";
+import { advancedPageContext, allowed, load, param, params } from "@/server/page";
 import { pageScope } from "@/server/page-scope";
 import { getKanbanBoard, KANBAN_MAX_PER_COLUMN } from "@/server/queries/kanban";
 
@@ -27,7 +27,7 @@ const FILTER_KEYS = ["q", "quick", "editorId", "photographerId", "clientId", "jo
  */
 export default async function KanbanPage({ searchParams }: PageProps<"/workspace/kanban">) {
   const sp = await searchParams;
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("kanban", "/jobs"); // Advanced gate before any query (see src/server/page.ts)
   const timeZone = ctx.settings.timezone;
 
   const includeCancelled = param(sp, "includeCancelled") === "1";
@@ -68,7 +68,6 @@ export default async function KanbanPage({ searchParams }: PageProps<"/workspace
         eyebrow="Workspace"
         title="Kanban"
         description="Drag a job to move it through the workflow. Every move is checked against your permissions and recorded in the job history."
-        meta={<ScopeNotice scope={board.scope} />}
         actions={
           canCreate ? (
             <Button href="/jobs/new" leadingIcon={<Plus aria-hidden="true" className="size-4" />}>

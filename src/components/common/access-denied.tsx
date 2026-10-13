@@ -45,8 +45,8 @@ export function AccessDenied({
       {description ? <p className="mt-1 max-w-sm text-sm text-ink-muted">{description}</p> : null}
       <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
         {action ?? (
-          <Button variant="outline" size={compact ? "sm" : "md"} href="/dashboard">
-            Back to dashboard
+          <Button variant="outline" size={compact ? "sm" : "md"} href="/">
+            Go home
           </Button>
         )}
       </div>

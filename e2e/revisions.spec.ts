@@ -1,73 +1,95 @@
 import { ROLE_EMAILS, stagesOf, uniq } from "./api";
-import { expect, openJob, test } from "./fixtures";
+import { UI_TEST_TIMEOUT, expect, gotoReady, jobHeading, sectionNamed, stagePill, test } from "./fixtures";
 
 /**
- * Multiple revisions (spec §40 "revisions" + edge case "multiple revisions";
- * ARCHITECTURE §4.4): each request is numbered #1, #2… and earlier revisions
- * are never overwritten. Each request is resolved as `resubmitted`; the stage
- * history keeps every cycle.
+ * Rounds of changes (docs/SIMPLIFICATION-PLAN.md §4 "Round 2", §5 section 3 "Changes asked"): each
+ * request is a numbered round that is never overwritten; the job page lists every round with what was
+ * asked, by whom and when, and "Fixed and sent back" or "Open"; the pill reads Round N while checking.
  */
-test("revision #1 and #2 are numbered, kept and shown separately", async ({ page, api, apiAs }) => {
+
+test.beforeEach(() => test.setTimeout(UI_TEST_TIMEOUT));
+
+test("round 1 and round 2 are numbered, kept and shown separately; the pill reads Round 3 on the third check", async ({ page, api, apiAs }) => {
   const editor = await api.userByEmail(ROLE_EMAILS.editor);
-  const photographer = await api.userByEmail(ROLE_EMAILS.photographer);
-  const job = await api.createJob({ name: uniq("Revisions"), editorId: editor.id, photographerId: photographer.id });
-
+  const job = await api.createJob({ name: uniq("Rounds"), editorId: editor.id });
   const ed = await apiAs("editor");
-  const ph = await apiAs("photographer");
-  await ed.action(job.id, "start");
-  await ed.action(job.id, "submit");
+  await ed.sendForChecking(job.id);
 
-  const first = await ph.requestRevision(job.id, "Colour cast", "Images 3–5 are too warm.");
+  const first = await api.askForChanges(job.id, "Images 3–5 are too warm.", ["Colour"]);
   expect(first.revision.revisionNumber).toBe(1);
-  await ed.resolveRevision(job.id, "Cooled the white balance");
+  await ed.sendForChecking(job.id, undefined, "Cooled the white balance");
+  expect((await api.job(job.id)).job.revisionCount).toBe(1);
 
-  const second = await ph.requestRevision(job.id, "Missing images", "Image 12 was not delivered.");
+  const second = await api.askForChanges(job.id, "Image 12 was not delivered.", ["Missing photos"]);
   expect(second.revision.revisionNumber).toBe(2);
   expect(second.revision.id).not.toBe(first.revision.id);
 
-  // #1 is intact (reason, description, resolution) while #2 is open.
   let detail = await api.job(job.id);
   expect(detail.job.revisionCount).toBe(2);
   const byNumber = Object.fromEntries(detail.revisions.map((r) => [r.revisionNumber, r]));
-  expect(byNumber[1].reason).toBe("Colour cast");
+  expect(byNumber[1].reason).toBe("Colour");
   expect(byNumber[1].description).toBe("Images 3–5 are too warm.");
   expect(byNumber[1].resolvedAt).toBeTruthy();
-  expect(byNumber[2].reason).toBe("Missing images");
+  expect(byNumber[2].reason).toBe("Missing photos");
   expect(byNumber[2].resolvedAt).toBeNull();
   expect(detail.openRevision?.id).toBe(second.revision.id);
-  // Only one revision is open at a time, and the repeat revision goes back to the same editor.
   expect(detail.revisions.filter((r) => r.isOpen)).toHaveLength(1);
-  expect(detail.openRevision?.assignee?.id).toBe(editor.id);
+  expect(detail.openRevision?.assignee?.id).toBe(editor.id); // back to the same editor
 
-  await ed.resolveRevision(job.id, "Added image 12");
-  await ph.action(job.id, "approve");
+  // UI while round 2 is open: Changes asked, the section lists both rounds.
+  await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
+  await expect(stagePill(page, "changes_asked")).toBeVisible();
+  const section = sectionNamed(page, /^changes asked/i);
+  await expect(section).toContainText("Images 3–5 are too warm.");
+  await expect(section).toContainText("Image 12 was not delivered.");
+  await expect(section).toContainText(/Fixed and sent back/i);
+  await expect(section.getByText("Open", { exact: true })).toHaveCount(1);
+  await expect(section).toContainText(/Round 1/i);
+  await expect(section).toContainText(/Round 2/i);
+  await expect(section).toContainText("Mo Carter");
+
+  await ed.sendForChecking(job.id, undefined, "Added image 12");
+  await page.reload();
+  await expect(stagePill(page, "ready_to_check")).toBeVisible();
+  await expect(page.getByRole("main").getByText(/^Round 3$/).first()).toBeVisible();
+  await api.approve(job.id, "n/a");
 
   detail = await api.job(job.id);
   expect(detail.revisions.map((r) => r.revisionNumber).sort()).toEqual([1, 2]);
   expect(detail.revisions.every((r) => r.resolvedAt && r.resolution === "resubmitted")).toBe(true);
   expect(detail.openRevision).toBeNull();
-  expect(detail.job.statusCategory).toBe("approved");
+  expect(detail.job.statusCategory).toBe("completed");
 
-  // Revisions endpoint and history agree.
-  const list = await api.get<{ revisions: { revisionNumber: number; reason: string }[] }>(`/api/jobs/${job.id}/revisions`);
-  expect(list.revisions.map((r) => `${r.revisionNumber}:${r.reason}`).sort()).toEqual(["1:Colour cast", "2:Missing images"]);
   const history = await api.history(job.id);
   const requested = history.filter((h) => h.event?.eventType === "revision.requested").map((h) => (h.event!.newValue as { revisionNumber: number }).revisionNumber);
   expect(requested).toEqual([1, 2]);
-  // Stage history: two revision + two resubmitted stages, in sequence order, ending approved.
-  const stages = stagesOf(history);
-  const cats = stages.map((st) => st.toCategory);
+  const cats = stagesOf(history).map((st) => st.toCategory);
   expect(cats.filter((c) => c === "revision")).toHaveLength(2);
   expect(cats.filter((c) => c === "resubmitted")).toHaveLength(2);
   expect(cats.indexOf("submitted")).toBeLessThan(cats.indexOf("revision"));
-  expect(cats.at(-1)).toBe("approved");
-  const seqs = stages.map((st) => st.sequence);
-  expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+  expect(cats.at(-1)).toBe("completed");
 
-  // UI: both revisions listed with their own reason.
-  await openJob(page, job.id, "revisions");
-  const revisions = page.getByRole("list", { name: "Revisions, newest first" });
-  await expect(revisions.getByRole("heading", { name: /Revision #1 — Colour cast/ })).toBeVisible();
-  await expect(revisions.getByRole("heading", { name: /Revision #2 — Missing images/ })).toBeVisible();
-  await expect(revisions.getByRole("listitem").filter({ has: page.getByRole("heading", { name: /Revision #/ }) })).toHaveCount(2);
+  await page.reload();
+  await expect(sectionNamed(page, /^changes asked/i).getByText("Open", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("main").getByText(/2 rounds of changes/i).first()).toBeVisible(); // the Next step card (and its phone twin)
+});
+
+test("Changes asked is hidden until a round exists; the editor's card and page quote the request", async ({ page, api, apiAs, pageAs }) => {
+  const editor = await api.userByEmail(ROLE_EMAILS.editor);
+  const job = await api.createJob({ name: uniq("Rounds hidden"), editorId: editor.id });
+  await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
+  await expect(page.getByRole("main").getByRole("heading", { name: /^changes asked/i })).toHaveCount(0);
+
+  const ed = await apiAs("editor");
+  await ed.sendForChecking(job.id);
+  const note = `Remove the agent's car from the driveway shot ${Date.now().toString(36)}`;
+  await api.askForChanges(job.id, note, ["Remove items"]);
+
+  const edPage = await pageAs("editor");
+  await gotoReady(edPage, "/my-jobs", edPage.getByRole("main").getByText(job.name));
+  const card = edPage.getByRole("main").getByRole("listitem").filter({ hasText: job.name }).first();
+  await expect(card).toContainText(note);
+  await gotoReady(edPage, `/jobs/${job.id}`, jobHeading(edPage));
+  await expect(edPage.getByRole("main")).toContainText(note);
+  await expect(edPage.getByRole("main").getByRole("button", { name: /^send for checking$/i })).toBeVisible();
 });

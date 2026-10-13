@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { addTeamFixture, contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { getAutomationDetail, listAutomationRuns, listAutomations } from "./automations";
-import { getClientDetail, listClients } from "./clients";
+import { getClientDetail, listClientJobsSimple, listClients } from "./clients";
 import { getProjectDetail, listProjects } from "./projects";
 import { getNotificationPrefs, getPermissionMatrix, getSettingsView } from "./settings";
 import { getTeamDetail, listTeams } from "./teams";
@@ -76,6 +76,29 @@ describe("clients / projects", () => {
     expect((await getProjectDetail(db, await contextFor(db, ids.users.editor2), "p2")).jobs).toHaveLength(1);
   });
 
+  it("an extra photographer only sees the clients on their jobs or that they created (plan §2); ⚑see all jobs widens to every client", async () => {
+    // Both fixture jobs were shot by Pia (photographer1): Harbour Realty and Bayside Weddings; Coastal Key Property has no job of hers.
+    const pia = await contextFor(db, ids.users.photographer1);
+    expect((await listClients(db, pia)).map((c) => c.client.name)).toEqual(["Bayside Weddings", "Harbour Realty"]);
+    expect((await listClients(db, pia, { q: "coastal" }))).toEqual([]);
+    await expect(getClientDetail(db, pia, ids.clientId2)).rejects.toThrow(NotFoundError);
+    await expect(listClientJobsSimple(db, pia, ids.clientId2)).rejects.toThrow(NotFoundError);
+    const detail = await getClientDetail(db, pia, ids.clientId);
+    expect(detail.jobs).toHaveLength(1);
+    expect(detail.client.email).toBeNull(); // no contact set in this fixture; the field itself is not redacted for photographers
+    expect((await listClientJobsSimple(db, pia, ids.clientId)).map((j) => j.id)).toHaveLength(1);
+    // Photographer2 has no jobs: no clients, until they create one.
+    const p2 = await contextFor(db, ids.users.photographer2);
+    expect(await listClients(db, p2)).toEqual([]);
+    await expect(getClientDetail(db, p2, ids.clientId)).rejects.toThrow(NotFoundError);
+    await db.insert(clients).values({ id: "c-p2", organisationId: ids.organisationId, name: "Newcomer Realty", createdByUserId: ids.users.photographer2, createdAt: NOW, updatedAt: NOW });
+    expect((await listClients(db, p2)).map((c) => c.client.id)).toEqual(["c-p2"]);
+    expect((await getClientDetail(db, p2, "c-p2")).client.name).toBe("Newcomer Realty");
+    // ⚑See all jobs (Leo) and admins keep every client.
+    expect((await listClients(db, await contextFor(db, ids.users.lead))).map((c) => c.client.name)).toEqual(["Bayside Weddings", "Coastal Key Property", "Harbour Realty", "Newcomer Realty"]);
+    expect((await getClientDetail(db, await contextFor(db, ids.users.owner), ids.clientId2)).client.name).toBe("Coastal Key Property");
+  });
+
   it("foreign ids are 404", async () => {
     const other = await seedMinimalOrg(db, { slug: "other" });
     const owner = await contextFor(db, ids.users.owner);
@@ -85,9 +108,13 @@ describe("clients / projects", () => {
 });
 
 describe("users / teams", () => {
-  it("reduced projection for team members and editors; full safe rows for admins", async () => {
-    const reduced = await listUsers(db, await contextFor(db, ids.users.editor1), { role: "editor" });
-    expect(Object.keys(reduced.find((u) => u.id === ids.users.editor2) ?? {}).sort()).toEqual(["avatarColour", "id", "isActive", "isAdmin", "isPrimaryOwner", "name", "role", "title"]);
+  it("reduced projection for team members and editors; full safe rows for admins; an editor only lists the people on their own jobs", async () => {
+    // editor1 holds the in_progress fixture job (photographer1 shot and created it): they see photographer1 and themselves, never editor2 (plan §3).
+    const asEditor = await listUsers(db, await contextFor(db, ids.users.editor1));
+    expect(asEditor.map((u) => u.id).sort()).toEqual([ids.users.editor1, ids.users.photographer1].sort());
+    expect(asEditor.some((u) => u.id === ids.users.editor2)).toBe(false);
+    const reduced = await listUsers(db, await contextFor(db, ids.users.editor1), { role: "photographer" });
+    expect(Object.keys(reduced.find((u) => u.id === ids.users.photographer1) ?? {}).sort()).toEqual(["avatarColour", "id", "isActive", "isAdmin", "isPrimaryOwner", "name", "role", "title"]);
     const everyone = await listUsers(db, await contextFor(db, ids.users.photographer1));
     expect(everyone.some((u) => u.role === "client")).toBe(false);
     expect(everyone.find((u) => u.id === ids.users.owner)).toMatchObject({ isAdmin: true, isPrimaryOwner: true });
@@ -176,8 +203,12 @@ describe("settings / workflows / automations / views", () => {
     await expect(getSettingsView(db, await contextFor(db, ids.users.editor1))).rejects.toThrow(ForbiddenError);
     await expect(getSettingsView(db, await contextFor(db, ids.users.client))).rejects.toThrow(ForbiddenError);
     expect(getPermissionMatrix(await contextFor(db, ids.users.coAdmin)).length).toBeGreaterThan(50);
+    // No preference rows: the view mirrors what `notify` does — the 8 default groups on, the rest off (plan §8).
     const prefs = await getNotificationPrefs(db, await contextFor(db, ids.users.editor1));
-    expect(prefs.every((p) => p.enabled)).toBe(true);
+    expect(prefs.find((p) => p.type === "job_assigned")?.enabled).toBe(true);
+    expect(prefs.find((p) => p.type === "revision_requested")?.enabled).toBe(true);
+    expect(prefs.find((p) => p.type === "priority_changed")?.enabled).toBe(false);
+    expect(prefs.find((p) => p.type === "deadline_changed")?.enabled).toBe(false);
     expect(prefs.some((p) => p.type === "client_work_shared")).toBe(false);
     const clientPrefs = await getNotificationPrefs(db, await contextFor(db, ids.users.client));
     expect(clientPrefs.map((p) => p.type).sort()).toEqual(["client_feedback_reply", "client_work_delivered", "client_work_shared"]);

@@ -21,7 +21,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
 import { useModalDialog } from "@/components/ui/use-modal-dialog";
 import { OPEN_SEARCH_EVENT } from "@/components/shell/types";
-import { StatusPill } from "@/components/jobs/status-pill";
+import { StagePill } from "@/components/jobs/stage-pill";
 import { useHotkeys } from "@/hooks/use-hotkeys";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { flattenNavigation, navigationFor, quickActionsFor, type NavGates } from "@/config/nav";
@@ -77,15 +77,16 @@ export interface CommandPaletteProps {
   onOpenChange: (open: boolean) => void;
   /** Navigation gates of the signed-in staff user (docs/ROLES.md §10; computed server-side). */
   gates: NavGates;
-  /** Opens the keyboard shortcuts sheet. */
+  /** Opens the keyboard shortcuts sheet (Advanced tools only, plan §8). */
   onShowShortcuts?: () => void;
 }
 
 /**
- * ⌘K command palette (spec §19 search, §26 shortcuts): global search across
- * jobs / clients / projects / people (`GET /api/search?q=`, debounced and
- * abortable; an exact job number jumps to its History tab), navigation
- * filtered by the viewer's navigation gates, and quick actions.
+ * ⌘K search (plan §3 "Ctrl K still works"): global search across jobs, clients
+ * and people (`GET /api/search?q=`, debounced and abortable; an exact job number
+ * jumps to its full history), the pages the viewer can open, and quick actions.
+ * Job rows wear the same five stage words as every list (plan §1). Projects,
+ * keyboard chords and the shortcuts sheet only appear with Advanced tools on (plan §8).
  */
 export function CommandPalette({ open, onOpenChange, gates, onShowShortcuts }: CommandPaletteProps) {
   const { ref, handleCancel, handleClose, handleBackdropClick } = useModalDialog({ open, onOpenChange });
@@ -95,7 +96,7 @@ export function CommandPalette({ open, onOpenChange, gates, onShowShortcuts }: C
       onCancel={handleCancel}
       onClose={handleClose}
       onClick={handleBackdropClick}
-      aria-label="Command palette"
+      aria-label="Search"
       className="mx-auto mb-auto mt-[min(12vh,7rem)] w-[calc(100vw-1.5rem)] max-w-xl bg-transparent p-0 outline-none open:animate-scale-in"
     >
       {open ? <PaletteBody gates={gates} close={() => onOpenChange(false)} onShowShortcuts={onShowShortcuts} /> : null}
@@ -148,10 +149,9 @@ function PaletteBody({
   };
 
   const personHref = (u: UserRef) => {
-    // Person pages (docs/ROLES.md §3.4): admins; ⚑analytics for anyone; ⚑workloads for editors.
-    if (gates.admin || gates.analytics || (gates.teamWorkloads && u.role === "editor")) return `/team/users/${u.id}`;
-    if (u.role === "editor") return `/workspace/all?editorId=${encodeURIComponent(u.id)}`;
-    return `/workspace/all?photographerId=${encodeURIComponent(u.id)}`;
+    // Plan §3: editors open their Editors page (owners), everyone else lands on the Jobs list filtered to them.
+    if (u.role === "editor") return gates.admin ? `/editors/${u.id}` : `/jobs?editorId=${encodeURIComponent(u.id)}`;
+    return gates.admin ? `/settings/people/${u.id}` : "/jobs";
   };
 
   const statics = React.useMemo<StaticCommand[]>(() => {
@@ -179,19 +179,21 @@ function PaletteBody({
         run: () => go(a.href),
       }),
     );
-    actions.push({
-      id: "action-shortcuts",
-      label: "Keyboard shortcuts",
-      hint: "See every shortcut",
-      group: "Actions",
-      icon: Keyboard,
-      keywords: ["help", "keys", "hotkeys"],
-      shortcut: "?",
-      run: () => {
-        close();
-        onShowShortcuts?.();
-      },
-    });
+    if (gates.advanced) {
+      actions.push({
+        id: "action-shortcuts",
+        label: "Keyboard shortcuts",
+        hint: "See every shortcut",
+        group: "Actions",
+        icon: Keyboard,
+        keywords: ["help", "keys", "hotkeys"],
+        shortcut: "?",
+        run: () => {
+          close();
+          onShowShortcuts?.();
+        },
+      });
+    }
     return [...nav, ...actions];
   }, [gates, go, close, onShowShortcuts]);
 
@@ -212,11 +214,12 @@ function PaletteBody({
   const errorMessage = term && search.status === "error" && settled ? search.message : null;
   const exact = results?.exactJob ?? null;
   const jobs = results?.jobs ?? [];
+  const projects = results && gates.advanced ? results.projects : [];
   const nothing =
     Boolean(term) &&
     settled &&
     results !== null &&
-    results.jobs.length + results.clients.length + results.projects.length + results.users.length === 0 &&
+    results.jobs.length + results.clients.length + projects.length + results.users.length === 0 &&
     navItems.length === 0 &&
     actionItems.length === 0;
 
@@ -238,7 +241,7 @@ function PaletteBody({
 
   return (
     <Command
-      label="Command palette"
+      label="Search"
       shouldFilter={false}
       loop
       value={highlighted}
@@ -286,7 +289,7 @@ function PaletteBody({
                     {j.matchedIn !== "number" && j.matchedIn !== "name" ? ` · matched in ${j.matchedIn}` : ""}
                   </span>
                 </span>
-                {j.status ? <StatusPill status={j.status} size="xs" className="hidden sm:inline-flex" /> : null}
+                {j.status ? <StagePill job={{ category: j.status.category, revisionCount: 0 }} hideSubLabel className="hidden sm:inline-flex" /> : null}
               </Command.Item>
             ))}
           </Command.Group>
@@ -303,9 +306,9 @@ function PaletteBody({
           </Command.Group>
         ) : null}
 
-        {results && results.projects.length > 0 ? (
+        {projects.length > 0 ? (
           <Command.Group heading="Projects" className={groupClass}>
-            {results.projects.map((p) => (
+            {projects.map((p) => (
               <Command.Item key={p.id} value={`project-${p.id}`} onSelect={() => go(`/projects/${p.id}`)} className={itemClass}>
                 <IconTile icon={FolderOpen} />
                 <span className="min-w-0 flex-1">
@@ -396,9 +399,11 @@ function PaletteBody({
         <span className="inline-flex items-center gap-1">
           <Kbd>Esc</Kbd> close
         </span>
-        <span className="ml-auto inline-flex items-center gap-1">
-          <Kbd>?</Kbd> all shortcuts
-        </span>
+        {gates.advanced ? (
+          <span className="ml-auto inline-flex items-center gap-1">
+            <Kbd>?</Kbd> all shortcuts
+          </span>
+        ) : null}
       </div>
     </Command>
   );
@@ -450,9 +455,9 @@ function StaticItem({ command, className }: { command: StaticCommand; className:
 /* ------------------------------------------------------------------ */
 
 const GO_TO_FALLBACKS: Record<string, string> = {
-  "g d": "/dashboard",
-  "g a": "/workspace/all",
-  "g m": "/workspace/my",
+  "g d": "/home",
+  "g a": "/jobs",
+  "g m": "/jobs",
   "g k": "/workspace/kanban",
   "g c": "/workspace/calendar",
   "g n": "/notifications",
@@ -465,9 +470,9 @@ export interface CommandPaletteMountProps {
 
 /**
  * Mounted once by `src/app/(app)/layout.tsx`. Opens the palette on the shell's
- * OPEN_SEARCH_EVENT (⌘K / Ctrl K, the search button) and on "/"; wires the
- * global shortcuts from KEYBOARD_SHORTCUTS: "g d/a/m/k/c/n" go-to, "n" new job
- * (personas that may create jobs) and "?" for the shortcut sheet.
+ * OPEN_SEARCH_EVENT (⌘K / Ctrl K, the search button) and on "/". The go-to
+ * chords ("g d/a/m/k/c/n"), "n" new job and "?" (the shortcut sheet) are wired
+ * only when the studio's Advanced tools are on (plan §8: chords are hidden).
  */
 export function CommandPaletteMount({ gates }: CommandPaletteMountProps) {
   const router = useRouter();
@@ -494,17 +499,20 @@ export function CommandPaletteMount({ gates }: CommandPaletteMountProps) {
   const bindings = React.useMemo(() => {
     const map: Record<string, () => void> = {
       "/": () => setOpen(true),
-      "?": () => setShortcutsOpen(true),
     };
+    // The shortcuts sheet and the go-to chords are Advanced only (plan §8); Ctrl K and "/" stay for everyone.
+    if (gates.advanced) map["?"] = () => setShortcutsOpen(true);
     const allowed = new Map<string, string>();
     for (const item of flattenNavigation(navigationFor(gates))) {
       if (item.shortcut) allowed.set(item.shortcut, item.href);
     }
-    for (const [keys, href] of Object.entries(GO_TO_FALLBACKS)) {
-      map[keys] = () => router.push(allowed.get(keys) ?? href);
-    }
-    if (quickActionsFor(gates).some((a) => a.id === "new-job")) {
-      map.n = () => router.push("/jobs/new");
+    if (gates.advanced) {
+      for (const [keys, href] of Object.entries(GO_TO_FALLBACKS)) {
+        map[keys] = () => router.push(allowed.get(keys) ?? href);
+      }
+      if (quickActionsFor(gates).some((a) => a.id === "new-job")) {
+        map.n = () => router.push("/jobs/new");
+      }
     }
     return map;
   }, [gates, router]);

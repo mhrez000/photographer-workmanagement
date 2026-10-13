@@ -194,6 +194,27 @@ export interface AdvancedFeatureRef {
   feature: AdvancedFeature;
 }
 
+/**
+ * The Advanced PAGES belong to the owner / co-owners (SIMPLIFICATION-PLAN §3: the Advanced group appears in
+ * the owner's menu; editors "no longer see Projects, Clients, Activity, Board, Timeline"; §8: the switch is
+ * "owner only"). Hidden FIELDS and APIs (time tracking, pause / resume, completion %, extra kinds, own-row
+ * workloads, saved views) stay available to any staff member while the switch is on, so an editor's timer
+ * or density setting still works for a studio that turned Advanced tools on.
+ */
+const ADMIN_ONLY_ADVANCED_PAGES: ReadonlySet<AdvancedFeature> = new Set<AdvancedFeature>([
+  "kanban",
+  "timeline",
+  "analytics",
+  "bottlenecks",
+  "reports",
+  "performance",
+  "workflows",
+  "automations",
+  "teams",
+  "permissions",
+  "projects",
+]);
+
 /** Resource type each action is checked against (`undefined` = no resource). */
 export type ResourceOf<A extends Action> = A extends JobAction
   ? JobPermissionRef
@@ -897,8 +918,8 @@ export const POLICY = {
   },
   "advanced.view": {
     label: "Open the Advanced tools (Board, Timeline, Reports & stats, Workflows, Automations, …)",
-    scope: STAFF_SCOPE("while Advanced tools is on; the feature's own permission still applies"),
-    allow: (ctx) => advancedToolsOn(ctx),
+    scope: STAFF_SCOPE("while Advanced tools is on; the Advanced PAGES are the owner's, hidden fields / APIs (timers, own-row workloads, …) any staff; the feature's own permission still applies"),
+    allow: (ctx, ref) => advancedToolsOn(ctx) && (ref === undefined || isAdmin(ctx) || !ADMIN_ONLY_ADVANCED_PAGES.has(ref.feature)),
   },
   "portal.view_job": {
     label: "See shared work in the portal",

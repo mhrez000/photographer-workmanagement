@@ -2,91 +2,91 @@ import type { Metadata } from "next";
 import { PageContainer } from "@/components/shell";
 import { PageHeader } from "@/components/ui/page-header";
 import { CreateJobForm } from "@/components/job-form";
-import { EDITOR_LINK_KINDS, type LinkKind, type NoteKind } from "@/lib/constants";
 import { todayCivil } from "@/lib/dates";
+import type { EditorPickerOption, UserOption } from "@/lib/types";
 import { isAdmin } from "@/server/auth/permissions";
 import { getViewer } from "@/server/auth/session";
 import { allowed, guard, load, pageContext, param } from "@/server/page";
-import { getJobFormDefaults } from "@/server/queries/job-form";
-import { getClientOptions, getProjectOptions } from "@/server/queries/options";
+import { editorPickerOptions } from "@/server/queries/editors";
+import { getJobFormDefaults, getLastUsedJobTypeId } from "@/server/queries/job-form";
+import { getClientOptions, getProjectOptions, getUserOptions } from "@/server/queries/options";
+import { loadUsualDaysToEdit } from "@/server/queries/simpleColumns";
 import { listJobTypes } from "@/server/queries/workflows";
 
 export const metadata: Metadata = { title: "New job" };
 
 /**
- * Create a job (ARCHITECTURE §10 `/jobs/new`; guard `job.create`).
- * `?clientId=` / `?projectId=` preselect the cascade (e.g. from a project page).
+ * New job (docs/SIMPLIFICATION-PLAN.md §5): one screen, 8 fields, a collapsed "More options".
+ * `?clientId=` pre-selects the client (from a client page); `?editorId=` pre-selects the editor (an
+ * editor page's "Give them a job", ignored unless it is one of the picker's editors); `?projectId=` (project pages, Advanced
+ * tools) pre-fills the client and the address. There is no project field: `createJob` reuses or creates
+ * the project from client + address (`autoProject`).
  *
- * Per persona (docs/ROLES.md §4):
- * - Owner / Photographer (admin): any active photographer (default: themselves), any editor, every note kind.
- * - Team member ("Create jobs"): they are the photographer; editor picker only with "Assign editors".
- * - Editor ("Create jobs"): photographer required (studio default pre-filled), "Assign to me" or
- *   "Leave unassigned", existing client, existing or inline new project, shoot date = today.
+ * Per persona (docs/ROLES.md §4): owners pick any editor and, under More options, the photographer
+ * when the studio has more than one; extra photographers are the photographer on their own jobs and see
+ * the editor picker only with "Assign editors"; editors say who shot it (pre-filled with the owner) and
+ * choose "Assign to me" or "Leave unassigned".
  */
 export default async function NewJobPage({ searchParams }: PageProps<"/jobs/new">) {
   const { ctx, db } = await pageContext();
   guard(ctx, "job.create");
   const sp = await searchParams;
   const viewer = await getViewer();
-
-  const jobTypes = await load(() => listJobTypes(db, ctx));
-  const clients = await load(() => getClientOptions(db, ctx));
-
-  let initialClientId = param(sp, "clientId") ?? null;
-  let initialProjectId = param(sp, "projectId") ?? null;
-  if (initialProjectId) {
-    const match = (await load(() => getProjectOptions(db, ctx, {}))).find((p) => p.id === initialProjectId);
-    if (match) initialClientId = match.clientId;
-    else initialProjectId = null;
-  }
-  if (initialClientId && !clients.some((c) => c.id === initialClientId)) {
-    initialClientId = null;
-    initialProjectId = null;
-  }
-  const projects = initialClientId ? await load(() => getProjectOptions(db, ctx, { clientId: initialClientId })) : [];
-
   const admin = isAdmin(ctx);
   const editor = ctx.role === "editor";
+  const tz = ctx.settings.timezone;
+
+  const [jobTypes, usualDaysMap, clients, lastUsed] = await Promise.all([
+    load(() => listJobTypes(db, ctx)),
+    load(() => loadUsualDaysToEdit(db, ctx)),
+    load(() => getClientOptions(db, ctx)),
+    load(() => getLastUsedJobTypeId(db, ctx)),
+  ]);
+
+  let initialClientId = param(sp, "clientId") ?? null;
+  let initialAddress: string | undefined;
+  const projectId = param(sp, "projectId");
+  if (projectId) {
+    const match = (await load(() => getProjectOptions(db, ctx, {}))).find((p) => p.id === projectId);
+    if (match) {
+      initialClientId = match.clientId;
+      initialAddress = match.name;
+    }
+  }
+  if (initialClientId && !clients.some((c) => c.id === initialClientId)) initialClientId = null;
+
+  const photographerMode = admin ? "pick" : editor ? "required" : "self";
+  const editorMode = editor ? "self" : admin || ctx.canAssignEditors ? "pick" : "none";
+  const photographers: UserOption[] = photographerMode === "self" ? [] : await load(() => getUserOptions(db, ctx, { role: "photographer" }));
+  const editors: EditorPickerOption[] = editorMode === "pick" ? await load(() => editorPickerOptions(db, ctx)) : [];
   const defaults = editor ? await load(() => getJobFormDefaults(db, ctx)) : null;
-  const noteKinds: NoteKind[] = editor ? ["editor"] : admin ? ["photographer", "client", "internal"] : ["photographer", "client"];
-  const editorLinkKinds: readonly LinkKind[] = ["raw_files", ...EDITOR_LINK_KINDS.filter((k) => k !== "raw_files")];
+  const defaultPhotographerId = admin ? ctx.userId : (defaults?.defaultPhotographerId ?? null);
 
   return (
-    <PageContainer>
+    <PageContainer width="narrow">
       <PageHeader
-        eyebrow={[{ label: "Jobs", href: "/workspace/all" }, { label: "New job" }]}
+        eyebrow={[{ label: "Jobs", href: editor ? "/my-jobs" : "/jobs" }, { label: "New job" }]}
         title="New job"
-        description={
-          editor
-            ? "Set up the job for the shoot you're editing: who shot it, the client and project, and the raw files."
-            : "Set up the work once — client, people, deadlines and links — and everyone sees the same picture from here on."
-        }
+        description={editor ? "Set up the shoot you're editing. The studio sees it straight away." : "Shoot → give it to an editor. Everything else can wait."}
       />
       <CreateJobForm
-        viewer={{
-          id: ctx.userId ?? "",
-          name: viewer?.name ?? "You",
-          role: ctx.role,
-          avatarColour: viewer?.avatarColour ?? "",
-          isAdmin: ctx.isAdmin,
-          title: viewer?.title ?? null,
-        }}
-        timeZone={ctx.settings.timezone}
+        viewer={{ id: ctx.userId ?? "", name: viewer?.name ?? "You", role: ctx.role, avatarColour: viewer?.avatarColour ?? "", isAdmin: ctx.isAdmin }}
+        timeZone={tz}
+        today={todayCivil(tz, new Date(ctx.now()))}
         jobTypes={jobTypes}
+        usualDays={Object.fromEntries(usualDaysMap)}
+        defaultJobTypeId={lastUsed}
         clients={clients}
-        projects={projects}
         initialClientId={initialClientId}
-        initialProjectId={initialProjectId}
-        photographerMode={admin ? "pick" : editor ? "required" : "self"}
-        defaultPhotographerId={admin ? ctx.userId : (defaults?.defaultPhotographerId ?? null)}
-        editorMode={editor ? "self" : admin || ctx.canAssignEditors ? "pick" : "none"}
-        noteKinds={noteKinds}
-        linkKinds={editor ? editorLinkKinds : undefined}
+        initialAddress={initialAddress}
+        initialEditorId={param(sp, "editorId") ?? null}
         canCreateClient={!editor && allowed(ctx, "client.create")}
-        canCreateProject={!editor && allowed(ctx, "project.create")}
-        inlineNewProject={editor}
-        initialShootDate={editor ? todayCivil(ctx.settings.timezone, new Date(ctx.now())) : undefined}
-        cancelHref={editor ? "/workspace/my" : "/workspace/all"}
+        photographerMode={photographerMode}
+        photographers={photographers}
+        defaultPhotographerId={defaultPhotographerId}
+        editorMode={editorMode}
+        editors={editors}
+        cancelHref={editor ? "/my-jobs" : "/jobs"}
       />
     </PageContainer>
   );

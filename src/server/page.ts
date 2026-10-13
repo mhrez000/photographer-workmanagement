@@ -90,6 +90,18 @@ export function redirectUnlessAdvanced(ctx: AuthContext, feature: AdvancedFeatur
 }
 
 /**
+ * `pageContext()` + `redirectUnlessAdvanced()` for the PAGE (and nested layout) of an Advanced route.
+ * Next renders a segment's layout and page in parallel, so a gate in `layout.tsx` alone does not stop
+ * the page from loading all of its data before the 307 goes out (/projects took ~20 s while off). Every
+ * Advanced page therefore calls this FIRST, before any query, and keeps the layout gate for the real status.
+ */
+export async function advancedPageContext(feature: AdvancedFeature, to: string): Promise<PageContext> {
+  const page = await pageContext();
+  redirectUnlessAdvanced(page.ctx, feature, to);
+  return page;
+}
+
+/**
  * Route-handler twin of `requireAdvanced`: throws NotFoundError (→ 404 JSON through `handle`) while
  * Advanced tools is off. Use it at the top of the hidden APIs (saved views, dashboard layout, timer,
  * bulk UI endpoints, automations, workflows editor, workloads, analytics, reports, timeline, kanban).

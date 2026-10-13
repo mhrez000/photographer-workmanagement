@@ -111,7 +111,7 @@ describe("updateRevision: a new assignee takes over the job", () => {
     }
     const toNew = after.filter((n) => n.userId === ids.users.editor2);
     expect(toNew.map((n) => n.type)).toEqual(["revision_requested"]);
-    expect(toNew[0].title).toMatch(/Revision #1 on PJ-\d+ is now assigned to you/);
+    expect(toNew[0].title).toMatch(/PJ-\d+ was given to you with changes asked \(round 1\)/);
     const expectedVersion = await v(job.id);
     await as("editor2", (tx, ctx) => resolveRevision(tx, ctx, { revisionId, expectedVersion }));
     expect((await jobRow(job.id)).statusCategory).toBe("resubmitted");
@@ -182,7 +182,7 @@ describe("assignEditor with an open revision", () => {
     expect((await jobRow(job.id)).editorId).toBe(ids.users.editor1);
     const rev2 = await first(db.select().from(jobRevisions).where(and(eq(jobRevisions.jobId, job.id), eq(jobRevisions.revisionNumber, 2))));
     expect(rev2?.assigneeUserId).toBe(ids.users.editor1);
-    const forRev2 = (await noticesOn(job.id)).filter((n) => n.userId === ids.users.editor1 && n.title.startsWith("Revision #2"));
+    const forRev2 = (await noticesOn(job.id)).filter((n) => n.userId === ids.users.editor1 && n.title.includes("(round 2)"));
     expect(forRev2.map((n) => n.type)).toEqual(["revision_requested"]);
     await expectClean();
   });

@@ -16,9 +16,9 @@ export default function GlobalErrorPage({
       <BrandMark size={36} className="mb-8" />
       <ErrorState
         title="Something went wrong"
-        message="An unexpected error interrupted this page. Trying again usually fixes it; if not, head back to the dashboard."
+        message="An unexpected error interrupted this page. Trying again usually fixes it; if not, head back home."
         onRetry={retry}
-        homeHref="/dashboard"
+        homeHref="/"
         digest={error.digest}
         size="lg"
       />

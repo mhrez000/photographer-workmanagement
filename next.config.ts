@@ -33,6 +33,21 @@ export const LEGACY_REDIRECTS: readonly { source: string; destination: string }[
   { source: "/settings/notifications", destination: "/settings/account" },
 ];
 
+/**
+ * Fallbacks for unknown legacy children (reviewer finding E17 follow-up: "unknown legacy children never
+ * 404"): anything under the old Team and Insights sections that no entry above names goes to Editors.
+ * The three Insights pages a studio with Advanced tools on still uses (exactly /insights/analytics,
+ * /insights/bottlenecks, /insights/reports) are excluded by a lookahead, so their server-side gate keeps
+ * deciding; anything deeper under them is unknown and goes to Editors too.
+ * Kept apart from LEGACY_REDIRECTS because these sources are patterns, not addresses (e2e iterates the
+ * list above literally).
+ */
+export const LEGACY_FALLBACK_REDIRECTS: readonly { source: string; destination: string }[] = [
+  { source: "/insights", destination: "/editors" },
+  { source: "/insights/:rest((?!analytics$|bottlenecks$|reports$).*)", destination: "/editors" },
+  { source: "/team/:rest*", destination: "/editors" }, // `:rest*` also matches the bare /team
+];
+
 const nextConfig: NextConfig = {
   // Authenticated, per-request data on every page: keep the classic dynamic
   // rendering model (no Cache Components / PPR) so DB reads are always fresh.
@@ -56,7 +71,8 @@ const nextConfig: NextConfig = {
   // forbidden() + src/app/forbidden.tsx for permission-denied pages.
   experimental: { authInterrupts: true },
   async redirects() {
-    return LEGACY_REDIRECTS.map((r) => ({ ...r, permanent: false }));
+    // Exact legacy addresses first (they carry their :id), then the section fallbacks.
+    return [...LEGACY_REDIRECTS, ...LEGACY_FALLBACK_REDIRECTS].map((r) => ({ ...r, permanent: false }));
   },
 };
 

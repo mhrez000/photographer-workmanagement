@@ -6,13 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
-import { allowed, guard, load, pageContext, param } from "@/server/page";
+import { advancedPageContext, allowed, guard, load, param } from "@/server/page";
 import { getClientOptions } from "@/server/queries/options";
 
 export const metadata: Metadata = { title: "New project" };
 
 export default async function NewProjectPage({ searchParams }: PageProps<"/projects/new">) {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("projects", "/jobs"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "project.create");
   const sp = await searchParams;
   const clients = await load(() => getClientOptions(db, ctx));

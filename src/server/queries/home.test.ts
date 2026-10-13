@@ -99,6 +99,30 @@ describe("getOwnerHome", () => {
     expect(home.needsAttention[3].reason).toMatchObject({ kind: "client_message", excerpt: "Brighter please" });
   });
 
+  it("needs attention: one row per job — a late job nobody is editing reads 'No editor yet · 1 day late', never 'with You'", async () => {
+    const both = await job({ statusKey: "new", editorId: null, shootDate: due("2026-10-06"), dueDate: due("2026-10-07"), name: "Late and unassigned" });
+    const lateCheck = await job({ statusKey: "submitted", dueDate: due("2026-10-06"), name: "Late with me to check" });
+    const home = await getOwnerHome(db, await ctxOf("owner"));
+    const row = home.needsAttention.find((r) => r.job.id === both.id);
+    expect(home.needsAttention.filter((r) => r.job.id === both.id)).toHaveLength(1);
+    expect(row?.reason).toEqual({ kind: "no_editor", shotCivilDate: "2026-10-06" });
+    expect(row?.also).toEqual([{ kind: "late", daysLate: 1, withName: null }]);
+    // Ready to check and late: it waits on the owner, so no "with <editor>" either.
+    expect(home.needsAttention.find((r) => r.job.id === lateCheck.id)?.reason).toEqual({ kind: "late", daysLate: 2, withName: null });
+    expect(home.needsAttentionMore).toBe(0);
+  });
+
+  it("needs attention is capped: late / no-editor rows beyond the limit are counted, questions always show", async () => {
+    for (let i = 0; i < 12; i++) await job({ statusKey: "in_progress", dueDate: due("2026-10-06"), name: `Late ${i}` });
+    const asked = await job({ statusKey: "assigned", dueDate: due("2026-10-20"), name: "Question" });
+    await comment(asked.id, ids.users.editor1, "question", "Which sky?", "2026-10-07T01:00:00.000Z");
+    const home = await getOwnerHome(db, await ctxOf("owner"));
+    expect(home.topline.late).toBe(12);
+    expect(home.needsAttention.filter((r) => r.reason.kind === "late")).toHaveLength(10);
+    expect(home.needsAttentionMore).toBe(2);
+    expect(home.needsAttention.some((r) => r.job.id === asked.id && r.reason.kind === "question")).toBe(true);
+  });
+
   it("coming up: shoots and due dates in the next 7 days (active stages only), soonest first", async () => {
     const a = await job({ statusKey: "new", editorId: null, shootDate: due("2026-10-10"), dueDate: due("2026-10-12") });
     await job({ statusKey: "approved", dueDate: due("2026-10-09") }); // done

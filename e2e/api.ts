@@ -1,6 +1,6 @@
 /**
- * The e2e helper module: server URL, seeded accounts, a thin REST client and
- * data factories (src/app/api/README.md is the contract).
+ * The e2e helper module: server URL, the SMALL demo roster, a thin REST client
+ * and data factories (src/app/api/README.md is the contract).
  *
  * Every spec builds the data it needs through these helpers with unique names
  * and asserts on those entities only, so specs never depend on seeded counts,
@@ -8,9 +8,15 @@
  * accounts are only ever signed in through their own cookie jars — never
  * logged out, deactivated or archived (logout / deactivation tests use users
  * the spec invites).
+ *
+ * Setup goes through the PERMANENT engine routes (assign, start, submit,
+ * revisions, approve / deliver / complete, cancel, restore): the simplified
+ * one-button steps are a display layer over the same statuses (plan §4, §9), so
+ * a job driven here looks exactly like one driven through the new buttons. The
+ * buttons themselves are exercised through the UI by the specs.
  */
 import path from "node:path";
-import { request as playwrightRequest, type APIRequestContext, type APIResponse } from "@playwright/test";
+import { expect, request as playwrightRequest, type APIRequestContext, type APIResponse } from "@playwright/test";
 
 /* ------------------------------ environment ----------------------------- */
 
@@ -35,51 +41,75 @@ export const AUTH_DIR = path.join(__dirname, ".auth");
 export const authFile = (key: string) => path.join(AUTH_DIR, `${key}.${process.pid}.json`);
 
 /**
- * Seeded demo accounts by persona (docs/ROLES.md §12.2, §13). Roles v2 has
- * exactly three roles (photographer, editor, client); admin is a property of a
- * photographer, and team members / editors carry permission switches.
+ * The SMALL demo roster (docs/SIMPLIFICATION-PLAN.md §8; src/db/seed/small.ts):
+ * one owner who also shoots, one extra photographer ("Only their own shoots"),
+ * three editors, one portal client, and the other studio for isolation tests.
  */
 export type Role =
-  /** Owner / Photographer: admin and primary owner; also shoots. */
+  /** Mo Carter — Owner / Photographer: admin and primary owner; also shoots. */
   | "owner"
-  /** Team member with every switch on (sees all jobs, workloads, analytics; reviews). */
+  /** Priya Nair — extra photographer, "Only their own shoots" preset. */
   | "photographer"
-  /** Team member with the migrated defaults: create ✓, assign ✓, review ✓; sees only jobs they manage. */
-  | "photographer-noflags"
-  /** Junior team member: create ✓, assign ✗, review ✗ (the owner assigns and reviews her work). */
-  | "photographer-restricted"
-  /** Editor at defaults (create jobs ✓, other editors' jobs ✗). */
+  /** Sam Whitfield — editor (usually handles up to 6). */
   | "editor"
-  /** Editor with "See other editors' jobs" (read-only). */
-  | "editor-team"
-  | "editor-overloaded"
-  /** Client portal user of Harbourline Realty (portal + feedback on). */
+  /** Ava Mitchell — editor. */
+  | "editor2"
+  /** Lucas Pham — editor (usually handles up to 4). */
+  | "editor3"
+  /** Sarah Kingsley — Harbourline Realty's portal user (portal + feedback on). */
   | "client"
-  /** Client portal user of Coastal Key Property (portal on, feedback off, nothing shared). */
-  | "client2"
   /** Admin of the second organisation (tenant isolation). */
   | "other-owner"
   /** Client portal user of the second organisation. */
   | "other-client";
 
-/** Seeded demo accounts (src/db/seed/catalog.ts). Password for all: Password123!. */
+/** Seeded demo accounts. Password for all: Password123!. */
 export const ROLE_EMAILS: Record<Role, string> = {
   owner: "owner@studio.test",
   photographer: "photographer01@studio.test",
-  "photographer-noflags": "photographer02@studio.test",
-  "photographer-restricted": "photographer12@studio.test",
   editor: "editor01@studio.test",
-  "editor-team": "editor02@studio.test",
-  "editor-overloaded": "editor03@studio.test",
+  editor2: "editor02@studio.test",
+  editor3: "editor03@studio.test",
   client: "client@studio.test",
-  client2: "client2@studio.test",
   "other-owner": "owner@other.test",
   "other-client": "client@other.test",
 };
 
+/** Seeded display names (small.ts) — the plan's "Waiting on: Sam" is Sam Whitfield. */
+export const ROLE_NAMES: Partial<Record<Role, string>> = {
+  owner: "Mo Carter",
+  photographer: "Priya Nair",
+  editor: "Sam Whitfield",
+  editor2: "Ava Mitchell",
+  editor3: "Lucas Pham",
+  client: "Sarah Kingsley",
+};
+
+/** Seeded clients of the small demo. Harbourline uses the portal; Coastal Key does not. */
+export const SEED_CLIENTS = { portal: "Harbourline Realty", noPortal: "Coastal Key Property" } as const;
+
 /** Accounts that use the client portal (never the staff shell). */
-export const CLIENT_ROLES: readonly Role[] = ["client", "client2", "other-client"];
+export const CLIENT_ROLES: readonly Role[] = ["client", "other-client"];
 export const isClientRole = (role: Role): boolean => CLIENT_ROLES.includes(role);
+
+/** Where each persona lands after sign-in (plan §3; src/server/page.ts homePathFor). */
+export const HOME_PATH = { photographer: "/home", editor: "/my-jobs", client: "/portal" } as const;
+
+/** The pages of the simplified product (everything a hidden page may redirect to). */
+export const SIMPLE_PAGE_RE = /^\/(home|jobs|editors|clients|my-jobs|calendar|settings\/(studio|people|shoot-types|account|history))(\/[^?]*)?(\?.*)?$/;
+
+/**
+ * "Hidden pages are also blocked on the server" (plan §3, §8): while Advanced tools is off a hidden
+ * page is a 404, or a 307 to its simple replacement — never a 200 of its own.
+ */
+export function expectHiddenPage(res: { status: number; location: string | null }, path: string): void {
+  if (res.status === 307) {
+    const target = new URL(res.location ?? "", "http://x").pathname + new URL(res.location ?? "", "http://x").search;
+    expect(target, `${path} redirects to a simple page`).toMatch(SIMPLE_PAGE_RE);
+    return;
+  }
+  expect(res.status, `${path} is blocked (404 or a redirect), got ${res.status}`).toBe(404);
+}
 
 /** Effective permission switches (docs/ROLES.md §2.2); `GET /api/auth/me` returns them for staff. */
 export interface PermissionFlags {
@@ -92,11 +122,14 @@ export interface PermissionFlags {
   canViewTeamJobs: boolean;
 }
 
-export type ViewScope = "mine" | "business";
-
 /** Unique, human-readable name so entities never collide between runs. */
 export function uniq(prefix: string): string {
   return `${prefix} ${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** A unique https URL (any link counts as a finished link, plan §5). */
+export function uniqUrl(slug: string): string {
+  return `https://drive.google.com/drive/folders/e2e-${slug}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
 /** Civil date (YYYY-MM-DD) in the org timezone, `days` from today. */
@@ -146,6 +179,7 @@ export interface JobRow {
   priority: string;
   editor: UserRef | null;
   photographer: UserRef | null;
+  shootDate: string | null;
   dueDate: string | null;
   isOverdue: boolean;
   revisionCount: number;
@@ -162,12 +196,11 @@ export interface RevisionView {
   assignee: UserRef | null;
 }
 export interface JobDetail {
-  job: JobRow & { createdBy: UserRef; completedAt: string | null; reopenedCount: number };
+  job: JobRow & { createdBy: UserRef; completedAt: string | null; reopenedCount: number; sharedWithClient?: boolean };
   revisions: RevisionView[];
   openRevision: RevisionView | null;
   actions: Record<string, unknown> & {
     transitions: { toStatus: StatusRef; label: string; isReopen?: boolean }[];
-    canUseTimer: boolean;
     canComment: boolean;
   };
   finishedWork: { id: string; kind: string; url: string; addedBy: UserRef }[];
@@ -200,13 +233,6 @@ export interface HistoryEntry {
   stage?: StageView;
   event?: ActivityItem;
 }
-export interface SessionView {
-  id: string;
-  user: UserRef;
-  endedAt: string | null;
-  endReason: string | null;
-  isRunning: boolean;
-}
 export interface NotificationView {
   id: string;
   type: string;
@@ -235,10 +261,12 @@ export interface InvitedUser {
   email: string;
   tempPassword: string;
 }
-/** `Api.inviteUser` options (docs/ROLES.md §6.1 `POST /api/users`). Omitted flags take the invite defaults. */
+/** `Api.inviteUser` options (`POST /api/users`). Omitted flags take the invite defaults. */
 export interface InviteOptions {
   label?: string;
   title?: string;
+  /** Photographers only (plan §2): the one invite choice. */
+  preset?: "own_shoots" | "co_owner";
   /** Photographers only: "Make admin (co-owner)". */
   isAdmin?: boolean;
   flags?: Partial<PermissionFlags>;
@@ -246,7 +274,7 @@ export interface InviteOptions {
   clientId?: string;
 }
 
-/** `GET /api/auth/me` for staff (§7.7: the existing shape plus persona, admin and effective switches). */
+/** `GET /api/auth/me` for staff. */
 export interface StaffMe {
   kind?: "staff";
   user: PermissionFlags & {
@@ -259,9 +287,10 @@ export interface StaffMe {
     isAdmin: boolean;
     isPrimaryOwner: boolean;
   };
+  settings?: { version: number; advancedToolsEnabled?: boolean; timezone: string };
   unreadCount: number;
 }
-/** `GET /api/auth/me` for a client portal user (§7.7 client-safe shape). */
+/** `GET /api/auth/me` for a client portal user (client-safe shape). */
 export interface ClientMe {
   kind: "client";
   name: string;
@@ -269,6 +298,12 @@ export interface ClientMe {
   clientName: string;
   studioName: string;
   unreadCount: number;
+}
+
+/** `GET /api/settings` (admins). */
+export interface SettingsView {
+  organisation: { id: string; name: string; slug: string };
+  settings: { version: number; advancedToolsEnabled?: boolean; timezone: string; organisationName?: string };
 }
 
 /* ---- client portal projection (docs/ROLES.md §7.4; src/lib/types.ts Portal*) ---- */
@@ -364,6 +399,13 @@ export interface CommentNodeView {
   replies: CommentNodeView[];
 }
 
+/** `GET /api/jobs/:id/links` slot. */
+export interface LinkSlotView {
+  kind: string;
+  current: { id: string; url: string; label: string | null; addedBy: UserRef } | null;
+  history: { id: string; url: string; supersededAt?: string | null }[];
+}
+
 export const stagesOf = (entries: HistoryEntry[]): StageView[] => entries.filter((e) => e.kind === "stage" && e.stage).map((e) => e.stage as StageView);
 export const eventTypesOf = (entries: HistoryEntry[]): string[] => entries.filter((e) => e.kind === "event" && e.event).map((e) => (e.event as ActivityItem).eventType);
 
@@ -390,7 +432,7 @@ export interface RawResult<T = unknown> {
   error: { code?: string; message?: string; current?: unknown; details?: unknown } | undefined;
 }
 
-type JobVerb = "accept" | "decline" | "start" | "submit" | "begin-review" | "approve" | "deliver" | "complete" | "cancel" | "reopen" | "restore" | "pause" | "resume";
+type JobVerb = "accept" | "decline" | "start" | "submit" | "begin-review" | "approve" | "deliver" | "complete" | "cancel" | "reopen" | "restore";
 
 /** A signed-in REST session (its own cookie jar; non-GET requests carry the Origin header). */
 export class Api {
@@ -444,6 +486,12 @@ export class Api {
     return this.call<T>("PUT", url, body);
   }
 
+  /** Status code of a page GET (no redirects followed). */
+  async pageStatus(pathname: string): Promise<{ status: number; location: string | null }> {
+    const res = await this.ctx.get(pathname, { maxRedirects: 0, failOnStatusCode: false });
+    return { status: res.status(), location: res.headers().location ?? null };
+  }
+
   dispose(): Promise<void> {
     return this.ctx.dispose();
   }
@@ -476,44 +524,69 @@ export class Api {
     return hit.id;
   }
 
+  /** A seeded client by name (admins see every client). */
+  async clientByName(name: string): Promise<{ id: string; name: string }> {
+    const list = await this.get<{ id: string; name: string }[]>(`/api/clients?q=${encodeURIComponent(name)}`);
+    const hit = list.find((c) => c.name === name);
+    if (!hit) throw new Error(`client ${name} not found`);
+    return hit;
+  }
+
+  /** A fresh client (optionally with the portal on). */
+  async createClient(label = "E2E", opts: { portal?: boolean; feedback?: boolean; contact?: { contactName?: string; email?: string; phone?: string; notes?: string } } = {}) {
+    const clientName = uniq(`E2E ${label} Client`);
+    const client = await this.post<{ id: string }>("/api/clients", { name: clientName, ...(opts.contact ?? {}) });
+    if (opts.portal) await this.setClientPortal(client.id, { portalEnabled: true, feedbackEnabled: opts.feedback ?? true });
+    return { clientId: client.id, clientName };
+  }
+
   async createClientAndProject(
     label = "E2E",
     contact: { contactName?: string; email?: string; phone?: string; notes?: string } = {},
   ): Promise<{ clientId: string; clientName: string; projectId: string; projectName: string }> {
-    const clientName = uniq(`E2E ${label} Client`);
-    const client = await this.post<{ id: string }>("/api/clients", { name: clientName, ...contact });
+    const { clientId, clientName } = await this.createClient(label, { contact });
     const projectName = uniq(`E2E ${label} Project`);
-    const project = await this.post<{ id: string }>("/api/projects", { clientId: client.id, name: projectName });
-    return { clientId: client.id, clientName, projectId: project.id, projectName };
+    const project = await this.post<{ id: string }>("/api/projects", { clientId, name: projectName });
+    return { clientId, clientName, projectId: project.id, projectName };
   }
 
   /**
-   * Creates a job ("Real Estate" = the standard workflow) in a new client/project unless
-   * `projectId` or `newProject` (editors: inline project under an existing `clientId`, §4.3) is given.
-   * `photographerId: undefined` lets the server pick the default (admin/member: self; editor: §4.3 default).
+   * Creates a job ("Real Estate" = the standard workflow). Without `projectId` / `newProject` /
+   * `autoProject` a fresh client is created and the project is derived from the address
+   * (plan §5 "silent projects"). `photographerId: undefined` lets the server pick the default.
    */
   async createJob(
     input: {
       name?: string;
+      /** The address / job name typed on the New job form (defaults to `name`). */
+      address?: string;
       projectId?: string;
       clientId?: string;
       newProject?: { name: string; address?: string };
+      autoProject?: { clientId: string; address: string };
       jobTypeId?: string;
       photographerId?: string;
       editorId?: string | null;
       shootDate?: string;
-      dueDate?: string;
+      dueDate?: string | null;
       deliveryDueDate?: string;
       priority?: string;
+      description?: string;
     } = {},
   ): Promise<JobRow & { detail: JobDetail }> {
-    const projectId = input.newProject ? undefined : (input.projectId ?? (await this.createClientAndProject()).projectId);
+    const name = input.name ?? uniq("E2E Job");
+    let projectTarget: Record<string, unknown>;
+    if (input.projectId) projectTarget = { projectId: input.projectId };
+    else if (input.newProject) projectTarget = { clientId: input.clientId, newProject: input.newProject };
+    else if (input.autoProject) projectTarget = { autoProject: input.autoProject };
+    else {
+      const clientId = input.clientId ?? (await this.createClient()).clientId;
+      projectTarget = { autoProject: { clientId, address: input.address ?? name } };
+    }
     const jobTypeId = input.jobTypeId ?? (await this.jobTypeId());
     const created = await this.post<{ job: { id: string } }>("/api/jobs", {
-      name: input.name ?? uniq("E2E Job"),
-      projectId,
-      clientId: input.clientId,
-      newProject: input.newProject,
+      name,
+      ...projectTarget,
       jobTypeId,
       photographerId: input.photographerId,
       editorId: input.editorId,
@@ -521,14 +594,15 @@ export class Api {
       dueDate: input.dueDate,
       deliveryDueDate: input.deliveryDueDate,
       priority: input.priority,
+      description: input.description,
     });
     const detail = await this.job(created.job.id);
     return { ...detail.job, detail };
   }
 
-  /** `GET /api/jobs` rows matching `q` (optionally with `?scope=`). */
-  async jobsMatching(q: string, scope?: ViewScope): Promise<JobRow[]> {
-    const res = await this.get<{ rows: JobRow[] }>(`/api/jobs?q=${encodeURIComponent(q)}&limit=100${scope ? `&scope=${scope}` : ""}`);
+  /** `GET /api/jobs` rows matching `q`. */
+  async jobsMatching(q: string): Promise<JobRow[]> {
+    const res = await this.get<{ rows: JobRow[] }>(`/api/jobs?q=${encodeURIComponent(q)}&limit=100`);
     return res.rows;
   }
 
@@ -536,17 +610,18 @@ export class Api {
     return this.get<JobDetail>(`/api/jobs/${id}`);
   }
 
-  /** Polls until the job reaches `category` (UI actions refresh asynchronously). */
-  async waitForCategory(id: string, category: string, timeoutMs = 20_000): Promise<JobDetail> {
+  /** Polls until the job reaches one of `categories` (UI actions refresh asynchronously). */
+  async waitForCategory(id: string, category: string | readonly string[], timeoutMs = 20_000): Promise<JobDetail> {
+    const wanted = typeof category === "string" ? [category] : [...category];
     let last = "";
     try {
       return await eventually(async () => {
         const d = await this.job(id);
         last = d.job.statusCategory;
-        return d.job.statusCategory === category ? d : null;
+        return wanted.includes(d.job.statusCategory) ? d : null;
       }, timeoutMs);
     } catch {
-      throw new Error(`job ${id} never reached "${category}" (still "${last}")`);
+      throw new Error(`job ${id} never reached "${wanted.join(" | ")}" (still "${last}")`);
     }
   }
 
@@ -566,11 +641,11 @@ export class Api {
     return this.get<{ revisions: RevisionView[]; openRevision: RevisionView | null }>(`/api/jobs/${jobId}/revisions`);
   }
 
-  sessions(jobId: string) {
-    return this.get<{ sessions: SessionView[] }>(`/api/jobs/${jobId}/sessions`);
+  links(jobId: string, history = false) {
+    return this.get<LinkSlotView[]>(`/api/jobs/${jobId}/links${history ? "?history=1" : ""}`);
   }
 
-  /* ---- workflow ---- */
+  /* ---- workflow (engine routes; permanent) ---- */
   async assignEditor(jobId: string, userId: string | null, reason?: string) {
     return this.post(`/api/jobs/${jobId}/assign`, { role: "editor", userId, reason, expectedVersion: await this.version(jobId) });
   }
@@ -578,11 +653,38 @@ export class Api {
   async action(jobId: string, verb: JobVerb, extra: Record<string, unknown> = {}) {
     return this.post<{ job: JobRow }>(`/api/jobs/${jobId}/${verb}`, { expectedVersion: await this.version(jobId), ...extra });
   }
-  /** accept → start → submit (as whoever this session is). */
-  async driveToSubmitted(jobId: string, opts: { startTimer?: boolean } = {}) {
-    await this.action(jobId, "accept");
-    await this.action(jobId, "start", opts.startTimer ? { startTimer: true } : {});
-    return this.action(jobId, "submit");
+  /** Start editing (as the assigned editor, or the owner on their behalf). */
+  async startEditing(jobId: string) {
+    const d = await this.job(jobId);
+    if (d.job.statusCategory === "in_progress") return d;
+    await this.action(jobId, "start");
+    return this.job(jobId);
+  }
+  /**
+   * The editor's "Send for checking" (plan §5): records a finished link, starts editing when the job had
+   * not started, then submits (or resolves the open round → Resubmitted). As whoever this session is.
+   */
+  /**
+   * Send for checking (`POST /api/jobs/:id/simple/send-for-checking`, plan §5): records the finished
+   * link (a new address becomes the current version of the one Finished photos slot) and moves the job
+   * to Ready to check — starting the editing step first if needed, or closing the open round of changes.
+   */
+  async sendForChecking(jobId: string, url = uniqUrl("finished"), note?: string): Promise<JobDetail> {
+    await this.post(`/api/jobs/${jobId}/simple/send-for-checking`, {
+      expectedVersion: await this.version(jobId),
+      finishedLink: { url, label: "Finished photos" },
+      ...(note ? { note } : {}),
+    });
+    return this.job(jobId);
+  }
+  /** Ask for changes (plan §5): one note, optional chips as the reason, needed back by (default tomorrow). */
+  async askForChanges(jobId: string, note: string, chips: string[] = [], neededBy = civilDate(1)) {
+    return this.post<{ revision: RevisionView; job: JobRow }>(`/api/jobs/${jobId}/revisions`, {
+      expectedVersion: await this.version(jobId),
+      reason: chips.length ? chips.join(", ") : "Changes",
+      description: note,
+      dueDate: neededBy,
+    });
   }
   async requestRevision(jobId: string, reason: string, description: string) {
     return this.post<{ revision: RevisionView }>(`/api/jobs/${jobId}/revisions`, { expectedVersion: await this.version(jobId), reason, description });
@@ -592,32 +694,59 @@ export class Api {
     if (!detail.openRevision) throw new Error("no open revision");
     return this.post<{ job: JobRow }>(`/api/revisions/${detail.openRevision.id}/resolve`, { expectedVersion: detail.job.version, note });
   }
+  /**
+   * Approve (plan §5, decision 2) through the recorded engine steps: "send" = Approved → Delivered (shares
+   * the job) → Completed; "only" = Approved; "n/a" = Approved → Completed.
+   */
+  /**
+   * The one Approve (`POST /api/jobs/:id/simple/approve`, plan §5): "send" = Approve & send (Approved →
+   * Delivered → Completed, sharing the finished links with the client), "only" = Approve only, "n/a" =
+   * the client has no portal (Approved → Completed). `extra` may carry `confirmSelfApproval`.
+   */
+  async approve(jobId: string, share: "send" | "only" | "n/a" = "n/a", extra: Record<string, unknown> = {}) {
+    await this.post(`/api/jobs/${jobId}/simple/approve`, { expectedVersion: await this.version(jobId), share, ...extra });
+    return this.job(jobId);
+  }
+  /**
+   * "Send to client" on a Done · Not sent to client job (plan §5): the recorded delivery step, sharing the
+   * job and its current finished links — the same request the Send to client dialog makes.
+   */
+  async sendToClient(jobId: string) {
+    const shareLinkIds = (await this.links(jobId)).filter((s) => ["finished_files", "gallery", "download"].includes(s.kind) && s.current).map((s) => s.current!.id);
+    return this.transition(jobId, "delivered", { delivery: { shareJob: true, ...(shareLinkIds.length ? { shareLinkIds } : {}) } });
+  }
   async reopen(jobId: string, reason: string, toCategory?: "in_progress" | "revision" | "approved") {
     return this.action(jobId, "reopen", { reason, toCategory });
   }
   async addLink(jobId: string, kind: string, url: string, label?: string) {
     return this.post<{ id: string; url: string }>(`/api/jobs/${jobId}/links`, { kind, url, label });
   }
+  /** `POST /api/links/:id/replace { url }` — a new version of the same slot (the old row is kept as history). */
+  replaceLink(linkId: string, url: string, label?: string) {
+    return this.post<{ link: { id: string; url: string }; previous: { id: string } }>(`/api/links/${linkId}/replace`, label === undefined ? { url } : { url, label });
+  }
   /**
-   * `POST /api/jobs/:id/transition { toCategory }` — the generic move (kanban, Deliver dialog).
-   * `delivery` is the §7.3 Deliver-dialog payload, allowed only on a delivering move.
+   * `POST /api/jobs/:id/transition { toCategory }` — the generic move.
+   * `delivery` is the Deliver payload, allowed only on a delivering move.
    */
-  async transition(jobId: string, toCategory: string, extra: { reason?: string; delivery?: { shareJob?: boolean; shareLinkIds?: string[] } } = {}) {
+  async transition(jobId: string, toCategory: string, extra: Record<string, unknown> = {}) {
     return this.post<{ job: JobRow }>(`/api/jobs/${jobId}/transition`, { toCategory, expectedVersion: await this.version(jobId), ...extra });
   }
   rawTransition(jobId: string, toCategory: string, expectedVersion: number, extra: Record<string, unknown> = {}) {
     return this.raw("POST", `/api/jobs/${jobId}/transition`, { toCategory, expectedVersion, ...extra });
   }
 
-  /* ---- notes & comments ---- */
+  /* ---- notes & messages ---- */
   addNote(jobId: string, kind: string, body: string) {
     return this.post<{ id: string }>(`/api/jobs/${jobId}/notes`, { kind, body });
   }
   notes(jobId: string) {
     return this.get<{ id: string; kind: string; body: string; archivedAt: string | null }[]>(`/api/jobs/${jobId}/notes`);
   }
-  addComment(jobId: string, body: string, extra: { kind?: string; parentCommentId?: string; mentionUserIds?: string[] } = {}) {
-    return this.post<{ id: string }>(`/api/jobs/${jobId}/comments`, { body, mentionUserIds: [], ...extra });
+  /** `POST /api/jobs/:id/comments` → the new comment (the route answers `{ comment, mentionUserIds, … }`). */
+  async addComment(jobId: string, body: string, extra: { kind?: string; parentCommentId?: string; mentionUserIds?: string[] } = {}) {
+    const res = await this.post<{ comment: { id: string; body: string; kind: string; parentCommentId: string | null } }>(`/api/jobs/${jobId}/comments`, { body, mentionUserIds: [], ...extra });
+    return res.comment;
   }
   comments(jobId: string) {
     return this.get<CommentNodeView[]>(`/api/jobs/${jobId}/comments`);
@@ -634,7 +763,7 @@ export class Api {
   async setClientPortal(clientId: string, flags: { portalEnabled?: boolean; feedbackEnabled?: boolean }) {
     return this.post(`/api/clients/${clientId}/portal`, { ...flags, expectedVersion: await this.clientVersion(clientId) });
   }
-  /** `POST /api/jobs/:id/share` (`job.share_with_client`). */
+  /** `POST /api/jobs/:id/share`. */
   async shareJob(jobId: string, shared = true) {
     return this.post(`/api/jobs/${jobId}/share`, { shared, expectedVersion: await this.version(jobId) });
   }
@@ -647,7 +776,7 @@ export class Api {
     return this.post(`/api/links/${linkId}/share`, { shared });
   }
 
-  /* ---- client portal (docs/ROLES.md §7.7; client sessions) ---- */
+  /* ---- client portal (client sessions) ---- */
   async portalJobs(): Promise<PortalJobView[]> {
     return flattenPortalJobs(await this.get<unknown>("/api/portal/jobs"));
   }
@@ -661,17 +790,11 @@ export class Api {
     return this.get<Paginated<NotificationView>>("/api/portal/notifications");
   }
 
-  /* ---- view scope (docs/ROLES.md §8) ---- */
-  /** `POST /api/me/scope` sets the `pwm_scope` cookie on THIS session's cookie jar. Use a disposable session. */
-  setScope(scope: ViewScope) {
-    return this.post("/api/me/scope", { scope });
-  }
-
   /* ---- people ---- */
   /**
-   * Invites a user (admins). Photographers are team members unless `isAdmin`; flags left out take
-   * the invite defaults (§2.2: create ✓, assign ✓, review ✗, the rest ✗; editors create ✓, team ✗).
-   * Client users need `clientId` of a client with the portal on.
+   * Invites a user (admins). Photographers take the invite `preset` (plan §2) or explicit switches;
+   * editors cannot add jobs unless `flags.canCreateJobs`. Client users need `clientId` of a client with
+   * the portal on.
    */
   async inviteUser(role: "photographer" | "editor" | "client", labelOrOptions: string | InviteOptions = "E2E"): Promise<InvitedUser> {
     const opts: InviteOptions = typeof labelOrOptions === "string" ? { label: labelOrOptions } : labelOrOptions;
@@ -683,6 +806,7 @@ export class Api {
       name: `E2E ${label} ${role} ${stamp}`,
       role,
       title: opts.title,
+      preset: opts.preset,
       isAdmin: opts.isAdmin,
       flags: opts.flags,
       clientId: opts.clientId,
@@ -695,12 +819,20 @@ export class Api {
     return detail.profile.version;
   }
   /** `POST /api/users/:id/permissions` (admin; member or editor switches). */
+  /** `POST /api/users/:id/usual-capacity { usualCapacityJobs | null }` — "Usually handles up to N" (plan §7). */
+  async setUsualCapacity(userId: string, usualCapacityJobs: number | null) {
+    return this.post(`/api/users/${userId}/usual-capacity`, { usualCapacityJobs, expectedVersion: await this.userVersion(userId) });
+  }
   async setPermissions(userId: string, flags: Partial<PermissionFlags>) {
     return this.post(`/api/users/${userId}/permissions`, { ...flags, expectedVersion: await this.userVersion(userId) });
   }
   /** `POST /api/users/:id/admin` (admin; never self). */
   async setAdmin(userId: string, isAdmin: boolean) {
     return this.post(`/api/users/${userId}/admin`, { isAdmin, expectedVersion: await this.userVersion(userId) });
+  }
+  /** `POST /api/users/:id/role` (admin; photographer ⇄ editor). */
+  async setRole(userId: string, role: "photographer" | "editor") {
+    return this.post(`/api/users/${userId}/role`, { role, expectedVersion: await this.userVersion(userId) });
   }
   async deactivateUser(userId: string, reason = "E2E cleanup", reassignTo?: string) {
     return this.post(`/api/users/${userId}/deactivate`, { expectedVersion: await this.userVersion(userId), reason, reassignTo });
@@ -709,6 +841,25 @@ export class Api {
   /* ---- notifications ---- */
   notifications(unreadOnly = false) {
     return this.get<Paginated<NotificationView>>(`/api/notifications?limit=200${unreadOnly ? "&unread=1" : ""}`);
+  }
+  /** `PUT /api/users/:id/notification-prefs` (self). */
+  setNotificationPrefs(userId: string, prefs: Record<string, boolean>) {
+    return this.put(`/api/users/${userId}/notification-prefs`, { prefs });
+  }
+
+  /* ---- studio settings (admins) ---- */
+  settings() {
+    return this.get<SettingsView>("/api/settings");
+  }
+  /** Settings → Studio → Advanced tools (plan §8): idempotent; returns whether the switch changed. */
+  async setAdvancedTools(enabled: boolean): Promise<boolean> {
+    const current = await this.settings();
+    if ((current.settings.advancedToolsEnabled ?? false) === enabled) return false;
+    await this.patch("/api/settings", { expectedVersion: current.settings.version, advancedToolsEnabled: enabled });
+    return true;
+  }
+  async advancedToolsOn(): Promise<boolean> {
+    return (await this.settings()).settings.advancedToolsEnabled ?? false;
   }
 }
 

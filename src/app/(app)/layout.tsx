@@ -3,37 +3,39 @@ import { redirect } from "next/navigation";
 import { after } from "next/server";
 import { AppShell } from "@/components/shell";
 import { CommandPaletteMount } from "@/components/search/command-palette";
+import { getDb } from "@/db";
 import { getOptionalContext, getViewer } from "@/server/auth/session";
 import { navGatesFor } from "@/server/nav-gates";
-import { resolveScope } from "@/server/view-scope";
+import { PORTAL_HOME_PATH } from "@/server/page";
+import { countSimpleRows, stageWhere } from "@/server/queries/jobsSimple";
 import { unreadCount } from "@/server/services/notifications";
 import { lazySweep } from "@/server/services/sweep";
 
 /**
- * Authenticated STAFF app chrome. A missing/stale/revoked session redirects to
- * /login?expired=1 (the proxy then drops the dead cookie, avoiding a loop).
- * Client users never render the staff shell: they are sent to /portal
- * (docs/ROLES.md §7.8 — the security boundary is `requireContext()` /
+ * Authenticated STAFF app chrome (docs/SIMPLIFICATION-PLAN.md §3). A missing /
+ * stale / revoked session redirects to /login?expired=1 (the proxy then drops the
+ * dead cookie, avoiding a loop). Client users never render the staff shell: they
+ * are sent to /portal (the security boundary is `requireContext()` /
  * `pageContext()`, this is the UX redirect).
  *
- * Navigation gates (docs/ROLES.md §10) are computed here with `can()` so the
- * sidebar, quick actions and command palette match the viewer's persona and
- * switches. The scope switch (§8) gets the cookie-resolved scope (a page's
- * `?scope=` override is not reflected in the topbar; pages show it in their header).
+ * Navigation gates are computed here with `can()` so the sidebar, the (+) New job
+ * button, the phone tabs and the command palette match the viewer's role. The
+ * phone Home tab carries the red "to check" count (jobs in Ready to check that
+ * the viewer can see). There is no scope switch any more.
  *
- * Lazy sweep (ARCHITECTURE.md §8): after the response is sent, run the
- * overdue / workload sweep for the org when it is due (at most once per
- * SWEEP_MIN_INTERVAL_MINUTES). It never blocks or breaks rendering.
+ * Lazy sweep (ARCHITECTURE.md §8): after the response is sent, run the overdue
+ * sweep for the org when it is due. It never blocks or breaks rendering.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const ctx = await getOptionalContext();
   const viewer = ctx ? await getViewer() : null;
   if (!ctx || !viewer) redirect("/login?expired=1");
-  if (ctx.role === "client") redirect("/portal");
+  if (ctx.role === "client") redirect(PORTAL_HOME_PATH);
 
   const navGates = navGatesFor(ctx);
-  // "My shoots | Whole business" (docs/ROLES.md §8): null for viewers without view.business_scope.
-  const viewScope = await resolveScope(ctx);
+  const db = getDb();
+  // Editors have no Home tab, so the count is only computed for photographers.
+  const toCheckCount = navGates.photographer ? await countSimpleRows(db, ctx, stageWhere("ready_to_check")) : 0;
 
   const organisationId = ctx.organisationId;
   try {
@@ -56,10 +58,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         avatarColour: viewer.avatarColour,
       }}
       orgName={viewer.organisationName}
-      unreadCount={await unreadCount(ctx)}
+      unreadCount={await unreadCount(ctx, db)}
       logoutAction="/api/auth/logout"
       navGates={navGates}
-      viewScope={viewScope}
+      toCheckCount={toCheckCount}
     >
       {children}
       <CommandPaletteMount gates={navGates} />

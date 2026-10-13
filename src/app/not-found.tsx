@@ -15,10 +15,10 @@ export default function NotFound() {
       <EmptyState
         icon={Compass}
         title="We can't find that page"
-        description="It may have been moved, or the link might be out of date. Head back to the dashboard and we'll get you going again."
+        description="It may have been moved, or the link might be out of date. Head back home and we'll get you going again."
         action={
           <>
-            <Button href="/dashboard">Go to dashboard</Button>
+            <Button href="/">Go home</Button>
             <Button variant="outline" href="/jobs">
               Browse jobs
             </Button>

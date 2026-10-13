@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff, KeyRound, LogOut, ShieldCheck, UserRound } from "lucide-react";
+import { Eye, EyeOff, KeyRound, LogOut, UserRound } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
 import { firstFieldErrors, useMutationRunner } from "@/components/jobs/mutation";
 import { Avatar } from "@/components/ui/avatar";
@@ -10,18 +10,15 @@ import { FormField } from "@/components/ui/form-field";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
-import { Badge } from "@/components/ui/badge";
-import { PERSONA_LABELS, displayRoleLabel, type Persona } from "@/lib/constants";
+import { displayRoleLabel } from "@/lib/constants";
 import type { UserProfile } from "@/lib/types";
 import { ColourField } from "./colour-field";
-import { PERSONA_BADGE, type EditorFlagValues, type MemberFlagValues } from "./permission-copy";
-import { PermissionSwitches } from "./permission-switches";
 import { useConflict } from "./use-conflict";
 
 const MIN_PASSWORD = 10;
 
-/** Your own name, title and avatar colour (self edits only). */
-export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZone: string }) {
+/** Your own name and avatar colour (title only with Advanced tools on). Self edits only. */
+export function ProfileForm({ profile, timeZone, showTitle = false }: { profile: UserProfile; timeZone: string; showTitle?: boolean }) {
   const run = useMutationRunner();
   const { onConflict, dialog } = useConflict("profile", timeZone);
   const [name, setName] = React.useState(profile.name);
@@ -38,7 +35,7 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
     setColour(profile.avatarColour);
   }
 
-  const dirty = name.trim() !== profile.name || (title.trim() || null) !== profile.title || colour !== profile.avatarColour;
+  const dirty = name.trim() !== profile.name || (showTitle && (title.trim() || null) !== profile.title) || colour !== profile.avatarColour;
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,7 +44,7 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
     setPending(true);
     const body: Record<string, unknown> = { expectedVersion: profile.version };
     if (name.trim() !== profile.name) body.name = name.trim();
-    if ((title.trim() || null) !== profile.title) body.title = title.trim() || null;
+    if (showTitle && (title.trim() || null) !== profile.title) body.title = title.trim() || null;
     if (colour !== profile.avatarColour) body.avatarColour = colour;
     const res = await run(() => api.patch(`/api/users/${profile.id}`, body), { success: "Profile saved", onConflict });
     setPending(false);
@@ -55,7 +52,7 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
   };
 
   return (
-    <SectionCard title="Profile" description="How you appear on jobs, comments and the activity log." actions={<UserRound aria-hidden="true" className="size-4 text-ink-subtle" />}>
+    <SectionCard id="profile" title="Profile" description="How you appear on jobs, messages and in History." actions={<UserRound aria-hidden="true" className="size-4 text-ink-subtle" />}>
       <form onSubmit={save} noValidate className="flex flex-col gap-5">
         <div className="flex items-center gap-4">
           <Avatar name={name || profile.name} colour={colour} size="xl" />
@@ -67,17 +64,19 @@ export function ProfileForm({ profile, timeZone }: { profile: UserProfile; timeZ
           </div>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <FormField label="Full name" required error={errors.name}>
+          <FormField label="Full name" required error={errors.name} className={showTitle ? undefined : "sm:col-span-2"}>
             <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} autoComplete="name" />
           </FormField>
-          <FormField label="Title" optional error={errors.title}>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} placeholder="Lead photographer" />
-          </FormField>
+          {showTitle ? (
+            <FormField label="Title" optional error={errors.title}>
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} placeholder="Lead photographer" />
+            </FormField>
+          ) : null}
         </div>
         <FormField label="Avatar colour">
           <ColourField value={colour} onChange={setColour} label="Avatar colour" />
         </FormField>
-        <p className="text-xs text-ink-muted">Your email, role and permissions are managed by the studio owner.</p>
+        <p className="text-xs text-ink-muted">Your email and what you can do are set by the studio owner.</p>
         <div className="flex justify-end">
           <Button type="submit" loading={pending} disabled={!dirty}>
             Save profile
@@ -155,7 +154,7 @@ export function ChangePasswordForm() {
   };
 
   return (
-    <SectionCard title="Password" description="At least 10 characters. A long passphrase beats clever symbols." actions={<KeyRound aria-hidden="true" className="size-4 text-ink-subtle" />}>
+    <SectionCard id="password" title="Password" description="At least 10 characters. A long phrase beats clever symbols." actions={<KeyRound aria-hidden="true" className="size-4 text-ink-subtle" />}>
       <form onSubmit={submit} noValidate className="flex flex-col gap-4">
         {/* Helps password managers associate the change with this account. */}
         <input type="text" autoComplete="username" hidden readOnly value="" />
@@ -192,46 +191,6 @@ export function ChangePasswordForm() {
           </Button>
         </div>
       </form>
-    </SectionCard>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Your access (docs/ROLES.md §10)                                    */
-/* ------------------------------------------------------------------ */
-
-export interface YourAccessCardProps {
-  persona: Exclude<Persona, "client">;
-  /** Effective switches (admins: all on). */
-  memberFlags: MemberFlagValues;
-  editorFlags: EditorFlagValues;
-  isPrimaryOwner: boolean;
-}
-
-/** Plain-English list of what the signed-in person can do; locked rows show "Always on". */
-export function YourAccessCard({ persona, memberFlags, editorFlags, isPrimaryOwner }: YourAccessCardProps) {
-  return (
-    <SectionCard
-      title="Your access"
-      description="What your account can do in this studio. Ask the studio owner to change a switch."
-      actions={<ShieldCheck aria-hidden="true" className="size-4 text-ink-subtle" />}
-    >
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Badge variant={PERSONA_BADGE[persona]}>{PERSONA_LABELS[persona]}</Badge>
-        {isPrimaryOwner ? <Badge variant="accent">Primary owner</Badge> : null}
-      </div>
-      {persona === "admin" ? (
-        <>
-          <p className="mb-3 text-sm text-ink-secondary">
-            You&apos;re an admin: you can see and change every job, person and setting{isPrimaryOwner ? ", and nobody else can change your account" : ""}.
-          </p>
-          <PermissionSwitches kind="member" values={memberFlags} readOnly aria-label="Your permissions" />
-        </>
-      ) : persona === "member" ? (
-        <PermissionSwitches kind="member" values={memberFlags} readOnly aria-label="Your permissions" />
-      ) : (
-        <PermissionSwitches kind="editor" values={editorFlags} readOnly aria-label="Your permissions" />
-      )}
     </SectionCard>
   );
 }

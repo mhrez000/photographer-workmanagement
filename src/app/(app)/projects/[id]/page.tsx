@@ -19,7 +19,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { civilDate, formatDate } from "@/lib/dates";
 import type { JobRow } from "@/lib/types";
 import { getViewer } from "@/server/auth/session";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 import { listActivity } from "@/server/queries/activity";
 import { getClientOptions } from "@/server/queries/options";
 import { getProjectDetail } from "@/server/queries/projects";
@@ -47,7 +47,7 @@ function groupByType(jobs: JobRow[]): TypeGroup[] {
 }
 
 export default async function ProjectDetailPage({ params }: PageProps<"/projects/[id]">) {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("projects", "/jobs"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "project.view");
   const { id } = await params;
   const tz = ctx.settings.timezone;

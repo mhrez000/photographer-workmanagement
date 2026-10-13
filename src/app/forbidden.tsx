@@ -13,12 +13,12 @@ export default function Forbidden() {
       <EmptyState
         icon={ShieldAlert}
         title="You don't have access to this"
-        description="Your role doesn't include this area. If you think you should be able to see it, ask the studio owner to update your permissions."
+        description="This page is not part of what you can see. If you think it should be, ask the studio owner."
         action={
           <>
-            <Button href="/dashboard">Back to dashboard</Button>
-            <Button variant="outline" href="/workspace/my">
-              Go to My Work
+            <Button href="/">Go home</Button>
+            <Button variant="outline" href="/help">
+              What can I see?
             </Button>
           </>
         }

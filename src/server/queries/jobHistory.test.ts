@@ -75,7 +75,7 @@ describe("getJobHistory", () => {
     expect(text).not.toContain("resumed editing");
   });
 
-  it("History tab: a pause/resume shows both, and a decline reads 'declined the job' (not 'unassigned the editor')", async () => {
+  it("History tab: a pause/resume shows both, and a decline reads 'handed the job back' (not 'took the job back')", async () => {
     const { job } = await insertJobFixture(db, ids, { statusKey: "in_progress" });
     let p = await prep("editor1", job.id);
     await run((tx) => pauseJob(tx, p.ctx, { jobId: job.id, expectedVersion: p.expectedVersion }));
@@ -89,9 +89,10 @@ describe("getJobHistory", () => {
     p = await prep("editor1", d.id);
     await run((tx) => declineJob(tx, p.ctx, { jobId: d.id, expectedVersion: p.expectedVersion, reason: "Too busy" }));
     const declined = await historyHtml("coAdmin", d.id);
-    expect(declined).toContain("declined the job");
-    expect(declined).not.toContain("unassigned the editor");
-    expect(declined.match(/declined the job/g)).toHaveLength(1);
+    // Plain words (plan §5): "Can't do this one" reads as handing the job back, never as the owner taking it back.
+    expect(declined).toContain("handed the job back");
+    expect(declined).not.toContain("took the job back");
+    expect(declined.match(/handed the job back/g)).toHaveLength(1);
   });
 });
 

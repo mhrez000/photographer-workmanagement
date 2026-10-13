@@ -14,12 +14,12 @@ import { PageHeader } from "@/components/ui/page-header";
 import { formatDateTime, formatRelative } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { listAutomationRuns, listAutomations } from "@/server/queries/automations";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Automations" };
 
 export default async function AutomationsSettingsPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("automations", "/settings/studio"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "automation.manage");
   const tz = ctx.settings.timezone;
   const rules = await load(() => listAutomations(db, ctx));

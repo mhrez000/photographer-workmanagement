@@ -62,7 +62,7 @@ describe("requireAdvanced / redirectUnlessAdvanced / requireAdvancedApi", () => 
     expect((caught as NotFoundError).message).toMatch(/Advanced tool/);
   });
 
-  it("passes once the owner turns the switch on; the gate is per organisation, so a member sees it too", async () => {
+  it("passes once the owner turns the switch on; the gate is per organisation, so a member gets the hidden APIs too (not the pages)", async () => {
     const ownerBefore = await contextFor(db, ids.users.owner);
     await withTx((tx) => setAdvancedTools(tx, ownerBefore, { enabled: true }), { db });
     const owner = await contextFor(db, ids.users.owner);
@@ -71,7 +71,9 @@ describe("requireAdvanced / redirectUnlessAdvanced / requireAdvancedApi", () => 
     expect(() => requireAdvanced(owner, "analytics")).not.toThrow();
     expect(() => redirectUnlessAdvanced(owner, "projects", "/jobs")).not.toThrow();
     expect(() => requireAdvancedApi(owner, "automations")).not.toThrow();
-    expect(() => requireAdvancedApi(member, "kanban")).not.toThrow();
+    // hidden fields / APIs open for every staff member; the Advanced PAGES stay the owner's (plan §3, §8)
+    expect(() => requireAdvancedApi(member, "time_tracking")).not.toThrow();
+    expect(() => requireAdvancedApi(member, "kanban")).toThrow(NotFoundError);
     expect(nav.notFound).not.toHaveBeenCalled();
     expect(nav.redirect).not.toHaveBeenCalled();
     // a client never sees staff advanced pages even when the switch is on

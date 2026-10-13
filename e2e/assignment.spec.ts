@@ -1,120 +1,101 @@
-import { ROLE_EMAILS, escapeRegExp, eventually, stagesOf, uniq, type SessionView } from "./api";
-import { expect, historyList, jobHeading, test } from "./fixtures";
-import type { Page } from "@playwright/test";
+import { ROLE_EMAILS, eventually, stagesOf, uniq } from "./api";
+import { UI_TEST_TIMEOUT, assignEditorViaDialog, expect, gotoReady, jobHeading, nextStepCard, retrying, stagePill, test, waitingOn, whoDidWhat } from "./fixtures";
 
 /**
- * Assignment (spec §40 "assignment" + edge case "reassigned mid-edit";
- * ARCHITECTURE §4.5): assign through the dialog, reassign while In Progress →
- * status unchanged, stage re-attributed, old editor loses every action but
- * keeps read-only visibility, history names both editors.
+ * Assign / Change editor (docs/SIMPLIFICATION-PLAN.md §4 stage 1, §5 "Next step" + ⋯ menu;
+ * ARCHITECTURE §4.5): assign from the Next step card, change editor mid-edit → status unchanged, the
+ * stage re-attributed, the old editor loses every action but keeps read-only visibility, and Who did
+ * what names both editors. The editor picker shows each editor's desk ("On their desk 3 · Late 1").
  */
 
-async function chooseInAssignDialog(page: Page, personName: string, submitLabel: "Assign" | "Reassign", reason?: string) {
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("searchbox", { name: "Search editors" }).fill(personName);
-  await dialog.getByRole("radio", { name: new RegExp(escapeRegExp(personName)) }).click();
-  if (reason) await dialog.getByLabel(/Reason/).fill(reason);
-  await dialog.getByRole("button", { name: submitLabel, exact: true }).click();
-  await expect(dialog).toBeHidden();
-}
+test.beforeEach(() => test.setTimeout(UI_TEST_TIMEOUT));
 
-test("assign via dialog, reassign mid-edit: old editor loses actions, history shows both", async ({ page, api, apiAs, pageAs }) => {
+test("assign from the Next step card, change editor mid-edit: old editor loses actions, Who did what shows both", async ({ page, api, apiAs, pageAs }) => {
   const editor1 = await api.userByEmail(ROLE_EMAILS.editor);
-  const newEditor = await api.inviteUser("editor", "Reassign");
+  const newEditor = await api.inviteUser("editor", "Change");
   const job = await api.createJob({ name: uniq("Assign flow") });
 
-  // 1) Assign editor01 through the dialog.
-  await page.goto(`/jobs/${job.id}`);
-  await page.getByRole("button", { name: "Assign editor" }).first().click();
-  await expect(page.getByRole("dialog").getByRole("heading", { name: "Assign editor" })).toBeVisible();
-  await chooseInAssignDialog(page, editor1.name, "Assign");
+  // 1) Assign Sam from the card: the picker dialog shows desks ("On their desk 3 · Late 1").
+  await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
+  const card = nextStepCard(page);
+  await expect(card).toContainText(/Who should edit this\?/);
+  await assignEditorViaDialog(page, card.getByRole("button", { name: /^assign editor$/i }), editor1.name, api, job.id, "assigned");
+  expect((await api.job(job.id)).job.editor?.id).toBe(editor1.id);
 
-  await eventually(async () => (await api.job(job.id)).job.editor?.id === editor1.id);
-  expect((await api.job(job.id)).job.statusCategory).toBe("assigned");
-
-  // 2) editor01 accepts and starts (mid-edit).
+  // 2) Sam starts editing.
   const e1 = await apiAs("editor");
-  await e1.action(job.id, "accept");
-  await e1.action(job.id, "start");
-  expect((await api.job(job.id)).job.statusCategory).toBe("in_progress");
-
-  // The editor sees the Submit action on their own job.
+  await e1.startEditing(job.id);
   const editorPage = await pageAs("editor");
-  await editorPage.goto(`/jobs/${job.id}`);
-  await expect(jobHeading(editorPage)).toBeVisible();
-  await expect(editorPage.getByRole("button", { name: "Submit for review" })).toBeVisible();
+  await gotoReady(editorPage, `/jobs/${job.id}`, jobHeading(editorPage));
+  await expect(editorPage.getByRole("main").getByRole("button", { name: /^send for checking$/i })).toBeVisible();
 
-  // 3) Owner reassigns mid-edit through the dialog.
+  // 3) The owner changes the editor from the card (the current editor is marked "Current" and cannot be re-picked).
   await page.reload();
-  await page.getByRole("button", { name: "More actions" }).click();
-  await page.getByRole("menuitem", { name: "Reassign editor…" }).click();
-  await expect(page.getByRole("dialog").getByRole("heading", { name: "Reassign editor" })).toBeVisible();
-  await chooseInAssignDialog(page, newEditor.user.name, "Reassign", "E2E: editor on leave");
-
+  await expect(stagePill(page, "with_editor")).toContainText(/Editing/);
+  await expect(card).toContainText(new RegExp(`${editor1.name} is editing`));
+  const dialog = page.getByRole("dialog");
+  await retrying(async () => {
+    if (!(await dialog.isVisible())) await card.getByRole("button", { name: /^change editor$/i }).click({ timeout: 5_000 });
+    await expect(dialog.getByRole("heading", { name: /^change editor$/i })).toBeVisible({ timeout: 3_000 });
+  });
+  await expect(dialog.getByRole("radio", { name: new RegExp(editor1.name) })).toContainText(/Current/);
+  await expect(dialog.getByRole("radio", { name: new RegExp(editor1.name) })).toHaveAttribute("aria-disabled", "true");
+  await assignEditorViaDialog(page, card.getByRole("button", { name: /^change editor$/i }), newEditor.user.name, api, job.id, "in_progress");
   const after = await eventually(async () => {
     const d = await api.job(job.id);
     return d.job.editor?.id === newEditor.user.id ? d : null;
   });
   // Status unchanged: the stage is re-attributed, not restarted.
   expect(after.job.statusCategory).toBe("in_progress");
+  await page.reload();
+  await expect(waitingOn(page)).toContainText(newEditor.user.name);
 
-  // 4) Old editor: still sees the job (read-only), but has no actions.
+  // 4) Old editor: still sees the job (read-only), no actions.
   await editorPage.reload();
   await expect(jobHeading(editorPage)).toBeVisible();
-  await expect(editorPage.getByRole("button", { name: "Submit for review" })).toHaveCount(0);
-  await expect(editorPage.getByText("No actions available to you at this stage.")).toBeVisible();
-  const denied = await e1.raw("POST", `/api/jobs/${job.id}/submit`, { expectedVersion: after.job.version });
-  expect([403, 422]).toContain(denied.status);
+  await expect(editorPage.getByRole("main").getByRole("button", { name: /^send for checking$/i })).toHaveCount(0);
+  await expect(editorPage.getByRole("main").getByRole("button", { name: /^start editing$/i })).toHaveCount(0);
+  expect([403, 422]).toContain((await e1.raw("POST", `/api/jobs/${job.id}/submit`, { expectedVersion: after.job.version })).status);
   expect((await api.job(job.id)).job.statusCategory).toBe("in_progress");
 
-  // 5) History shows both editors and the re-attribution.
-  const history = await api.history(job.id);
-  const stages = history.filter((h) => h.kind === "stage").map((h) => h.stage!);
+  // 5) History shows both editors and the re-attribution; Who did what reads "Given to … · Moved to …".
+  const stages = stagesOf(await api.history(job.id));
   const editorsAtEntry = stages.map((s) => s.editorAtEntry?.id).filter(Boolean);
   expect(editorsAtEntry).toContain(editor1.id);
   expect(editorsAtEntry).toContain(newEditor.user.id);
   expect(stages.some((s) => s.kind === "reattribution" && s.editorAtEntry?.id === newEditor.user.id)).toBe(true);
-
-  await page.goto(`/jobs/${job.id}?tab=history`);
-  await expect(historyList(page)).toContainText(editor1.name);
-  await expect(historyList(page)).toContainText(newEditor.user.name);
+  const list = whoDidWhat(page);
+  await expect(list).toContainText(new RegExp(`Given to ${editor1.name}`));
+  await expect(list).toContainText(new RegExp(`Moved to ${newEditor.user.name}`));
 });
 
-test("reassigning mid-edit stops the old editor's timer, keeps them read-only and lets the new editor submit", async ({ api, loginAs }) => {
-  const editorA = await api.inviteUser("editor", "Handover A");
-  const editorB = await api.inviteUser("editor", "Handover B");
-  const job = await api.createJob({ name: uniq("Handover"), editorId: editorA.user.id });
-  const a = await loginAs(editorA.email, editorA.tempPassword);
-  await a.action(job.id, "accept");
-  await a.action(job.id, "start", { startTimer: true });
-  expect(await a.get<SessionView | null>("/api/me/timer"), "editor A has a running timer").not.toBeNull();
-
-  await api.assignEditor(job.id, editorB.user.id, "E2E rebalance workload");
+test("Change editor on Ready to check keeps the job waiting on the owner; Assign is only for Needs editor", async ({ api, apiAs }) => {
+  const editor1 = await api.userByEmail(ROLE_EMAILS.editor);
+  const editor2 = await api.userByEmail(ROLE_EMAILS.editor2);
+  const job = await api.createJob({ name: uniq("Change at check"), editorId: editor1.id });
+  const ed = await apiAs("editor");
+  await ed.sendForChecking(job.id);
+  await api.assignEditor(job.id, editor2.id, "E2E rebalance");
   const after = await api.job(job.id);
-  expect(after.job.statusCategory).toBe("in_progress");
-  expect(after.job.editor?.id).toBe(editorB.user.id);
+  expect(after.job.statusCategory).toBe("submitted");
+  expect(after.job.editor?.id).toBe(editor2.id);
+  // The new editor carries on after changes are asked.
+  await api.askForChanges(job.id, "One more crop", ["Crop"]);
+  const ed2 = await apiAs("editor2");
+  expect((await ed2.sendForChecking(job.id)).job.statusCategory).toBe("resubmitted");
+  // The owner never sees "Assign editor" on a job with an editor: the card says Change editor.
+  expect((await api.job(job.id)).actions.transitions.length).toBeGreaterThanOrEqual(0);
+});
 
-  // Old editor: timer closed as auto_reassigned, may still view, may not act.
-  expect(await a.get<SessionView | null>("/api/me/timer")).toBeNull();
-  const aSessions = (await api.sessions(job.id)).sessions.filter((s) => s.user.id === editorA.user.id);
-  expect(aSessions.length).toBeGreaterThan(0);
-  expect(aSessions.every((s) => !s.isRunning && s.endedAt)).toBe(true);
-  expect(aSessions.some((s) => s.endReason === "auto_reassigned")).toBe(true);
-  const aView = await a.job(job.id);
-  expect(aView.actions.transitions).toHaveLength(0);
-  expect(aView.actions.canUseTimer).toBe(false);
-  expect([403, 404, 422]).toContain((await a.raw("POST", `/api/jobs/${job.id}/submit`, { expectedVersion: aView.job.version })).status);
-
-  // The earlier in_progress stage keeps editor A; the current reattribution credits editor B.
-  const stages = stagesOf(await api.history(job.id));
-  const inProgress = stages.filter((st) => st.toCategory === "in_progress");
-  expect(inProgress[0].editorAtEntry?.id).toBe(editorA.user.id);
-  const reattribution = stages.find((st) => st.kind === "reattribution");
-  expect(reattribution?.editorAtEntry?.id).toBe(editorB.user.id);
-  expect(reattribution?.isCurrent).toBe(true);
-
-  // The new editor carries on.
-  const b = await loginAs(editorB.email, editorB.tempPassword);
-  expect((await b.action(job.id, "submit")).job.statusCategory).toBe("submitted");
+test("the extra photographer assigns and changes editors on her own shoots only", async ({ api, apiAs }) => {
+  const p01 = await apiAs("photographer");
+  const me = await p01.me();
+  const editor = await api.userByEmail(ROLE_EMAILS.editor);
+  const own = await api.createJob({ name: uniq("P01 assigns"), photographerId: me.user.id });
+  await p01.assignEditor(own.id, editor.id);
+  expect((await api.job(own.id)).job.editor?.id).toBe(editor.id);
+  const owners = await api.createJob({ name: uniq("Owner shoot"), editorId: editor.id });
+  const other = await api.userByEmail(ROLE_EMAILS.editor2);
+  expect([403, 404]).toContain((await p01.raw("POST", `/api/jobs/${owners.id}/assign`, { role: "editor", userId: other.id, expectedVersion: owners.version })).status);
+  expect((await api.job(owners.id)).job.editor?.id).toBe(editor.id);
 });

@@ -4,13 +4,12 @@ import * as React from "react";
 import { usePathname } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { mobileTabsFor, navigationFor, quickActionsFor, resolveRouteTitle, type NavGates } from "@/config/nav";
+import { mobileTabsFor, navigationFor, quickActionsFor, resolveRouteTitle, userMenuItems, type NavGates, type NavGroup } from "@/config/nav";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetBody, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Toaster } from "@/components/ui/toast";
-import type { ViewScope } from "@/lib/constants";
 import { Brand } from "./brand-mark";
 import { MobileTabBar } from "./mobile-tab-bar";
 import { NavList } from "./nav-list";
@@ -32,15 +31,18 @@ export interface AppShellProps {
   title?: React.ReactNode;
   /** Toast position. */
   toasterPosition?: "bottom-right" | "bottom-center" | "top-right" | "top-center";
-  /** Navigation gates computed server-side with can() (docs/ROLES.md §10). */
+  /** Navigation gates computed server-side with can() (docs/SIMPLIFICATION-PLAN.md §3). */
   navGates: NavGates;
-  /** Resolved "My shoots | Whole business" scope for viewers who may switch (docs/ROLES.md §8); null = no switch. */
-  viewScope?: ViewScope | null;
+  /** Jobs waiting for the viewer to check (the red count on the phone Home tab). */
+  toCheckCount?: number;
 }
 
 /**
- * Authenticated application chrome: collapsible sidebar (desktop), drawer
- * navigation (mobile), sticky topbar, bottom tab bar and toasts.
+ * Authenticated application chrome (docs/SIMPLIFICATION-PLAN.md §3): a five-item
+ * sidebar (desktop), the "More" drawer (phones — opened from the More tab; the
+ * topbar hamburger only appears when there is no tab bar), a sticky topbar, the
+ * bottom tab bar and toasts. There is no scope switch: who you are decides which
+ * jobs you see.
  */
 export function AppShell({
   user,
@@ -52,7 +54,7 @@ export function AppShell({
   title,
   toasterPosition = "bottom-right",
   navGates,
-  viewScope = null,
+  toCheckCount = 0,
 }: AppShellProps) {
   const pathname = usePathname();
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
@@ -68,8 +70,25 @@ export function AppShell({
 
   const groups = React.useMemo(() => navigationFor(navGates), [navGates]);
   const tabs = React.useMemo(() => mobileTabsFor(navGates), [navGates]);
-  const primaryAction = React.useMemo(() => quickActionsFor(navGates).find((action) => action.primary), [navGates]);
-  const heading = React.useMemo(() => resolveRouteTitle(pathname, groups), [pathname, groups]);
+  // "+ New job" hides on the New job page itself: pressing it there would do nothing visible.
+  const primaryAction = React.useMemo(() => {
+    const action = quickActionsFor(navGates).find((a) => a.primary);
+    return action && pathname.startsWith(action.href) ? undefined : action;
+  }, [navGates, pathname]);
+  // Editors have one list, "My jobs": the topbar never calls it "Jobs" for them.
+  const heading = React.useMemo(() => {
+    const resolved = resolveRouteTitle(pathname, groups);
+    return resolved && navGates.editor && resolved.eyebrow === "Jobs" ? { ...resolved, eyebrow: "My jobs" } : resolved;
+  }, [pathname, groups, navGates.editor]);
+
+  // The "More" drawer lists what the tab bar does not already show (plan §3: Clients, Settings…),
+  // plus the personal pages. Falls back to the whole menu when every item is a tab.
+  const drawerGroups = React.useMemo<NavGroup[]>(() => {
+    const tabHrefs = new Set(tabs.flatMap((t) => (t.href ? [t.href] : [])));
+    const rest = groups.map((g) => ({ ...g, items: g.items.filter((i) => !tabHrefs.has(i.href)) })).filter((g) => g.items.length > 0);
+    const main = rest.length > 0 ? rest : groups;
+    return [...main, { id: "personal", label: "You", items: userMenuItems }];
+  }, [groups, tabs]);
 
   const openSearch = React.useCallback(() => {
     if (onOpenSearch) {
@@ -89,10 +108,7 @@ export function AppShell({
       }
       if (event.key === "[" && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const target = event.target;
-        if (
-          target instanceof HTMLElement &&
-          (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
-        ) {
+        if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) {
           return;
         }
         event.preventDefault();
@@ -112,13 +128,7 @@ export function AppShell({
         Skip to content
       </a>
 
-      <Sidebar
-        groups={groups}
-        pathname={pathname}
-        collapsed={collapsed}
-        onToggleCollapsed={toggleCollapsed}
-        orgName={orgName}
-      />
+      <Sidebar groups={groups} pathname={pathname} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} orgName={orgName} showChords={navGates.advanced} />
 
       <div
         className={cn(
@@ -136,13 +146,9 @@ export function AppShell({
           onOpenSearch={openSearch}
           primaryAction={primaryAction}
           logoutAction={logoutAction}
-          viewScope={viewScope}
+          menuButton={tabs.length === 0}
         />
-        <main
-          id="main"
-          tabIndex={-1}
-          className="flex flex-1 flex-col pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom,0px))] outline-none lg:pb-0"
-        >
+        <main id="main" tabIndex={-1} className="flex flex-1 flex-col overflow-x-clip pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom,0px))] outline-none lg:pb-0">
           {children}
         </main>
       </div>
@@ -153,15 +159,16 @@ export function AppShell({
         onOpenSearch={openSearch}
         onOpenMore={() => setMobileNavOpen(true)}
         moreOpen={mobileNavOpen}
+        badges={{ to_check: toCheckCount }}
       />
 
-      <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen} side="left" size="sm" aria-label="Navigation">
+      <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen} side="left" size="sm" aria-label="More">
         <SheetHeader className="py-3">
-          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <SheetTitle className="sr-only">More</SheetTitle>
           <Brand subtitle={orgName} />
         </SheetHeader>
         <SheetBody className="px-3">
-          <NavList groups={groups} pathname={pathname} onNavigate={() => setMobileNavOpen(false)} />
+          <NavList groups={drawerGroups} pathname={pathname} onNavigate={() => setMobileNavOpen(false)} />
         </SheetBody>
         <div className="shrink-0 border-t border-border p-3">
           <div className="flex items-center gap-3 rounded-md px-2 py-2">
@@ -175,13 +182,7 @@ export function AppShell({
             </Badge>
           </div>
           <form action={logoutAction} method="post" className="mt-1">
-            <Button
-              type="submit"
-              variant="ghost"
-              size="sm"
-              className="w-full justify-start text-danger hover:bg-danger-soft hover:text-danger"
-              leadingIcon={<LogOut aria-hidden="true" />}
-            >
+            <Button type="submit" variant="ghost" size="sm" className="w-full justify-start text-danger hover:bg-danger-soft hover:text-danger" leadingIcon={<LogOut aria-hidden="true" />}>
               Log out
             </Button>
           </form>

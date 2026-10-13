@@ -12,28 +12,29 @@ It is **not** a media store. Raw files, editing workspaces and finished gallerie
 
 ## Features
 
+**Shoot. Give it to an editor. Check it. Done.** Proofline is built around five stages, one list of jobs and one obvious next button (the full product rationale is [`docs/SIMPLIFICATION-PLAN.md`](docs/SIMPLIFICATION-PLAN.md)).
+
 | Area | What you get |
 |---|---|
-| **Dashboard** | 8 KPI cards, bottleneck banners, editor workload (🟢🟡🔴 capacity bands), due-today/overdue lists, recent activity and performance widgets. Each user can rearrange, resize and hide widgets (`?customise=1`). Admins (and team members who see all jobs) switch between **My shoots** and **Whole business** from the topbar without changing accounts; editors get a focused personal variant. |
-| **Workspace** | **All Work** table (sort, filter, group, column chooser, saved views, bulk reassign/priority/status for admins, `j/k/x` keys) · **My Work** queue (overdue, due today, revisions, waiting for review, paused) · **Team Work** · **Kanban** (drag and drop through the workflow with permission-checked moves) · **Calendar** (month/week/day/agenda) · **Timeline** (Gantt with bottleneck highlighting). |
-| **Jobs** | Create/edit forms (client → project cascade, job type → workflow, editor picker with workload). The detail page has next-step actions and a timer, plus tabs for Overview (Finished Work panel), Links, Notes, Comments (@mentions), Revisions, Timeline, Activity, History and Time. |
-| **Workflow engine** | Configurable statuses and transitions per workflow, role and assignee rules, reopen/revision flows, overrides with reason. Every status change goes through one audited service. |
-| **Audit trail** | Append-only `activity_events` with before/after values, enforced by DB triggers. Global Activity Log with filters, diff view and CSV export. |
-| **Production** | Clients and projects with open/overdue/completed counts, progress, key dates and activity. |
-| **Team** | Photographer/editor directories, person pages (workload history, time per stage, completed work), workloads with inline capacity editing and a reassign drawer, performance leaderboards. |
-| **Insights** | Analytics (volume, on-time and revision trends, turnaround, utilisation), bottleneck detection with quick fixes, Production/Editors/Photographers/Business reports with CSV download and print styles. |
-| **Settings** | Organisation (timezone, thresholds, SLA, default photographer for editor-created jobs, time tracking), users (invite photographers / editors / client users, admin grant, per-person permission switches, capacity, deactivate with reassignment, anonymise, primary-owner transfer), roles matrix, teams, workflows editor, job types, automations builder with dry run and run history, notification preferences, profile, appearance (theme and density). |
-| **Client portal** | Optional per client: client users sign in to `/portal` and see only the jobs and projects the studio shared with them — milestones (Booked → Shot → Editing → Delivered), agreed dates, shared finished-work links, delivery notes and feedback threads. Staff share jobs, projects and single links, deliver with a Deliver dialog that picks the links to publish, and reply to feedback; internal notes and comments never reach the portal. |
-| **Everywhere** | ⌘K / Ctrl K command palette and global search (an exact job number such as `PJ-0042` jumps to that job's history), keyboard shortcuts (`?`), in-app notifications, optimistic-concurrency conflict dialogs, a mobile layout with a bottom tab bar, and light and dark themes. |
+| **Five stages** | Every job is in exactly one stage — **Needs editor · With editor · Ready to check · Changes asked · Done** (plus Cancelled) — and says who it is waiting on ("Waiting on: Sam" / "Waiting on: You"). "Late" is a red chip and a filter, not a stage. The same words appear in lists, buttons, notifications and emails. |
+| **Home** | "Good morning, Mo. 3 to check · 2 late · 1 needs an editor." Ready to check (Approve / Ask for changes straight from the card), Needs attention with plain reasons, Your editors, Coming up this week. Editors land on **My jobs**: Changes asked first, then Late, To do, Waiting for a check, Done recently — each card with Raw files and one button. |
+| **Jobs** | One list with stage tabs and counts, Late and Show cancelled switches, Search / Editor / Client, and a List / Calendar switch. Same rows everywhere: stage pill, waiting on, due chip ("2 days late", "Due Fri"), Round and Rush badges. |
+| **The job page** | One scrolling page: a **Next step** card with at most two buttons for your role and stage (Assign editor · Start editing · Send for checking · Approve / Ask for changes · Reopen · Restore), Files (raw, finished with earlier versions, other), Instructions for the editor, Changes asked rounds, Messages with @mentions, Private notes in their own tinted box, client feedback, and **Who did what** with a link to the full permanent history. Approving a portal client's job asks "Share with …?" every time; owners may approve their own edit after a confirmation. |
+| **New job** | One screen, eight fields; the due date defaults to the shoot date plus the shoot type's usual days; "Create & send to Sam" when an editor is picked. Projects are created silently from the address. |
+| **Editors** | One page with five plain numbers per editor — On their desk · Late now · Finished · On time · Needed changes — measured from the editor's send, never from your check. "Waiting on you: 4 edits to check" keeps the owner honest. Optional "Usually handles up to N", CSV download, and an editor page with vs-last-month arrows, their desk, recently finished and a finished-per-week chart. |
+| **Clients and the portal** | Clients with open and late counts; each client has an **Online access** card (portal on/off, feedback, who can sign in). Client users see Booked → Shot → Editing → Delivered, the shared finished links and a feedback thread. |
+| **Settings** | One entry: **Studio** (name, timezone, job prefix, the **Advanced tools** switch, Close delivered jobs), **People** (Owner / Photographer / Editor cards, invite with "Only their own shoots" or "Everything (co-owner)", "Can add their own jobs" per editor, deactivate with "Move their jobs to…"), **Types of shoot** (name, colour, usual days to edit), **My account** (8 notification groups on by default, Mark old updates as read, Light / Dark / System), **History** (the studio-wide audit log, each row tagged Sign-in / Job / People / Studio / Client). |
+| **Advanced tools (off by default)** | Hidden, not deleted: Board (its columns are drawn like the stage pills; 7 columns for now), Timeline, Reports & stats, Workloads, custom workflows, Automations, Teams, the full permission table, saved views, bulk actions, projects as a page, time tracking, pause / resume, completion %, four priority levels and extra link / note / message kinds. A studio that already uses custom workflows or automations gets the switch turned on automatically. Hidden pages and APIs are blocked on the server, not just removed from the menu. |
+| **Under the hood** | Configurable workflow engine (every status change through one audited service), append-only `activity_events` enforced by DB triggers, optimistic-concurrency conflict dialogs, in-app notifications, ⌘K / Ctrl K search, a mobile layout with a bottom tab bar and a compact pinned next-step bar (the finished-link box opens from it), light and dark themes. |
 
-Roles (v2, contract [`docs/ROLES.md`](docs/ROLES.md)) — exactly three: **Photographer**, **Editor**, **Client**.
+Roles (contract [`docs/ROLES.md`](docs/ROLES.md); plain summary in the plan §2) — exactly three: **Photographer**, **Editor**, **Client**.
 
-| Persona | Who | Can |
-|---|---|---|
-| **Owner / Photographer** | a photographer with admin (`users.is_admin`); exactly one is the *primary owner* | everything: all jobs, people, analytics, activity and settings; shoots too — their own shoots are ordinary jobs |
-| **Photographer (team member)** | other photographers | their own jobs, plus what the owner switches on: create jobs, assign editors, review submissions, see team workload, see all jobs, analytics |
-| **Editor** | editors | jobs assigned to them (accept, start, pause, notes, questions, finished-work links, submit, resubmit); create jobs for a photographer; optionally see other editors' jobs read-only |
-| **Client** | client portal users of one client | only the work shared with them, in `/portal` |
+| Persona | Who | Sees | Does |
+|---|---|---|---|
+| **Owner** (and any co-owner) | a photographer with admin (`users.is_admin`); exactly one is the *primary owner* | everything | creates jobs, gives them to editors, checks edits, approves, manages people and clients |
+| **Photographer** (an extra shooter) | other photographers — "Only their own shoots" or "Everything (co-owner)" at invite | only jobs they shot or created | creates jobs for their own shoots, gives them to editors, checks the edits on their own shoots |
+| **Editor** | editors | only jobs given to them | edits, sends for checking, fixes changes; "Can add their own jobs" is off unless ticked |
+| **Client** | client portal users of one client | only their own shared work, in `/portal` | sees progress and the finished photos, leaves feedback |
 
 Every page, query and service re-checks permissions server-side (ARCHITECTURE §3, ROLES.md §3). Pages a persona may not open return a real `403`; clients are sent to `/portal` and staff away from it. Records that are missing or not shared with the viewer return a `404`, so the response never reveals whether they exist.
 
@@ -47,7 +48,7 @@ Requires Node.js 20+. No database server and no env file are needed locally: dev
 
 ```bash
 npm install
-npm run db:reset            # fresh ./data/pglite: migrations (incl. integrity triggers), seed demo data, verify
+npm run db:reset            # fresh ./data/pglite: migrations (incl. integrity triggers), seed the small demo studio, verify
 npm run dev                 # http://localhost:3000
 ```
 
@@ -55,20 +56,19 @@ With no `SESSION_SECRET`, the dev server generates one once into `data/.session-
 
 ### Demo accounts
 
-All seeded accounts use the password `Password123!`.
+The default seed is the **small studio** from the plan (`SEED_PROFILE=small`): one owner who also shoots, one extra photographer, three editors, two clients (one on the portal) and about twenty jobs across every stage, time tracking off. All accounts use the password `Password123!`.
 
 | Account | Shown as | Notes |
 |---|---|---|
-| `owner@studio.test` | Owner / Photographer | Admin and primary owner: runs the business, shoots (~12 % of jobs), reviews and delivers |
-| `photographer01@studio.test` | Photographer (team member) | Sees all jobs, team workloads and analytics; reviews their own shoots |
-| `photographer02@studio.test` … `photographer11@studio.test` | Photographer (team member) | Own jobs; create, assign editors and review their own shoots |
-| `photographer12@studio.test` | Photographer (team member) | Junior at invite defaults: the owner assigns editors and reviews her work |
-| `editor01@studio.test` … `editor13@studio.test` | Editor | `editor02` sees other editors' jobs (read-only); `editor03` is overloaded; `editor09` cannot create jobs; `editor11` and `editor13` are deactivated |
-| `client@studio.test` | Client | Harbourline Realty portal user (shared projects and jobs, delivered links, a feedback thread) |
-| `client2@studio.test` | Client | Coastal Key Property portal user; nothing shared yet (empty state), feedback off |
-| `owner@other.test`, `editor@other.test`, `client@other.test` | (second studio) | For tenant-isolation checks |
+| `owner@studio.test` | Mo Carter · Owner | Admin and primary owner: creates jobs, gives them to editors, checks and approves |
+| `photographer01@studio.test` | Priya Nair · Photographer | "Only their own shoots": creates jobs for her shoots, gives them to editors, checks those edits |
+| `editor01@studio.test` | Sam Whitfield · Editor | Usually handles up to 6 jobs |
+| `editor02@studio.test` | Ava Mitchell · Editor | No usual capacity set |
+| `editor03@studio.test` | Lucas Pham · Editor | Usually handles up to 4 jobs (shown "4 of 4" when full) |
+| `client@studio.test` | Sarah Kingsley · Client | Harbourline Realty portal user (shared jobs, delivered links, feedback) — Coastal Key Property has no portal |
+| `owner@other.test` | (second studio) | For tenant-isolation checks |
 
-The full roster is in `src/db/seed/catalog.ts`. The seed runs the real services under a fake clock, so the history, revisions, audit events and metrics are all consistent with each other.
+The 160-job, 25-person fixture is still available as `SEED_PROFILE=full` (the full roster is in `src/db/seed/catalog.ts`). Both seeds run the real services under a fake clock, so history, revisions, audit events and the editors' numbers are consistent with each other.
 
 ## Scripts
 
@@ -79,7 +79,7 @@ The full roster is in `src/db/seed/catalog.ts`. The seed runs the real services 
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint (flat config) |
 | `npm run test` | Vitest unit and integration tests (`src/**/*.test.ts`) |
-| `npm run e2e` | Playwright (`e2e/`; starts its own dev server on :3100 with `data/pglite-e2e`) |
+| `npm run e2e` | Playwright (`e2e/`; starts its own dev server on :3100 with `data/pglite-e2e`, small demo seed) |
 | `npm run db:reset` | Dev only (local PGlite; refuses when `DATABASE_URL` is set): delete `./data/pglite`, migrate (schema + guards), seed, verify |
 | `npm run db:migrate` · `db:seed` · `db:verify` | Individual steps (`db:seed` refuses to run if data already exists) |
 | `npm run db:migrate:remote` · `db:seed:remote [-- --wipe]` · `db:verify:remote` | Supabase maintenance; reads `.env.supabase` (never committed) — see [Supabase](#supabase-production-database) |
@@ -98,7 +98,7 @@ src/server/queries/*              read models for pages (org-scoped, visibility-
 src/server/auth/*                 session, passwords, the permission POLICY (can / visibleJobsWhere)
 src/server/page.ts                page helpers: pageContext, guard, allowed, load, param(s)
 src/components/ui · shell         design-system primitives and the app chrome
-src/components/<feature>          feature components (jobs, work-table, job-detail, kanban, dashboard, …)
+src/components/<feature>          feature components (home, jobs-list, job-simple, editors, my-jobs, settings, production, …; the old All Work / My Work / Dashboard / tabbed job page components were deleted)
 src/lib/*                         pure helpers, types, constants, validation, dates (org timezone)
 src/db/*                          schema, client, guard triggers, seed, verify
 ```
@@ -108,8 +108,8 @@ Conventions that matter when adding a page:
 - **Data**: pages are async Server Components that call `pageContext()`, then `guard(ctx, action)`, then `load(() => query(db, ctx, …))`. Interactivity lives in small `"use client"` islands that call the REST API through `src/lib/api-client.ts` and then `router.refresh()`. Filters, sort and tabs live in URL search params.
 - **Writes**: send `expectedVersion`. A `409` opens the shared `ConflictDialog`; validation errors map to fields.
 - **Real status codes**: a segment's `loading.tsx` starts streaming, after which the status is locked at 200. So permission and existence gates that should return a real 403/404 sit in a `layout.tsx` above the loading boundary (see `jobs/[id]/layout.tsx`, `settings/*/layout.tsx`). List pages whose segment has child routes keep their `page`/`loading`/`error` in a `(list)` route group, so the list skeleton does not wrap the children.
-- **Shared UI**: status, priority, due, person, workload and capacity display pieces and all job actions are in `@/components/jobs`. Filters are in `@/components/filters` and `SectionCard`/`StatTile`/`RouteError` are in `@/components/common`. Reuse them rather than writing local copies.
-- **Navigation**: `src/config/nav.ts` items carry an optional `gate` (`admin`, `createJobs`, `createClients`, `teamWork`, `directory`, `teamWorkloads`, `analytics`) computed server-side by `navGatesFor(ctx)` (`src/server/nav-gates.ts`); for example a team member with "See analytics" sees Insights. Clients use `portalNavigation` in `src/app/portal`.
+- **Shared UI**: the five-stage visuals (`StagePill`, `StageDot`, `RoundBadge`, `RushBadge`, `WaitingOn`) live in `@/components/jobs/stage-pill`, the plain due chip (`SimpleDueChip`) in `@/components/jobs-list`, and every job action dialog/button (`AssignEditorDialog`, `SendForCheckingDialog`, `ApproveButton`, `AskForChangesDialog`, `ReopenDialog`, …) in `@/components/job-simple`. `SectionCard`/`EmptyState`/`RouteError` are in `@/components/common` and `@/components/ui`. Reuse them rather than writing local copies; the legacy pills in `@/components/jobs` are for Advanced screens only.
+- **Navigation**: `src/config/nav.ts` items carry an optional `gate` (`photographer`, `editor`, `admin`, `createJobs`, `newJob`, `advanced`, …) computed server-side by `navGatesFor(ctx)` (`src/server/nav-gates.ts`). Owners see Home · Jobs · Editors · Clients · Settings, extra photographers Home · Jobs · Clients, editors My jobs · Calendar; the Advanced group appears only while Settings → Studio → Advanced tools is on. Hidden pages are blocked server-side (`requireAdvanced` / `redirectUnlessAdvanced`, `src/server/page.ts`) and hidden APIs 404 (`src/app/api/_lib/advanced.ts`). Clients use `portalNavigation` in `src/app/portal`.
 
 ## Supabase (production database)
 
@@ -161,8 +161,8 @@ Two ways to run it:
 | Own server (default) | `npm run e2e` | Playwright resets `data/pglite-e2e` (`npm run e2e:prepare`: delete → migrate → seed → verify), starts `next dev` on **:3100** against it, runs both projects. If something already listens on :3100 it is reused **without** a reset — stop it, or run `npm run e2e:prepare` first. |
 | Existing server | `E2E_BASE_URL=http://localhost:3000 npx playwright test` | No server is started and no database is reset: specs create every job, client and user they need through the API, so they also run against a shared, already-seeded dev server. |
 
-- Projects: `desktop` (1440×900, every spec except `mobile.spec.ts`) and `mobile` (390×844 touch, `mobile.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/kanban.spec.ts`.
+- Projects: `desktop` (1440×900, every spec except `mobile.spec.ts`) and `mobile` (390×844 touch, `mobile.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/simple-owner-flow.spec.ts`.
 - One worker, no retries by default (`E2E_RETRIES=n` to allow some). Pages wait for hydration and the dev-server HMR socket is muted so other people's edits cannot reload a page mid-test (`E2E_KEEP_HMR=1` to keep it).
 - Output: `test-results/` and `playwright-report/` (`npx playwright show-report`); override with `E2E_OUTPUT_DIR` / `E2E_REPORT_DIR` when several runs share a checkout.
-- Layout: `e2e/api.ts` (server URL, seeded accounts, REST client and data factories), `e2e/fixtures.ts` (role fixtures — `test.use({ role: "editor" })`, `api`, `apiAs`, `pageAs`, `loginAs`, `pageWithState` — plus UI/layout helpers), one spec per area of spec §40 (`auth`, `permissions`, `job-create`, `assignment`, `status-flow`, `kanban`, `revisions`, `comments`, `links`, `notifications`, `activity-audit`, `filters-search`, `calendar-timeline`, `dashboard`, `edge-cases`, `mobile`), the roles v2 personas (`roles-owner`, `roles-team-photographer`, `roles-editor`, `client-portal`, `stacking`) and `regression-*.spec.ts` for audit regressions.
+- Layout: `e2e/api.ts` (server URL, seeded accounts, REST client and data factories built on the simple routes), `e2e/fixtures.ts` (role fixtures — `test.use({ role: "editor" })`, `api`, `apiAs`, `pageAs`, `loginAs`, `pageWithState` — plus UI/layout helpers), the simplified-product specs (`simple-owner-flow`, `simple-editor`, `jobs-page`, `editors-page`, `settings`, `notifications-defaults`, `redirects`, `nav-per-role`, `self-approval`, `advanced`, `mobile`), the kept area specs (`auth`, `permissions`, `assignment`, `revisions`, `comments`, `links`, `activity-audit`, `edge-cases`, `client-portal`, `stacking`) and `regression-*.spec.ts` for audit regressions. Screenshots of the simplified screens live in `docs/screenshots/simple/` (desktop 1440×900 and phone 390×844).
 - Seeded accounts are only ever signed in through their own cookie jars; tests that log out, deactivate or anonymise users invite their own.

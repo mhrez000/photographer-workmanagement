@@ -58,8 +58,8 @@ describe("memberAccessSummary (docs/ROLES.md §2.2 live sentence)", () => {
 });
 
 describe("editorAccessSummary", () => {
-  it("defaults: create jobs only", () => {
-    expect(editorAccessSummary(EDITOR_INVITE_DEFAULTS)).toBe("They'll edit the jobs assigned to them and can: create jobs for a photographer.");
+  it("defaults: nothing extra (editors cannot add jobs by default, plan §2)", () => {
+    expect(editorAccessSummary(EDITOR_INVITE_DEFAULTS)).toBe("They'll see and edit only the jobs assigned to them.");
   });
   it("both on", () => {
     expect(editorAccessSummary({ canCreateJobs: true, canViewTeamJobs: true })).toContain("see other editors' jobs (read-only)");

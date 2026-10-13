@@ -24,7 +24,7 @@ export function ErrorState({
   onRetry,
   retryLabel = "Try again",
   homeHref,
-  homeLabel = "Back to dashboard",
+  homeLabel = "Go home",
   digest,
   size = "md",
   className,

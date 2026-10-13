@@ -80,13 +80,29 @@ export function projectUser(row: User, ctx: AuthContext, primaryOwnerId: string 
   return reducedUser(row, primaryOwnerId);
 }
 
-/** `GET /api/users?role&active&q` (user.view; reduced projection and staff only for non-admins). */
+/**
+ * `GET /api/users?role&active&q` (user.view; reduced projection and staff only for non-admins).
+ * Editors without "See other editors' jobs" / team.view_members get only the people on their own
+ * jobs (the photographers and creators) plus themselves — never the studio's roster (plan §3).
+ */
 export async function listUsers(db: DbLike, ctx: AuthContext, input: unknown = {}): Promise<(UserProfile | ReducedUser)[]> {
   assertCan(ctx, "user.view");
   const admin = isAdmin(ctx);
   const f = admin ? parseInput(UserListFiltersSchema, input ?? {}) : parseInput(StaffUserListFiltersSchema, input ?? {});
   const parts: (SQL | undefined)[] = [eq(users.organisationId, ctx.organisationId)];
   if (!admin) parts.push(inArray(users.role, [...STAFF_ROLES]));
+  if (!admin && ctx.role === "editor" && ctx.userId && !can(ctx, "team.view_members")) {
+    const own = await db
+      .select({ photographerId: jobs.photographerId, createdByUserId: jobs.createdByUserId })
+      .from(jobs)
+      .where(and(eq(jobs.organisationId, ctx.organisationId), eq(jobs.editorId, ctx.userId)));
+    const ids = new Set<string>([ctx.userId]);
+    for (const j of own) {
+      if (j.photographerId) ids.add(j.photographerId);
+      ids.add(j.createdByUserId);
+    }
+    parts.push(inArray(users.id, [...ids]));
+  }
   if (f.role) parts.push(eq(users.role, f.role));
   if (f.active === "1" || f.active === "true") parts.push(eq(users.isActive, true));
   if (f.active === "0" || f.active === "false") parts.push(eq(users.isActive, false));

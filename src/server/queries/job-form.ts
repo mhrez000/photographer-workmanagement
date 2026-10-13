@@ -6,9 +6,9 @@
  * photographer of the organisation, else the primary owner. Only ids are
  * returned: names come from the photographer options the form loads anyway.
  */
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { first, type DbLike } from "@/db/index";
-import { organisationSettings, users } from "@/db/schema";
+import { jobTypes, jobs, organisationSettings, users } from "@/db/schema";
 import type { AuthContext } from "@/lib/types";
 import { assertCan } from "@/server/auth/permissions";
 
@@ -45,4 +45,32 @@ export async function getJobFormDefaults(db: DbLike, ctx: AuthContext): Promise<
   const primaryOwnerId = settings?.primaryOwnerUserId ?? null;
   const configured = await activePhotographer(db, ctx, settings?.defaultPhotographerUserId ?? null);
   return { defaultPhotographerId: configured ?? (await activePhotographer(db, ctx, primaryOwnerId)), primaryOwnerId };
+}
+
+/**
+ * "Type of shoot defaults to the last one used" (SIMPLIFICATION-PLAN §5): the job type of the most recent
+ * job the viewer created, else the organisation's most recent job, else null (the form then picks the
+ * first type). Archived types are skipped so the default is always selectable.
+ */
+export async function getLastUsedJobTypeId(db: DbLike, ctx: AuthContext): Promise<string | null> {
+  assertCan(ctx, "job.create");
+  const pick = async (mine: boolean): Promise<string | null> => {
+    const row = await first(
+      db
+        .select({ jobTypeId: jobs.jobTypeId })
+        .from(jobs)
+        .innerJoin(jobTypes, eq(jobTypes.id, jobs.jobTypeId))
+        .where(
+          and(
+            eq(jobs.organisationId, ctx.organisationId),
+            isNull(jobTypes.archivedAt),
+            mine && ctx.userId ? eq(jobs.createdByUserId, ctx.userId) : undefined,
+          ),
+        )
+        .orderBy(desc(jobs.createdAt), desc(jobs.id))
+        .limit(1),
+    );
+    return row?.jobTypeId ?? null;
+  };
+  return (await pick(true)) ?? (await pick(false));
 }

@@ -35,7 +35,7 @@ import { KANBAN_COLUMN_META, KANBAN_COLUMNS, type KanbanColumn } from "@/lib/con
 import type { KanbanCard, KanbanColumnView, KanbanDropResponse, KanbanMoveOption } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { KanbanCardView } from "./kanban-card";
-import { columnColour, kanbanLimitKey, type BoardColumnKey } from "./shared";
+import { columnLabelParts, columnStage, columnTone, kanbanLimitKey, type BoardColumnKey } from "./shared";
 
 /* ------------------------------------------------------------------ */
 /*  Types + helpers                                                    */
@@ -69,6 +69,33 @@ const columnOfDropId = (id: unknown): KanbanColumn | null => {
 };
 
 const labelOf = (column: BoardColumnKey) => (column === "cancelled" ? "Cancelled" : KANBAN_COLUMN_META[column].label);
+
+/**
+ * A column's name drawn exactly like the stage pill on the Jobs list (same tone
+ * classes, dot and "· sub-label"), so the Advanced board reads like everywhere
+ * else (SIMPLIFICATION-PLAN §4, §8). `size="md"` for column headers, `sm` for
+ * the phone jump chips.
+ */
+function ColumnPill({ column, size = "sm", className, children }: { column: BoardColumnKey; size?: "sm" | "md"; className?: string; children?: React.ReactNode }) {
+  const tone = columnTone(column);
+  const { stage, sub } = columnLabelParts(column);
+  return (
+    <span
+      className={cn(
+        "inline-flex max-w-full items-center gap-1.5 rounded-full font-medium whitespace-nowrap",
+        size === "sm" ? "h-6 px-2 text-xs" : "h-7 px-2.5 text-sm",
+        tone.pill,
+        className,
+      )}
+      data-stage={columnStage(column)}
+    >
+      <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", tone.dot)} />
+      <span className="truncate">{stage}</span>
+      {sub ? <span className="truncate font-normal opacity-80">· {sub}</span> : null}
+      {children}
+    </span>
+  );
+}
 
 /** Pointer first (precise), then rectangle overlap (keyboard drags have no pointer). */
 const collision: CollisionDetection = (args) => {
@@ -322,18 +349,13 @@ export function KanbanBoard({ columns, cancelled, asOf, timeZone, pageSize }: Ka
 
   return (
     <>
-      {/* Mobile column jump bar (thumb-reachable column switcher). */}
+      {/* Mobile column jump bar (thumb-reachable column switcher); the chips are the stage pills with a count. */}
       <nav aria-label="Jump to column" className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 scrollbar-none md:hidden">
         {visible.map((column) => (
-          <button
-            key={column}
-            type="button"
-            onClick={() => jumpTo(column)}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-3 text-xs font-medium text-ink-secondary focus-ring"
-          >
-            <span aria-hidden="true" className="size-1.5 rounded-full" style={{ backgroundColor: columnColour(column) }} />
-            {labelOf(column)}
-            <span className="numeric text-ink-subtle">{state[column].count}</span>
+          <button key={column} type="button" onClick={() => jumpTo(column)} aria-label={`${labelOf(column)}, ${state[column].count}`} className="shrink-0 rounded-full focus-ring">
+            <ColumnPill column={column} size="md">
+              <span className="numeric font-normal opacity-80">{state[column].count}</span>
+            </ColumnPill>
           </button>
         ))}
       </nav>
@@ -411,7 +433,7 @@ interface BoardColumnProps {
 function BoardColumn({ column, cards, count, timeZone, pending, activeCard, activeFrom, isOver, pageSize, onLoadMore, loadingMore }: BoardColumnProps) {
   const droppable = column !== "cancelled";
   const { setNodeRef } = useDroppable({ id: `${COLUMN_DROP_PREFIX}${column}`, disabled: !droppable });
-  const colour = columnColour(column);
+  const tone = columnTone(column);
 
   const dragging = activeCard !== null;
   const isOrigin = activeFrom === column;
@@ -436,11 +458,10 @@ function BoardColumn({ column, cards, count, timeZone, pending, activeCard, acti
       )}
     >
       <header className="relative px-3 pb-2.5 pt-3">
-        <span aria-hidden="true" className="absolute inset-x-3 top-0 h-0.5 rounded-b-full" style={{ backgroundColor: colour }} />
+        <span aria-hidden="true" className={cn("absolute inset-x-3 top-0 h-0.5 rounded-b-full", tone.dot)} />
         <div className="flex items-center justify-between gap-2">
-          <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
-            <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colour }} />
-            <span className="truncate">{labelOf(column)}</span>
+          <h2 className="flex min-w-0 items-center">
+            <ColumnPill column={column} size="md" />
           </h2>
           <span className="numeric rounded-full bg-surface px-2 py-0.5 text-xs font-semibold text-ink-secondary ring-1 ring-inset ring-border">
             {count}

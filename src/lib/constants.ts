@@ -61,7 +61,9 @@ export function personaLabel(user: { role: Role; isAdmin?: boolean | null }): st
 export function displayRoleLabel(user: { role: Role; isAdmin?: boolean | null; title?: string | null }): string {
   const base = personaLabel(user);
   const title = user.title?.trim();
-  return title ? `${base} · ${title}` : base;
+  // A title that only repeats the persona ("Editor · Editor", "Owner / Photographer · Owner / Photographer") adds nothing.
+  if (!title || title.toLowerCase() === base.toLowerCase() || base.toLowerCase().split(" / ").includes(title.toLowerCase())) return base;
+  return `${base} · ${title}`;
 }
 
 /**
@@ -202,9 +204,9 @@ export const EDITOR_FLAG_META: Record<EditorFlag, PermissionFlagMeta> = {
   canCreateJobs: {
     key: "canCreateJobs",
     column: "can_create_jobs",
-    label: "Create jobs",
-    description: "Can create jobs (with a photographer) and pick up jobs they created.",
-    inviteDefault: true,
+    label: "Can add their own jobs",
+    description: "Can add jobs (naming the photographer) and pick up jobs they added. Off by default (SIMPLIFICATION-PLAN §2); existing editors keep what they have.",
+    inviteDefault: false,
     migratedDefault: true,
     short: "create",
   },
@@ -375,13 +377,16 @@ export const CLIENT_MILESTONE_CANCELLED_LABEL = "Cancelled";
 export const PORTAL_CANCELLED_VISIBLE_DAYS = 30;
 
 export const KANBAN_COLUMN_META: Record<KanbanColumn, { label: string; categories: readonly StatusCategory[] }> = {
-  new: { label: "New", categories: ["new", "ready"] },
-  assigned: { label: "Assigned", categories: ["assigned", "accepted"] },
-  in_progress: { label: "In Progress", categories: ["in_progress"] },
-  review: { label: "Review", categories: ["submitted", "review", "resubmitted"] },
-  revision: { label: "Revision", categories: ["revision"] },
-  approved: { label: "Approved", categories: ["approved", "delivered"] },
-  completed: { label: "Completed", categories: ["completed"] },
+  // Labels use the five stage words (SIMPLIFICATION-PLAN §4, §8): the Board is an Advanced tool, but it
+  // must read the same as the Jobs list. "With editor" and "Done" keep their sub-labels as two columns
+  // so a drop still maps onto one status category.
+  new: { label: "Needs editor", categories: ["new", "ready"] },
+  assigned: { label: "With editor · Not started", categories: ["assigned", "accepted"] },
+  in_progress: { label: "With editor · Editing", categories: ["in_progress"] },
+  review: { label: "Ready to check", categories: ["submitted", "review", "resubmitted"] },
+  revision: { label: "Changes asked", categories: ["revision"] },
+  approved: { label: "Done · Not sent to client", categories: ["approved", "delivered"] },
+  completed: { label: "Done", categories: ["completed"] },
 };
 
 /* ------------------------------------------------------------------ */

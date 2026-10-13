@@ -9,8 +9,6 @@ import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { ViewScope } from "@/lib/constants";
-import { ScopeSwitch } from "./scope-switch";
 import { UserMenu } from "./user-menu";
 import type { ShellUser } from "./types";
 
@@ -26,13 +24,11 @@ export interface TopbarProps {
   isMac: boolean;
   onOpenMenu: () => void;
   onOpenSearch: () => void;
+  /** "+ New job" when the gate allows (plan §3). */
   primaryAction?: QuickAction;
   logoutAction: string;
-  /**
-   * Personal vs business view (docs/ROLES.md §8): the resolved scope for viewers
-   * who may switch (`view.business_scope`), else null/undefined (no switch).
-   */
-  viewScope?: ViewScope | null;
+  /** Show the hamburger on phones. Off when the bottom tab bar already offers More / Search (plan §3). */
+  menuButton?: boolean;
 }
 
 function formatCount(count: number): string {
@@ -40,20 +36,13 @@ function formatCount(count: number): string {
   return String(count);
 }
 
-/** Sticky header: menu (mobile), breadcrumb, search, bell, New job, account. */
-export function Topbar({
-  user,
-  unreadCount,
-  match = null,
-  heading,
-  title,
-  isMac,
-  onOpenMenu,
-  onOpenSearch,
-  primaryAction,
-  logoutAction,
-  viewScope = null,
-}: TopbarProps) {
+/**
+ * Sticky header (docs/SIMPLIFICATION-PLAN.md §3): menu (phones), where you are,
+ * Search (Ctrl K), + New job, the bell and your avatar (My account, Help, Log out).
+ * The old "My shoots / Whole business" switch is gone: everyone sees everything
+ * they are allowed to.
+ */
+export function Topbar({ user, unreadCount, match = null, heading, title, isMac, onOpenMenu, onOpenSearch, primaryAction, logoutAction, menuButton = true }: TopbarProps) {
   const resolved = heading ?? (match ? { title: match.item.label, eyebrow: match.group.label } : null);
   const eyebrow = resolved?.eyebrow;
   const pageTitle = title ?? resolved?.title ?? "Proofline";
@@ -66,9 +55,11 @@ export function Topbar({
         "bg-canvas/85 backdrop-blur supports-[backdrop-filter]:bg-canvas/75",
       )}
     >
-      <IconButton label="Open navigation" onClick={onOpenMenu} className="lg:hidden" variant="ghost">
-        <Menu />
-      </IconButton>
+      {menuButton ? (
+        <IconButton label="Open navigation" onClick={onOpenMenu} className="lg:hidden" variant="ghost">
+          <Menu />
+        </IconButton>
+      ) : null}
 
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         {eyebrow ? (
@@ -84,7 +75,6 @@ export function Topbar({
       </div>
 
       <div className="flex items-center gap-1 sm:gap-1.5">
-        {viewScope ? <ScopeSwitch scope={viewScope} className="mr-1 hidden md:inline-flex" /> : null}
         <button
           type="button"
           onClick={onOpenSearch}
@@ -92,8 +82,6 @@ export function Topbar({
           aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
           className={cn(
             "hidden h-9 w-56 items-center gap-2 rounded-md border border-border bg-surface px-3 text-sm text-ink-muted shadow-xs md:flex xl:w-72",
-            // Leave room for the scope switch on tablet widths.
-            viewScope && "w-40 lg:w-48",
             "transition-[border-color,box-shadow] duration-(--motion-fast) hover:border-border-hover hover:text-ink focus-ring",
           )}
         >
@@ -105,7 +93,7 @@ export function Topbar({
           <Search />
         </IconButton>
 
-        <Tooltip content={unreadCount > 0 ? `${unreadCount} unread notifications` : "Notifications"} side="bottom">
+        <Tooltip content={unreadCount > 0 ? `${unreadCount} unread` : "Notifications"} side="bottom">
           <Link
             href="/notifications"
             aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
@@ -125,12 +113,7 @@ export function Topbar({
 
         {primaryAction ? (
           <>
-            <Button
-              href={primaryAction.href}
-              size="sm"
-              leadingIcon={<PrimaryIcon aria-hidden="true" />}
-              className="hidden sm:inline-flex"
-            >
+            <Button href={primaryAction.href} size="sm" leadingIcon={<PrimaryIcon aria-hidden="true" />} className="hidden sm:inline-flex" data-topbar-new-job="">
               {primaryAction.label}
             </Button>
             <IconButton label={primaryAction.label} href={primaryAction.href} variant="primary" size="md" className="sm:hidden">
@@ -139,7 +122,7 @@ export function Topbar({
           </>
         ) : null}
 
-        <UserMenu user={user} logoutAction={logoutAction} viewScope={viewScope} nameFrom={viewScope ? "xl" : "sm"} className="ml-0.5" />
+        <UserMenu user={user} logoutAction={logoutAction} className="ml-0.5" />
       </div>
     </header>
   );

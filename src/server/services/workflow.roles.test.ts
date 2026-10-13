@@ -374,3 +374,73 @@ describe("actor checks run before version and state checks (403, never 409 / 422
     for (const j of [completed, working, own, cancelled]) expect((await jobRow(j.id)).version).toBe(j.version);
   });
 });
+
+describe("a PAST editor's stale page is a 409, a stranger's a 403 (reviewer finding E2)", () => {
+  const STALE = 999;
+
+  it("the job was moved to someone else: the old editor's stale press is 409 with the current row; with a fresh version the 403 names the new editor; strangers stay 403", async () => {
+    const job = (await insertJobFixture(db, ids, { statusKey: "assigned", editorId: ids.users.editor1 })).job;
+    // The owner changes the editor to Ed: Eve (editor1) is now a past editor and her open tab is stale.
+    const moved = await as("owner", (tx, ctx) => assignEditor(tx, ctx, { jobId: job.id, userId: ids.users.editor2, expectedVersion: job.version, reason: "Changed editor" }));
+    expect(moved.job.editorId).toBe(ids.users.editor2);
+    const attempts: [string, (tx: Tx, ctx: AuthContext) => Promise<unknown>][] = [
+      ["accept", (tx, ctx) => acceptJob(tx, ctx, { jobId: job.id, expectedVersion: job.version })],
+      ["decline", (tx, ctx) => declineJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Away" })],
+      ["start", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, startTimer: false })],
+      ["transition", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, expectedVersion: job.version, toCategory: "in_progress" })],
+    ];
+    for (const [label, fn] of attempts) {
+      const err = await catchErr(as("editor1", fn));
+      expect({ label, status: err.status, code: err.code }).toEqual({ label, status: 409, code: "conflict" });
+      // The 409 carries the row the past editor may read anyway (job.view "past"), so the screen can refresh.
+      expect((err.details as { current: Job }).current).toMatchObject({ id: job.id, version: moved.job.version, editorId: ids.users.editor2 });
+    }
+    // Fresh version, still not the editor: a plain 403 that says where the job went — never "only the assigned editor".
+    const fresh = await catchErr(as("editor1", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: moved.job.version, startTimer: false })));
+    // Eve cannot see other editors (§2.3), so the message does not name Ed either — the page says "Another editor".
+    expect([fresh.status, fresh.code, fresh.message]).toEqual([403, "forbidden", "This job is now with another editor. Nothing to do here."]);
+    // With "See other editors' jobs" the message names the new holder.
+    await setUserFlags(db, ids.users.editor1, { canViewTeamJobs: true });
+    const named = await catchErr(as("editor1", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: moved.job.version, startTimer: false })));
+    expect([named.status, named.message]).toEqual([403, "This job is now with Ed Editor. Nothing to do here."]);
+    await setUserFlags(db, ids.users.editor1, { canViewTeamJobs: false });
+    // The current editor on a stale page: the ordinary optimistic-concurrency 409.
+    expect((await catchErr(as("editor2", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: STALE, startTimer: false })))).status).toBe(409);
+    // A stranger who can read the job (⚑see other editors' jobs) but never held it: 403 even with a stale version, no row.
+    const stranger = await inviteDefaultsMember(db, ids, { key: "strangerEditor" });
+    await db.update(users).set({ role: "editor", canViewTeamJobs: true }).where(eq(users.id, stranger));
+    const denied = await catchErr(asUser(stranger, (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: STALE, startTimer: false })));
+    expect([denied.status, denied.code]).toEqual([403, "forbidden"]);
+    expect(JSON.stringify(denied.details ?? null)).not.toContain("createdByUserId");
+    expect(denied.message).toBe("Only the assigned editor can do this");
+    // A member who can see but does not manage the job (⚑see all jobs): 403 first too (actor before version), never the row.
+    const member = await junior();
+    await setUserFlags(db, member, { canViewAllJobs: true });
+    expect((await catchErr(asUser(member, (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: STALE, startTimer: false })))).status).toBe(403);
+    expect((await jobRow(job.id)).version).toBe(moved.job.version);
+    await expectClean();
+  });
+
+  it("a job handed back (previous_editor_id) counts as past: stale → 409; with nobody on it the fresh 403 says so; restore and resubmit follow the same order", async () => {
+    const job = (await insertJobFixture(db, ids, { statusKey: "assigned", editorId: ids.users.editor1 })).job;
+    const back = await as("editor1", (tx, ctx) => declineJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, reason: "Fully booked" }));
+    expect(back.job).toMatchObject({ editorId: null, previousEditorId: ids.users.editor1, statusCategory: "ready" });
+    // The old tab still shows "Start editing": pressing it is a 409, not a 403.
+    expect((await catchErr(as("editor1", (tx, ctx) => startJob(tx, ctx, { jobId: job.id, expectedVersion: job.version, startTimer: false })))).status).toBe(409);
+    const fresh = await catchErr(as("editor1", (tx, ctx) => acceptJob(tx, ctx, { jobId: job.id, expectedVersion: back.job.version })));
+    expect([fresh.status, fresh.message]).toEqual([403, "This job is no longer with you. Nothing to do here."]);
+    // Restore of a cancelled job: a past editor's stale press is 409, a fresh one 403.
+    const cancelled = await as("owner", (tx, ctx) => transitionJobStatus(tx, ctx, { jobId: job.id, expectedVersion: back.job.version, toCategory: "cancelled", reason: "Dup" }));
+    expect((await catchErr(as("editor1", (tx, ctx) => restoreJob(tx, ctx, { jobId: job.id, expectedVersion: back.job.version, reason: "x" })))).status).toBe(409);
+    expect((await catchErr(as("editor1", (tx, ctx) => restoreJob(tx, ctx, { jobId: job.id, expectedVersion: cancelled.job.version, reason: "x" })))).status).toBe(403);
+    // Resubmit (revision.resolve): the round was reassigned to Ed while Eve's page was open.
+    const review = (await insertJobFixture(db, ids, { statusKey: "review", editorId: ids.users.editor1 })).job;
+    const r = await as("owner", (tx, ctx) => requestRevision(tx, ctx, { jobId: review.id, expectedVersion: review.version, reason: "Colour", description: "Too warm" }));
+    const swapped = await as("owner", (tx, ctx) => assignEditor(tx, ctx, { jobId: review.id, userId: ids.users.editor2, expectedVersion: r.job.version, reason: "Changed editor" }));
+    const stale = await catchErr(as("editor1", (tx, ctx) => resolveRevision(tx, ctx, { revisionId: r.revision.id, expectedVersion: r.job.version })));
+    expect([stale.status, stale.code]).toEqual([409, "conflict"]);
+    const named = await catchErr(as("editor1", (tx, ctx) => resolveRevision(tx, ctx, { revisionId: r.revision.id, expectedVersion: swapped.job.version })));
+    expect([named.status, named.message]).toEqual([403, "This job is now with another editor. Nothing to do here."]);
+    await expectClean();
+  });
+});

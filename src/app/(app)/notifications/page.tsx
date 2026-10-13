@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: "Notifications" };
 
 const PAGE_SIZE = 40;
 
-/** Notification centre (spec §21): Unread / All, grouped by day, mark one or all read. */
+/** Notification centre: Unread / All, grouped by day, mark one or all read. Which kinds you hear about is set in My account. */
 export default async function NotificationsPage({ searchParams }: PageProps<"/notifications">) {
   const sp = await searchParams;
   const filter = param(sp, "filter") === "all" ? "all" : "unread";
@@ -38,8 +38,8 @@ export default async function NotificationsPage({ searchParams }: PageProps<"/no
         actions={
           <>
             <MarkAllReadButton unreadCount={unread} />
-            <Button variant="ghost" href="/settings/notifications" leadingIcon={<Settings2 aria-hidden="true" />}>
-              Settings
+            <Button variant="ghost" href="/settings/account#notifications" leadingIcon={<Settings2 aria-hidden="true" />}>
+              Choose what you hear about
             </Button>
           </>
         }
@@ -74,7 +74,7 @@ export default async function NotificationsPage({ searchParams }: PageProps<"/no
             bordered
             icon={CheckCheck}
             title="You're all caught up"
-            description="New assignments, revision requests, mentions and deadline changes will appear here."
+            description="Jobs given to you, work ready to check, changes asked, approvals, messages and client feedback land here."
             action={
               <Button variant="outline" href="/notifications?filter=all">
                 View all notifications
@@ -86,9 +86,9 @@ export default async function NotificationsPage({ searchParams }: PageProps<"/no
             bordered
             icon={BellOff}
             title="No notifications yet"
-            description="You'll be notified when work is assigned to you, someone mentions you, a revision is requested or a deadline changes."
+            description="You are told when a job is given to you, when something is ready to check, when changes are asked, and when someone writes to you."
             action={
-              <Button variant="outline" href="/settings/notifications">
+              <Button variant="outline" href="/settings/account#notifications">
                 Choose what you hear about
               </Button>
             }

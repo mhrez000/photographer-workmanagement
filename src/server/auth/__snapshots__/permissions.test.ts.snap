@@ -705,8 +705,8 @@ exports[`permissionMatrix > snapshot (persona columns: allowed / scope / switch)
   [
     "advanced.view",
     "any",
-    "while Advanced tools is on; the feature's own permission still applies",
-    "while Advanced tools is on; the feature's own permission still applies",
+    "while Advanced tools is on; the Advanced PAGES are the owner's, hidden fields / APIs (timers, own-row workloads, …) any staff; the feature's own permission still applies",
+    "while Advanced tools is on; the Advanced PAGES are the owner's, hidden fields / APIs (timers, own-row workloads, …) any staff; the feature's own permission still applies",
     "-",
   ],
   [

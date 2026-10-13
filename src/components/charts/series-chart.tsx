@@ -187,30 +187,32 @@ export function SeriesChart({
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <table className="sr-only">
-        <caption>{ariaLabel}</caption>
-        <thead>
-          <tr>
-            <th scope="col">{xLabel ?? "Period"}</th>
-            {series.map((s) => (
-              <th key={s.key} scope="col">
-                {s.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {data.map((d, i) => (
-            <tr key={i}>
-              <th scope="row">{formatCivilLabel(String(d[xKey] ?? ""), dateFormat)}</th>
-              {series.map((s) => {
-                const v = d[s.key];
-                return <td key={s.key}>{formatValue(typeof v === "number" ? v : null, s.format ?? valueFormat)}</td>;
-              })}
+      <div className="sr-only">
+        <table>
+          <caption>{ariaLabel}</caption>
+          <thead>
+            <tr>
+              <th scope="col">{xLabel ?? "Period"}</th>
+              {series.map((s) => (
+                <th key={s.key} scope="col">
+                  {s.label}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data.map((d, i) => (
+              <tr key={i}>
+                <th scope="row">{formatCivilLabel(String(d[xKey] ?? ""), dateFormat)}</th>
+                {series.map((s) => {
+                  const v = d[s.key];
+                  return <td key={s.key}>{formatValue(typeof v === "number" ? v : null, s.format ?? valueFormat)}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </figure>
   );
 }

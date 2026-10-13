@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import type { ReducedUser, UserProfile, UserRef } from "@/lib/types";
 import { getTeamDetail, listTeams } from "@/server/queries/teams";
 import { listUsers } from "@/server/queries/users";
-import { allowed, guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, allowed, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Teams" };
 
@@ -15,7 +15,7 @@ function toRef(u: UserProfile | ReducedUser): UserRef {
 }
 
 export default async function TeamsSettingsPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("teams", "/settings/people"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "settings.view");
   const canManage = allowed(ctx, "team.manage");
   const list = await load(() => listTeams(db, ctx, { includeArchived: canManage ? "1" : undefined }));

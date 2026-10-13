@@ -1,11 +1,11 @@
-import { load, pageContext } from "@/server/page";
+import { advancedPageContext, load } from "@/server/page";
 import { getAutomationDetail } from "@/server/queries/automations";
 
 /** Existence gate above the loading boundary, so an unknown rule gets a real 404 status ("new" is the builder). */
 export default async function Layout({ children, params }: LayoutProps<"/settings/automations/[id]">) {
   const { id } = await params;
   if (id !== "new") {
-    const { ctx, db } = await pageContext();
+    const { ctx, db } = await advancedPageContext("automations", "/settings/studio"); // Advanced gate before any query (see src/server/page.ts)
     await load(() => getAutomationDetail(db, ctx, decodeURIComponent(id)));
   }
   return children;

@@ -13,7 +13,8 @@
  *   changesAsked  one row per round: what, who, when, Fixed / Open
  *   messages      the staff thread (every comment kind but client feedback)
  *   privateNotes  internal + client notes — owners / photographers only
- *   fromClient    client feedback threads — staff only, portal clients only
+ *   fromClient    client feedback threads — staff only, portal clients only, once the job is shared
+ *   deliveryNotes what the client was told with the finished work — staff only
  *   whoDidWhat    short dated list from the ledgers (transitions, assignments,
  *                 revisions): the same facts HISTORY_EVENT_TYPES mirror in the
  *                 audit log, which stays reachable through "Full history"
@@ -100,14 +101,18 @@ export function buildFiles(detail: JobDetail): SimpleFiles {
   return { raw, finished, earlierVersions, other };
 }
 
-/** Description + photographer / editor notes (and delivery / revision notes) as one list, oldest first. */
+/**
+ * Description + photographer / editor notes (and revision notes) as one list, oldest first.
+ * Private notes (internal / client) live in their own tinted box; delivery notes are what the CLIENT
+ * was told with the finished work, so they never read as a brief to the editor (`deliveryNotes`).
+ */
 export function buildInstructions(detail: JobDetail): InstructionItem[] {
   const out: InstructionItem[] = [];
   const description = detail.job.description?.trim();
   if (description) out.push({ source: "description", body: description, author: null, at: detail.job.createdAt, noteId: null });
   for (const n of detail.notes) {
     if (n.archivedAt !== null) continue;
-    if (n.kind === "internal" || n.kind === "client") continue; // private notes live in their own tinted box
+    if (n.kind === "internal" || n.kind === "client" || n.kind === "delivery") continue;
     out.push({ source: n.kind, body: n.body, author: n.author, at: n.createdAt, noteId: n.id });
   }
   // The description always leads; notes follow oldest first.
@@ -261,18 +266,22 @@ export async function getJobPageSimple(db: DbLike, ctx: AuthContext, jobId: stri
   };
 
   const isEditorViewer = ctx.role === "editor";
+  const clientCanSee = job.sharedWithClient === true || job.projectSharedWithClient === true;
+  // Plan §5 ⋯ menu: Change editor / Take back / Cancel belong to ACTIVE stages; Done jobs get Reopen, Cancelled get Restore.
   const permissions: SimpleJobPermissions = {
     canEditDetails: can(ctx, "job.edit_fields", ref),
-    canChangeEditor: can(ctx, "job.assign_editor", ref) && job.editor !== null,
+    canChangeEditor: can(ctx, "job.assign_editor", ref) && job.editor !== null && stage.active,
     canTakeBack: can(ctx, "job.assign_editor", ref) && job.editor !== null && stage.active,
-    canCancel: can(ctx, "job.cancel", ref),
+    canCancel: can(ctx, "job.cancel", ref) && stage.active,
     canRestore: can(ctx, "job.restore", ref) && stage.stage === "cancelled",
     canReopen: stage.stage === "done" && (admin || can(ctx, "job.reopen", ref)),
     canDecline: can(ctx, "job.decline", ref),
     canComment: can(ctx, "comment.add", ref),
     canAddPrivateNote: can(ctx, "note.add", { job: ref, kind: "internal" }) || can(ctx, "note.add", { job: ref, kind: "client" }),
     canReplyToClient: clientHasPortal && can(ctx, "client_feedback.reply", ref),
+    canShareWithClient: clientHasPortal && !isEditorViewer && can(ctx, "job.share_with_client", ref),
   };
+  const clientThreads = detail.comments.filter((c) => c.kind === "client_feedback");
 
   return {
     header: {
@@ -296,7 +305,9 @@ export async function getJobPageSimple(db: DbLike, ctx: AuthContext, jobId: stri
     changesAsked: buildChangesAsked(detail),
     messages: detail.comments.filter((c) => c.kind !== "client_feedback"),
     privateNotes: isEditorViewer ? null : detail.notes.filter((n) => (n.kind === "internal" || n.kind === "client") && n.archivedAt === null),
-    fromClient: isEditorViewer || !clientHasPortal ? null : detail.comments.filter((c) => c.kind === "client_feedback"),
+    // "From the client" only once the client can actually see the job (or has already written).
+    fromClient: isEditorViewer || !clientHasPortal || (!clientCanSee && clientThreads.length === 0) ? null : clientThreads,
+    deliveryNotes: isEditorViewer ? null : detail.notes.filter((n) => n.kind === "delivery" && n.archivedAt === null),
     whoDidWhat: buildWhoDidWhat(detail, tz),
     sideColumn: {
       shootDate: job.shootDate,
@@ -305,7 +316,7 @@ export async function getJobPageSimple(db: DbLike, ctx: AuthContext, jobId: stri
       jobType: job.jobType,
       rush: job.priority === "urgent",
       clientHasPortal,
-      clientCanSee: job.sharedWithClient === true || job.projectSharedWithClient === true,
+      clientCanSee,
     },
     permissions,
     description: job.description,

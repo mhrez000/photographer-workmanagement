@@ -10,7 +10,7 @@ export default function NotificationsError({ error, retry }: { error: Error & { 
         title="Notifications couldn't load"
         message="We couldn't fetch your notifications just now. Try again in a moment."
         onRetry={retry}
-        homeHref="/dashboard"
+        homeHref="/"
         digest={error.digest}
         size="lg"
       />

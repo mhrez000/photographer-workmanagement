@@ -8,7 +8,8 @@
  *                  when the client uses the portal, §12.2; owners who edited
  *                  the job themselves confirm first, §12.3)
  *   needsAttention late · no editor yet (shot before today) · open question
- *                  from an editor · unanswered message from the client
+ *                  from an editor · unanswered message from the client — one
+ *                  row per job, capped (needsAttentionMore says how many more)
  *   yourEditors    owners only — On their desk · Late · On time this month
  *   comingUp       shoots and due dates in the next 7 days
  *
@@ -22,7 +23,8 @@ import type { DbLike } from "@/db/index";
 import { clients, jobComments, jobs, organisationSettings, users } from "@/db/schema";
 import { QUESTION_COMMENT_KINDS } from "@/lib/constants";
 import { addCivilDays, civilDate, endOfCivilDayIso } from "@/lib/dates";
-import type { AuthContext, ComingUpItem, HomeEditorRow, NeedsAttentionRow, OwnerHome, ReadyToCheckCard, UserRef } from "@/lib/types";
+import type { AuthContext, ComingUpItem, HomeEditorRow, NeedsAttentionReason, NeedsAttentionRow, OwnerHome, ReadyToCheckCard, UserRef } from "@/lib/types";
+import { STAGE_META } from "@/lib/stages";
 import { can, isAdmin, workedOnJob } from "@/server/auth/permissions";
 import { loadJobRefs } from "@/server/auth/job-ref";
 import { ForbiddenError } from "@/server/errors";
@@ -33,6 +35,9 @@ import { assertStaffRead, type OrgDayBounds } from "./scope";
 import { loadSimplerNoticeDismissedAt } from "./simpleColumns";
 
 export const HOME_LIST_LIMIT = 20;
+/** Needs attention shows at most this many late / no-editor jobs (questions and client messages always show). */
+export const NEEDS_ATTENTION_LIMIT = 10;
+export const NEEDS_ATTENTION_THREADS_LIMIT = 20;
 export const COMING_UP_DAYS = 7;
 export const EXCERPT_LENGTH = 200;
 
@@ -183,24 +188,51 @@ async function waitingThreads(db: DbLike, ctx: AuthContext, jobIds: readonly str
 }
 
 const REASON_ORDER = { late: 0, no_editor: 1, question: 2, client_message: 3 } as const;
+/** Inside one row the reason with the button leads: "No editor yet · 1 day late" [Assign editor]. */
+const IN_ROW_ORDER = { no_editor: 0, late: 1, question: 2, client_message: 3 } as const;
 
-/** One list with plain reasons; empty → "Nothing needs you right now." */
-export async function needsAttentionRows(db: DbLike, ctx: AuthContext, bounds: OrgDayBounds, limit = HOME_LIST_LIMIT): Promise<NeedsAttentionRow[]> {
+export interface NeedsAttention {
+  rows: NeedsAttentionRow[];
+  /** Late / no-editor jobs cut by the cap. */
+  more: number;
+}
+
+/**
+ * One list with plain reasons, ONE ROW PER JOB (a job that is both late and without an editor reads
+ * "No editor yet · 1 day late" and keeps its [Assign editor] button). "with <name>" is only said when
+ * the job is actually with an editor — never "with You" for a job nobody is editing. Late / no-editor
+ * rows are capped at `limit` (the footer links to the Late filter in Jobs); open questions and client
+ * messages always show. Empty → "Nothing needs you right now."
+ */
+export async function needsAttentionRows(db: DbLike, ctx: AuthContext, bounds: OrgDayBounds, limit = NEEDS_ATTENTION_LIMIT): Promise<NeedsAttention> {
   const tz = ctx.settings.timezone;
-  const out: NeedsAttentionRow[] = [];
-  const late = await selectSimpleRows(db, ctx, bounds, { where: lateWhere(bounds), limit });
+  const byJob = new Map<string, NeedsAttentionRow>();
+  const add = (job: NeedsAttentionRow["job"], reason: NeedsAttentionReason, since: string) => {
+    const row = byJob.get(job.id);
+    if (!row) {
+      byJob.set(job.id, { job, reason, also: [], since });
+      return;
+    }
+    const all = [row.reason, ...row.also, reason].sort((a, b) => IN_ROW_ORDER[a.kind] - IN_ROW_ORDER[b.kind]);
+    row.reason = all[0];
+    row.also = all.slice(1);
+    if (since < row.since) row.since = since;
+  };
+
+  const late = await selectSimpleRows(db, ctx, bounds, { where: lateWhere(bounds), orderBy: [asc(jobs.dueDate), asc(jobs.id)], limit: 500 });
   for (const job of late) {
-    out.push({ job, reason: { kind: "late", daysLate: Math.max(1, -(job.due.daysFromToday ?? 0)), withName: job.waitingOn }, since: job.due.dueDate ?? job.statusEnteredAt });
+    const withEditor = STAGE_META[job.stage.stage].waitingOn === "editor" ? (job.editor?.name ?? null) : null;
+    add(job, { kind: "late", daysLate: Math.max(1, -(job.due.daysFromToday ?? 0)), withName: withEditor }, job.due.dueDate ?? job.statusEnteredAt);
   }
   // No editor yet, shot before today (shoot day ≤ yesterday).
   const noEditor = await selectSimpleRows(db, ctx, bounds, {
     where: and(stageWhere("needs_editor"), isNull(jobs.editorId), lte(jobs.shootDate, bounds.startOfToday)) as SQL,
     orderBy: [asc(jobs.shootDate), asc(jobs.id)],
-    limit,
+    limit: 500,
   });
   for (const job of noEditor) {
     const shot = job.shootDate ? civilDate(new Date(Date.parse(job.shootDate) - 1), tz) : null;
-    out.push({ job, reason: { kind: "no_editor", shotCivilDate: shot }, since: job.shootDate ?? job.statusEnteredAt });
+    add(job, { kind: "no_editor", shotCivilDate: shot }, job.shootDate ?? job.statusEnteredAt);
   }
   // Questions / client messages on visible, non-cancelled jobs.
   const openJobs = await selectSimpleRows(db, ctx, bounds, { where: sql`${jobs.statusCategory} <> 'cancelled'`, limit: 2000 });
@@ -208,14 +240,16 @@ export async function needsAttentionRows(db: DbLike, ctx: AuthContext, bounds: O
   for (const t of await waitingThreads(db, ctx, [...byId.keys()])) {
     const job = byId.get(t.jobId);
     if (!job) continue;
-    out.push({
-      job,
-      reason: t.kind === "question" ? { kind: "question", from: t.author, excerpt: t.excerpt, since: t.since } : { kind: "client_message", excerpt: t.excerpt, since: t.since },
-      since: t.since,
-    });
+    add(job, t.kind === "question" ? { kind: "question", from: t.author, excerpt: t.excerpt, since: t.since } : { kind: "client_message", excerpt: t.excerpt, since: t.since }, t.since);
   }
-  out.sort((a, b) => REASON_ORDER[a.reason.kind] - REASON_ORDER[b.reason.kind] || a.since.localeCompare(b.since) || a.job.jobNumber.localeCompare(b.job.jobNumber));
-  return out.slice(0, limit * 2);
+
+  const severity = (r: NeedsAttentionRow) => Math.min(...[r.reason, ...r.also].map((x) => REASON_ORDER[x.kind]));
+  const rows = [...byJob.values()].sort((a, b) => severity(a) - severity(b) || a.since.localeCompare(b.since) || a.job.jobNumber.localeCompare(b.job.jobNumber));
+  const hasThread = (r: NeedsAttentionRow) => [r.reason, ...r.also].some((x) => x.kind === "question" || x.kind === "client_message");
+  const jobRows = rows.filter((r) => !hasThread(r));
+  const threadRows = rows.filter(hasThread).slice(0, NEEDS_ATTENTION_THREADS_LIMIT);
+  const kept = new Set([...jobRows.slice(0, limit), ...threadRows]);
+  return { rows: rows.filter((r) => kept.has(r)), more: Math.max(0, jobRows.length - limit) };
 }
 
 /* ------------------------------------------------------------------ */
@@ -274,11 +308,13 @@ export async function getOwnerHome(db: DbLike, ctx: AuthContext): Promise<OwnerH
       }))
     : null;
 
+  const attention = await needsAttentionRows(db, ctx, bounds);
   return {
     viewer: { id: me, name: viewer?.name ?? "", isAdmin: admin, canReview: admin || ctx.canReviewSubmissions },
     topline: { toCheck, late, needsEditor },
     readyToCheck,
-    needsAttention: await needsAttentionRows(db, ctx, bounds),
+    needsAttention: attention.rows,
+    needsAttentionMore: attention.more,
     yourEditors,
     comingUp: await comingUpItems(db, ctx, bounds),
     simplerNotice: (await loadSimplerNoticeDismissedAt(db, ctx)) === null,

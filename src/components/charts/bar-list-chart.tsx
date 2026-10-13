@@ -123,17 +123,19 @@ export function BarListChart({
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <table className="sr-only">
-        <caption>{ariaLabel}</caption>
-        <tbody>
-          {data.map((d) => (
-            <tr key={d.key}>
-              <th scope="row">{d.label}</th>
-              <td>{formatValue(d.value, valueFormat)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="sr-only">
+        <table>
+          <caption>{ariaLabel}</caption>
+          <tbody>
+            {data.map((d) => (
+              <tr key={d.key}>
+                <th scope="row">{d.label}</th>
+                <td>{formatValue(d.value, valueFormat)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </figure>
   );
 }

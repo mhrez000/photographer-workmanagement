@@ -1,5 +1,5 @@
 import { ListPageSkeleton } from "@/components/production/skeletons";
 
 export default function Loading() {
-  return <ListPageSkeleton columns={7} />;
+  return <ListPageSkeleton columns={4} />;
 }

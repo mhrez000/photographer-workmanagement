@@ -3,9 +3,10 @@ import { BASE_URL, loginApi, type InvitedUser } from "./api";
 import { expect, storageFor, test } from "./fixtures";
 
 /**
- * §40 auth: login success / failure, logout, protected-route redirect, and a
- * deactivated user's live session turning into 401s. Every test signs in as
- * a user it invites, so no seeded account is ever logged out.
+ * Auth: login success / failure, logout, protected-route redirect, and a deactivated user's live
+ * session turning into 401s. Signing in lands each persona on its own home (plan §3): editors on
+ * My jobs, photographers on Home. Every test signs in as a user it invites, so no seeded account is
+ * ever logged out.
  */
 test.use({ role: "anon" });
 
@@ -17,13 +18,25 @@ async function signInThroughForm(page: Page, email: string, password: string) {
 
 const accountMenu = (page: Page, user: InvitedUser) => page.getByRole("button", { name: `Account menu for ${user.user.name}` });
 
-test("login succeeds with valid credentials and lands on the dashboard", async ({ page, api }) => {
-  const user = await api.inviteUser("editor", "Auth ok");
+test("the login page offers the four demo accounts of the small studio", async ({ page }) => {
   await page.goto("/login");
-  await signInThroughForm(page, user.email, user.tempPassword);
+  for (const label of ["Owner", "Photographer", "Editor", "Client"]) await expect(page.getByText(label, { exact: true }).first(), label).toBeVisible();
+  await expect(page.getByText(/manager|team member|workloads/i)).toHaveCount(0);
+});
 
-  await expect(page).toHaveURL(/\/dashboard/);
-  await expect(accountMenu(page, user)).toBeVisible();
+test("an editor signs in and lands on My jobs; a photographer lands on Home", async ({ page, api, pageWithState }) => {
+  const editor = await api.inviteUser("editor", "Auth ok");
+  await page.goto("/login");
+  await signInThroughForm(page, editor.email, editor.tempPassword);
+  await expect(page).toHaveURL(/\/my-jobs/, { timeout: 20_000 });
+  await expect(accountMenu(page, editor)).toBeVisible();
+
+  const photographer = await api.inviteUser("photographer", { label: "Auth home", preset: "own_shoots" });
+  const p = await pageWithState(undefined);
+  await p.goto("/login");
+  await signInThroughForm(p, photographer.email, photographer.tempPassword);
+  await expect(p).toHaveURL(/\/home/, { timeout: 20_000 });
+  await expect(accountMenu(p, photographer)).toBeVisible();
 });
 
 test("login fails with a wrong password and stays on /login with an error", async ({ page, api }) => {
@@ -45,10 +58,10 @@ test("login fails with a wrong password and stays on /login with an error", asyn
 });
 
 test("an unauthenticated visit to a protected route redirects to /login?next= and returns there after sign-in", async ({ page, api }) => {
-  const user = await api.inviteUser("editor", "Auth next");
+  const user = await api.inviteUser("photographer", { label: "Auth next", preset: "own_shoots" });
 
-  await page.goto("/workspace/kanban");
-  await expect(page).toHaveURL(/\/login\?next=%2Fworkspace%2Fkanban/);
+  await page.goto("/jobs");
+  await expect(page).toHaveURL(/\/login\?next=%2Fjobs/);
 
   // Unauthenticated API calls are a JSON 401, not a redirect.
   const res = await page.request.get("/api/jobs");
@@ -56,21 +69,21 @@ test("an unauthenticated visit to a protected route redirects to /login?next= an
   expect((await res.json()).error.code).toBe("unauthorized");
 
   await signInThroughForm(page, user.email, user.tempPassword);
-  await expect(page).toHaveURL(/\/workspace\/kanban/);
+  await expect(page).toHaveURL(/\/jobs/);
 });
 
 test("logout ends the session: protected pages redirect to /login afterwards", async ({ api, pageWithState }) => {
   const user = await api.inviteUser("editor", "Auth logout");
   const page = await pageWithState(await storageFor(user.email, user.tempPassword));
 
-  await page.goto("/dashboard");
+  await page.goto("/my-jobs");
   await accountMenu(page, user).click();
   await page.getByRole("menuitem", { name: "Log out" }).click();
 
   await expect(page).toHaveURL(/\/login/);
   expect((await page.context().cookies()).find((c) => c.name === "pwm_session" && c.value)).toBeUndefined();
 
-  await page.goto("/workspace/my");
+  await page.goto("/my-jobs");
   await expect(page).toHaveURL(/\/login/);
 });
 
@@ -90,7 +103,7 @@ test("a deactivated user's live session gets 401 from the API and is bounced fro
   }
 
   // A browser holding the old cookie is sent to /login?expired=1.
-  await page.goto("/dashboard");
+  await page.goto("/my-jobs");
   await expect(page).toHaveURL(/\/login\?expired=1/);
   await expect(page.getByText(/your session ended/i)).toBeVisible();
 

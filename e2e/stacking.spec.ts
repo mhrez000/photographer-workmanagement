@@ -1,21 +1,19 @@
 import type { Locator, Page } from "@playwright/test";
-import { uniq } from "./api";
-import { UI_TEST_TIMEOUT, accountMenuButton, expect, gotoReady, jobHeading, retrying, test } from "./fixtures";
+import { ROLE_EMAILS, uniq } from "./api";
+import { UI_TEST_TIMEOUT, accountMenuButton, expect, gotoReady, jobHeading, mainNav, retrying, test } from "./fixtures";
 
 /**
- * Stacking order (docs/ROLES.md §11.1; the user's screenshot): on a job page the
- * topbar's account menu used to open BEHIND the sticky job header's action bar
- * (Start / Start timer / Copy ID painted over it). One global z scale fixes it:
- * page-sticky 20 < shell 30 < topbar 40 < popover 50 < toast 100, and no page
- * element may reach the topbar's level.
+ * Stacking order (docs/ROLES.md §11.1): on a job page the topbar's account menu must open ABOVE the
+ * page's sticky parts (the job header and the pinned Next step card on phones). One global z scale:
+ * page-sticky 20 < shell 30 < topbar 40 < popover 50 < toast 100, and no page element may reach the
+ * topbar's level.
  *
- * Each check uses `document.elementFromPoint` at the centre of every item: the
- * element actually painted there must belong to the menu / tooltip / drawer.
+ * Each check uses `document.elementFromPoint` at the centre of every item: the element actually
+ * painted there must belong to the menu / tooltip / drawer.
  */
 
 test.beforeEach(() => test.setTimeout(UI_TEST_TIMEOUT));
 
-/** Asserts that the centre of every `items` element is painted by something inside `container`. */
 async function expectOnTop(page: Page, container: Locator, items: Locator, what: string): Promise<void> {
   const count = await items.count();
   expect(count, `${what}: no items`).toBeGreaterThan(0);
@@ -36,7 +34,6 @@ async function expectOnTop(page: Page, container: Locator, items: Locator, what:
   }
 }
 
-/** Scrolls whichever element scrolls the page (window or the shell's main column). */
 async function scrollPage(page: Page, dy: number): Promise<void> {
   await page.mouse.move(700, 600);
   await page.mouse.wheel(0, dy);
@@ -52,12 +49,11 @@ async function scrollPage(page: Page, dy: number): Promise<void> {
   }, dy);
 }
 
-/** A job whose detail page has a full action bar (Start, timer, Copy ID) and enough content to scroll. */
+/** A job with an editor and enough messages that the page scrolls. */
 async function busyJob(api: import("./api").Api) {
-  const editor = await api.inviteUser("editor", "Stacking");
-  const job = await api.createJob({ name: uniq("Stacking"), editorId: editor.user.id });
-  await api.action(job.id, "accept");
-  for (let i = 0; i < 6; i += 1) await api.addComment(job.id, `E2E stacking comment ${i} — padding the page so the header sticks.`);
+  const editor = await api.userByEmail(ROLE_EMAILS.editor);
+  const job = await api.createJob({ name: uniq("Stacking"), editorId: editor.id });
+  for (let i = 0; i < 8; i += 1) await api.addComment(job.id, `E2E stacking message ${i} — padding the page so the header sticks.`);
   return job;
 }
 
@@ -70,21 +66,9 @@ async function openAccountMenu(page: Page): Promise<Locator> {
   return menu;
 }
 
-/** The nearest `position: sticky` ancestor of the job heading (the job header block). */
-async function stickyHeaderZ(page: Page): Promise<{ position: string; zIndex: number } | null> {
-  return jobHeading(page).evaluate((h) => {
-    for (let el: HTMLElement | null = h as HTMLElement; el; el = el.parentElement) {
-      const cs = getComputedStyle(el);
-      if (cs.position === "sticky" || cs.position === "fixed") return { position: cs.position, zIndex: Number(cs.zIndex) || 0 };
-    }
-    return null;
-  });
-}
-
-/** No element inside <main> may sit at or above the topbar's layer (§11.1). */
+/** No element inside <main> may sit at or above the topbar's layer. */
 async function expectNothingInMainAtTopbarLevel(page: Page, where: string): Promise<void> {
   const offenders = await page.evaluate(() => {
-    // The topbar: the <header> outside any sectioning element (the page's banner landmark).
     const topbar = Array.from(document.querySelectorAll("header")).find((h) => !h.closest("main, article, aside, nav, section")) ?? null;
     const topZ = topbar ? Number(getComputedStyle(topbar).zIndex) || 0 : 0;
     const out: string[] = [];
@@ -104,97 +88,86 @@ async function expectNothingInMainAtTopbarLevel(page: Page, where: string): Prom
 test.describe("at 1280×800", () => {
   test.use({ viewport: { width: 1280, height: 800 } });
 
-  test("the topbar account menu opens above the sticky job header and every item is clickable", async ({ page, api }) => {
+  test("the topbar account menu opens above the job page and every item is clickable", async ({ page, api }) => {
     const job = await busyJob(api);
     await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
     await scrollPage(page, 700);
-
-    // The layering itself: topbar (40) above the job header (20).
     const banner = page.getByRole("banner");
-    const topbarZ = await banner.evaluate((el) => Number(getComputedStyle(el).zIndex));
-    const header = await stickyHeaderZ(page);
-    expect(topbarZ).toBe(40);
-    expect(header, "job header is sticky on desktop").not.toBeNull();
-    expect(header!.zIndex).toBeLessThan(topbarZ);
+    expect(await banner.evaluate((el) => Number(getComputedStyle(el).zIndex))).toBe(40);
     await expectNothingInMainAtTopbarLevel(page, `/jobs/${job.id}`);
 
     const menu = await openAccountMenu(page);
     await expectOnTop(page, menu, menu.getByRole("menuitem"), "account menu");
-    // The header's own buttons sit under the menu, not over it.
-    await expect(page.getByRole("main").getByRole("button", { name: /^(Start|Accept)/ }).first()).toBeVisible();
-
-    // A real click on an item lands (no "element intercepts pointer events").
-    await menu.getByRole("menuitem", { name: "Your profile" }).click();
-    await expect(page).toHaveURL(/\/settings\/profile/);
+    await menu.getByRole("menuitem", { name: "My account" }).click();
+    await expect(page).toHaveURL(/\/settings\/account/);
   });
 
-  test("the job header's own menu is not covered by the topbar when scrolled", async ({ page, api }) => {
+  test("the job page's ⋯ menu is not covered by the topbar when scrolled", async ({ page, api }) => {
     const job = await busyJob(api);
     await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
     await scrollPage(page, 700);
-    const trigger = page.getByRole("main").getByRole("button", { name: "More actions" }).first();
+    const trigger = page.getByRole("main").getByRole("button", { name: /^(More actions|More)$/ }).first();
     const menu = page.getByRole("menu").first();
     await retrying(async () => {
       if (!(await menu.isVisible())) await trigger.click({ timeout: 5_000 });
       await expect(menu).toBeVisible({ timeout: 3_000 });
     });
-    await expectOnTop(page, menu, menu.getByRole("menuitem"), "job header menu");
+    await expectOnTop(page, menu, menu.getByRole("menuitem"), "job ⋯ menu");
     await page.keyboard.press("Escape");
     await expect(menu).toBeHidden();
   });
 
   test("the collapsed rail's tooltip paints above the topbar and the page", async ({ page }) => {
-    await gotoReady(page, "/dashboard", page.getByRole("navigation", { name: "Main" }));
+    await gotoReady(page, "/home", mainNav(page));
     const collapse = page.getByRole("button", { name: "Collapse sidebar" });
     await retrying(async () => {
       if (await collapse.isVisible()) await collapse.click({ timeout: 5_000 });
       await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible({ timeout: 3_000 });
     });
-
-    const firstItem = page.getByRole("navigation", { name: "Main" }).getByRole("link").first();
+    const firstItem = mainNav(page).getByRole("link").first();
     const tooltip = page.getByRole("tooltip").filter({ visible: true });
     await retrying(async () => {
       await page.mouse.move(0, 0);
       await firstItem.hover({ timeout: 5_000 });
       await expect(tooltip).toHaveCount(1, { timeout: 3_000 });
     });
-    // Portaled to the document root (outside the sidebar's stacking context).
     expect(await tooltip.evaluate((el) => el.parentElement === document.body)).toBe(true);
-    // The tooltip is pointer-events:none; make it hit-testable for the paint-order check only.
     await tooltip.evaluate((el) => {
       (el as HTMLElement).style.pointerEvents = "auto";
     });
     await expectOnTop(page, tooltip, tooltip, "rail tooltip");
-
-    await page.getByRole("button", { name: "Expand sidebar" }).click();
+    // Restore the rail (force: the `next dev` overlay portal sometimes sits over the corner).
+    await page.getByRole("button", { name: "Expand sidebar" }).click({ force: true });
   });
 });
 
 test.describe("at 390×844", () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  test("the account menu opens above the job page and its fixed action bar", async ({ page, api }) => {
+  test("the account menu opens above the job page and its pinned next step", async ({ page, api }) => {
     const job = await busyJob(api);
     await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
     await scrollPage(page, 500);
     await expectNothingInMainAtTopbarLevel(page, `/jobs/${job.id} @390`);
-
     const menu = await openAccountMenu(page);
     await expectOnTop(page, menu, menu.getByRole("menuitem"), "account menu @390");
-    await menu.getByRole("menuitem", { name: "Your profile" }).tap();
-    await expect(page).toHaveURL(/\/settings\/profile/);
+    await menu.getByRole("menuitem", { name: "My account" }).tap();
+    await expect(page).toHaveURL(/\/settings\/account/);
   });
 
-  test("the navigation drawer is the top layer: its first link is the hit target", async ({ page, api }) => {
+  test("the More drawer is the top layer: its first link is the hit target", async ({ page, api }) => {
     const job = await busyJob(api);
     await gotoReady(page, `/jobs/${job.id}`, jobHeading(page));
+    // Phones: the tab bar's More tab replaces the topbar hamburger (UX-09); the drawer is titled "More".
     const bar = page.getByRole("navigation", { name: "Primary" });
-    const drawer = page.getByRole("dialog", { name: "Navigation" });
-    await retrying(async () => {
-      if (!(await drawer.isVisible())) await bar.getByRole("button", { name: "More" }).click({ timeout: 5_000 });
-      await expect(drawer).toBeVisible({ timeout: 3_000 });
-    });
-    // Let the slide-in finish before measuring.
+    const more = bar.getByRole("button", { name: "More" });
+    await expect(page.getByRole("banner").getByRole("button", { name: /open navigation/i })).toHaveCount(0);
+    const drawer = page.getByRole("dialog", { name: "More" });
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+    // Open it ONCE: while the sheet is open it covers the tab bar, so a second click would land on the backdrop and close it.
+    await more.click();
+    await expect(drawer).toBeVisible({ timeout: 5_000 });
+    await expect(more).toHaveAttribute("aria-expanded", "true");
     await expect.poll(async () => Math.round((await drawer.boundingBox())?.x ?? -999)).toBeGreaterThanOrEqual(0);
     const firstLink = drawer.getByRole("link").first();
     await expectOnTop(page, firstLink, firstLink, "drawer first link");

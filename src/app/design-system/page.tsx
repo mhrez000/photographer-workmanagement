@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import {
   AlertCircle,
   ArrowRight,
@@ -136,8 +137,11 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export default function DesignSystemPage() {
+  // Dev-only (SIMPLIFICATION-PLAN §8): src/proxy.ts answers 404 in production, and the page itself does too
+  // so a build that bypasses the proxy (or a direct render) never serves it.
+  if (process.env.NODE_ENV === "production") notFound();
   return (
-    <AppShell user={demoUser} orgName="Northlight Studio" unreadCount={7} navGates={DEMO_NAV_GATES} viewScope="business">
+    <AppShell user={demoUser} orgName="Northlight Studio" unreadCount={7} navGates={DEMO_NAV_GATES}>
       <PageContainer>
         <PageHeader
           eyebrow="Internal"
@@ -342,7 +346,7 @@ export default function DesignSystemPage() {
                 <LoadingButtonDemo />
               </Row>
               <Row label="As links">
-                <Button href="/dashboard">Go to dashboard</Button>
+                <Button href="/home">Go home</Button>
                 <Button href="/jobs" variant="outline">
                   Browse jobs
                 </Button>
@@ -721,7 +725,7 @@ export default function DesignSystemPage() {
               <EmptyState bordered size="sm" title="No results" description="Try a different search or clear the filters." />
               <Card>
                 <CardContent>
-                  <ErrorState homeHref="/dashboard" digest="a1b2c3d4" />
+                  <ErrorState homeHref="/home" digest="a1b2c3d4" />
                 </CardContent>
               </Card>
             </div>

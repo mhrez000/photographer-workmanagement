@@ -19,7 +19,7 @@ import {
 import type { PermissionMatrixCell, PermissionMatrixRow, ReducedUser, UserProfile } from "@/lib/types";
 import { getPermissionMatrix, getSettingsView } from "@/server/queries/settings";
 import { listUsers } from "@/server/queries/users";
-import { guard, load, pageContext } from "@/server/page";
+import { advancedPageContext, guard, load } from "@/server/page";
 
 export const metadata: Metadata = { title: "Roles & permissions" };
 
@@ -140,7 +140,7 @@ function Lines({ label, items, tone }: { label: string; items: string[]; tone: "
 }
 
 export default async function RolesSettingsPage() {
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("permissions", "/settings/people"); // Advanced gate before any query (see src/server/page.ts)
   guard(ctx, "settings.view");
   const rows = await load(() => getPermissionMatrix(ctx));
   const grouped = AREAS.map((area) => ({ area, rows: rows.filter((r) => areaOf(r.action) === area.id) })).filter((g) => g.rows.length > 0);
@@ -283,7 +283,7 @@ export default async function RolesSettingsPage() {
       {grouped.map(({ area, rows: areaRows }) => (
         <SectionCard key={area.id} id={`area-${area.id}`} title={area.label} description={area.description} flush>
           {/* Desktop matrix */}
-          <div className="hidden overflow-x-auto md:block">
+          <div className="relative hidden overflow-x-auto md:block">
             <table className="w-full border-collapse text-sm">
               <thead className="bg-surface-sunken text-left text-2xs font-semibold uppercase tracking-wider text-ink-muted">
                 <tr className="border-b border-border">

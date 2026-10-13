@@ -13,7 +13,7 @@ export interface RouteErrorProps {
 }
 
 /** Shared body for route `error.tsx` boundaries (Next 16 props: `{ error, retry }`). */
-export function RouteError({ error, retry, title, message, homeHref = "/dashboard", homeLabel }: RouteErrorProps) {
+export function RouteError({ error, retry, title, message, homeHref = "/", homeLabel }: RouteErrorProps) {
   return (
     <PageContainer>
       <div className="flex flex-1 items-center justify-center py-16">

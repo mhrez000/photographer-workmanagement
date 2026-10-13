@@ -63,7 +63,7 @@ import { isClientVisible, shareLink } from "./sharing";
 import { userPermissionRef } from "./users";
 import {
   applyMove,
-  assertMayMoveJob,
+  assertMayMoveJobOrStale,
   bulkFailure,
   cancelJob,
   declineJob,
@@ -177,11 +177,15 @@ export interface DeclineJobSimpleResult extends SimpleJobResult {
  * "Can't do this one" (plan §5): the assigned editor hands a not-yet-started job back to Needs editor with
  * a reason (engine edge Assigned → Ready, `job.decline`). Once editing has begun the workflow gives the
  * editor no way back: they ask the photographer to take it back (422 with that message).
+ *
+ * Strangers get 403 first; a PAST editor acting from a stale page (the job was just moved to someone else)
+ * gets 409 → "someone else just changed this job", not a 403 blaming them (`assertMayMoveJobOrStale`).
  */
 export async function declineJobSimple(tx: Tx, ctx: AuthContext, input: unknown): Promise<DeclineJobSimpleResult> {
   const p = parseInput(DeclineJobSimpleInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
+  assertVersion(job, p.expectedVersion);
   requireStage(job, ["with_editor", "changes_asked"], "Can't do this one");
   if (!can(ctx, "job.decline", ref)) {
     if (job.statusCategory !== "assigned" && job.editorId === ctx.userId) {
@@ -243,10 +247,11 @@ async function recordFinishedLink(
 export async function sendForChecking(tx: Tx, ctx: AuthContext, input: unknown): Promise<SendForCheckingResult> {
   const p = parseInput(SendForCheckingInput, input);
   const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  // Strangers 403; a past editor's stale page 409; then the stage and the actor: see declineJobSimple.
+  await assertMayMoveJobOrStale(tx, ctx, loaded, ref, p.expectedVersion);
+  assertVersion(loaded, p.expectedVersion);
   const stage = requireStage(loaded, ["with_editor", "changes_asked"], "Send for checking");
   assertCan(ctx, stage === "changes_asked" ? "revision.resolve" : "job.submit", ref);
-  assertVersion(loaded, p.expectedVersion);
 
   const finishedLink = await recordFinishedLink(tx, ctx, loaded, ref, p.finishedLink, "finishedLink");
   const graph = await loadWorkflowGraph(tx, ctx.organisationId, loaded.workflowId);
@@ -293,7 +298,7 @@ export interface ApproveJobResult extends SimpleJobResult {
 export async function approveJob(tx: Tx, ctx: AuthContext, input: unknown): Promise<ApproveJobResult> {
   const p = parseInput(ApproveJobInput, input);
   const { job: loaded, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, loaded, ref, p.expectedVersion);
   if (selfReviewBlocked(ctx, ref)) throw new ForbiddenError("job.approve", "You can't check your own edit");
   assertCan(ctx, "job.approve", ref);
   requireStage(loaded, ["ready_to_check"], "Approve");
@@ -370,7 +375,7 @@ export interface AskForChangesResult extends SimpleJobResult {
 export async function askForChanges(tx: Tx, ctx: AuthContext, input: unknown): Promise<AskForChangesResult> {
   const p = parseInput(AskForChangesInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
   if (selfReviewBlocked(ctx, ref)) throw new ForbiddenError("revision.request", "You can't check your own edit");
   requireStage(job, ["ready_to_check"], "Ask for changes");
   const chips = (p.chips ?? []).map((c) => c.trim()).filter((c) => c.length > 0);
@@ -407,7 +412,7 @@ export interface ReopenJobSimpleResult extends SimpleJobResult {
 export async function reopenJobSimple(tx: Tx, ctx: AuthContext, input: unknown): Promise<ReopenJobSimpleResult> {
   const p = parseInput(ReopenJobSimpleInput, input);
   const { job, ref } = await loadVisibleJob(tx, ctx, p.jobId);
-  assertMayMoveJob(ctx, ref);
+  await assertMayMoveJobOrStale(tx, ctx, job, ref, p.expectedVersion);
   requireStage(job, ["done"], "Reopen");
   assertVersion(job, p.expectedVersion);
   const label = SIMPLE_REOPEN_REASON_LABELS[p.reason];

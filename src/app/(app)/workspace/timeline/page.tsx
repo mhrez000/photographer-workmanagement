@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { AlertTriangle, ChartNoAxesGantt, Diamond } from "lucide-react";
 import { FilterBar, type FilterFacet } from "@/components/filters/filter-bar";
-import { PageContainer, ScopeNotice } from "@/components/shell";
+import { PageContainer } from "@/components/shell";
 import { TimelineGantt } from "@/components/timeline/timeline-gantt";
 import { TimelineToolbar } from "@/components/timeline/timeline-toolbar";
 import {
@@ -18,7 +18,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { endOfCivilDayIso, formatDate, startOfCivilDayIso, todayCivil } from "@/lib/dates";
 import { PRIORITIES, type Priority } from "@/lib/constants";
 import type { TimelineRow } from "@/lib/types";
-import { load, pageContext, param, params } from "@/server/page";
+import { advancedPageContext, load, param, params } from "@/server/page";
 import { pageScope } from "@/server/page-scope";
 import { hasBusinessView } from "@/server/auth/permissions";
 import { loadOrgSettingsRow } from "@/server/queries/scope";
@@ -38,7 +38,7 @@ type WeekStart = 0 | 1 | 2 | 3 | 4 | 5 | 6;
  */
 export default async function TimelinePage({ searchParams }: PageProps<"/workspace/timeline">) {
   const sp = await searchParams;
-  const { ctx, db } = await pageContext();
+  const { ctx, db } = await advancedPageContext("timeline", "/jobs"); // Advanced gate before any query (see src/server/page.ts)
   const timeZone = ctx.settings.timezone;
   const today = todayCivil(timeZone);
   // Admins and team members with "See all jobs" get the business-wide grouping and facets.
@@ -108,7 +108,7 @@ export default async function TimelinePage({ searchParams }: PageProps<"/workspa
 
   return (
     <PageContainer width="full" className="max-w-[2000px]">
-      <PageHeader eyebrow="Workspace" title="Timeline" description={description} meta={<ScopeNotice scope={scope} />}>
+      <PageHeader eyebrow="Workspace" title="Timeline" description={description}>
         <FilterBar quickFilters={[]} facets={facets} timeZone={ctx.settings.timezone} searchPlaceholder="Filter by job, client, project…" />
       </PageHeader>
 

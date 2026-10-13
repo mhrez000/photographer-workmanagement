@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { clients, jobAssignments, projects } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, setUserFlags, type SeedIds, type TestDb } from "@/db/test-db";
+import { editorPickerOptions } from "./editors";
 import { ForbiddenError, NotFoundError, ValidationError } from "@/server/errors";
 import { getClientOptions, getProjectOptions, getUserOptions } from "./options";
 
@@ -86,10 +87,63 @@ describe("getUserOptions", () => {
     });
     await expect(getUserOptions(db, await ctxOf("editor2"), { jobId: job.id })).rejects.toThrow(ForbiddenError);
     const viewers = await getUserOptions(db, await ctxOf("editor1"), { jobId: job.id, excludeSelf: "1" });
-    expect(viewers.map((u) => u.id)).toEqual(expect.arrayContaining([ids.users.owner, ids.users.photographer1, ids.users.editor2]));
+    // The roster scope (E17) applies on top of "who may view the job": the owner (created it) and the shooter,
+    // never the other editor who once held it — editors only ever see the photographers on their jobs.
+    expect(viewers.map((u) => u.id).sort()).toEqual([ids.users.coAdmin, ids.users.owner, ids.users.photographer1].sort());
     expect(viewers.map((u) => u.id)).not.toContain(ids.users.editor1);
+    expect(viewers.map((u) => u.id)).not.toContain(ids.users.editor2);
     expect(viewers.map((u) => u.id)).not.toContain(ids.users.photographer2);
     expect(viewers.some((u) => u.role === "client")).toBe(false);
+    // The owner's mention list for the same job still names everyone who can see it, the past editor included.
+    const forOwner = await getUserOptions(db, await ctxOf("owner"), { jobId: job.id, excludeSelf: "1" });
+    expect(forOwner.map((u) => u.id)).toEqual(expect.arrayContaining([ids.users.photographer1, ids.users.editor1, ids.users.editor2]));
+  });
+
+  it("roster scope (plan §2, E17): editors get themselves, the owners and the photographers on their jobs; extra photographers add every editor; ⚑see all jobs and admins everyone", async () => {
+    const staffOnly = (list: { role: string }[]) => list.every((u) => u.role !== "client");
+    // Eve has no jobs yet: herself and the owner / co-owner only — never Ed, Leo or the other photographers.
+    const empty = await getUserOptions(db, await ctxOf("editor1"));
+    expect(empty.map((u) => u.id).sort()).toEqual([ids.users.coAdmin, ids.users.editor1, ids.users.owner].sort());
+    expect(await getUserOptions(db, await ctxOf("editor1"), { role: "editor" })).toHaveLength(1);
+    // A job shot by Pia (photographer1) and created by the owner: Pia appears; Ed, Leo and photographer2 still never.
+    await insertJobFixture(db, ids, { statusKey: "in_progress", editorId: ids.users.editor1 });
+    const withJob = await getUserOptions(db, await ctxOf("editor1"));
+    expect(withJob.map((u) => u.id).sort()).toEqual([ids.users.coAdmin, ids.users.editor1, ids.users.owner, ids.users.photographer1].sort());
+    expect(staffOnly(withJob)).toBe(true);
+    // The job-create photographer picker is the one exception: an editor with "Can add their own jobs" must pick a shooter.
+    expect((await getUserOptions(db, await ctxOf("editor1"), { role: "photographer" })).map((u) => u.id).sort()).toEqual(
+      [ids.users.owner, ids.users.coAdmin, ids.users.lead, ids.users.photographer1, ids.users.photographer2].sort(),
+    );
+    await setUserFlags(db, ids.users.editor1, { canCreateJobs: false });
+    expect((await getUserOptions(db, await ctxOf("editor1"), { role: "photographer" })).map((u) => u.id).sort()).toEqual([ids.users.coAdmin, ids.users.owner, ids.users.photographer1].sort());
+    // Pia (extra photographer, no switches): every active editor (she assigns), herself, the owners, and the photographers on her jobs.
+    const pia = await getUserOptions(db, await ctxOf("photographer1"));
+    expect(pia.map((u) => u.id).sort()).toEqual([ids.users.coAdmin, ids.users.editor1, ids.users.editor2, ids.users.owner, ids.users.photographer1].sort());
+    expect((await getUserOptions(db, await ctxOf("photographer1"), { role: "editor", includeInactive: "1" })).map((u) => u.id).sort()).toEqual(
+      [ids.users.editor1, ids.users.editor2, ids.users.inactiveEditor].sort(),
+    );
+    expect((await getUserOptions(db, await ctxOf("photographer1"), { role: "photographer" })).map((u) => u.id)).not.toContain(ids.users.photographer2);
+    // Leo (⚑see all jobs) and admins: the whole staff roster.
+    expect((await getUserOptions(db, await ctxOf("lead"))).map((u) => u.id)).toEqual(expect.arrayContaining([ids.users.photographer2, ids.users.editor2, ids.users.lead]));
+    expect((await getUserOptions(db, await ctxOf("owner"))).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("client picker: an extra photographer sees the clients on their jobs or that they created; admins every client", async () => {
+    const pia = await ctxOf("photographer1");
+    expect(await getClientOptions(db, pia)).toEqual([]);
+    await insertJobFixture(db, ids, { statusKey: "assigned", editorId: ids.users.editor1 }); // client 1, shot by Pia
+    expect((await getClientOptions(db, pia)).map((c) => c.id)).toEqual([ids.clientId]);
+    await db.insert(clients).values({ id: "c-pia", organisationId: ids.organisationId, name: "Pia's Agency", createdByUserId: ids.users.photographer1, createdAt: NOW, updatedAt: NOW });
+    expect((await getClientOptions(db, pia)).map((c) => c.id).sort()).toEqual(["c-pia", ids.clientId].sort());
+    expect((await getClientOptions(db, await ctxOf("photographer2"))).map((c) => c.id)).toEqual([]);
+    expect((await getClientOptions(db, await ctxOf("owner"))).map((c) => c.id).sort()).toEqual(["c-pia", ids.clientId, ids.clientId2].sort());
+  });
+
+  it("the Assign / Change editor picker (editorPickerOptions) is for photographers: editors and clients get 403 (E17)", async () => {
+    expect((await editorPickerOptions(db, await ctxOf("photographer1"))).map((o) => o.editor.id).sort()).toEqual([ids.users.editor1, ids.users.editor2].sort());
+    expect((await editorPickerOptions(db, await ctxOf("owner"))).length).toBe(2);
+    await expect(editorPickerOptions(db, await ctxOf("editor1"))).rejects.toThrow(ForbiddenError);
+    await expect(editorPickerOptions(db, await ctxOf("client"))).rejects.toThrow(ForbiddenError);
   });
 
   it("editor workloads only for viewers with team workloads; clients get 403", async () => {

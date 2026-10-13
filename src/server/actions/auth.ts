@@ -60,6 +60,7 @@ export async function loginAction(_prev: LoginFormState, formData: FormData): Pr
     console.error("[login] unexpected error", err);
     return { error: "Something went wrong. Please try again.", fieldErrors: {}, email, retryAfterSeconds: null };
   }
+  // Landing by role (plan §3): photographers /home, editors /my-jobs, clients /portal; a safe `next` wins.
   redirect(loginRedirectTarget(role, formData.get("next")));
 }
 
