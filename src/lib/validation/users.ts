@@ -8,7 +8,7 @@
  * unknown keys as before.
  */
 import { z } from "zod";
-import { NOTIFICATION_TYPES, PHOTOGRAPHER_PRESETS, ROLES } from "@/lib/constants";
+import { INVITE_METHODS, NOTIFICATION_TYPES, PHOTOGRAPHER_PRESETS, ROLES } from "@/lib/constants";
 import { EmailSchema } from "./auth";
 import { ExpectedVersionSchema, HexColourSchema, IdSchema, NameSchema, OptionalTextSchema } from "./admin-shared";
 
@@ -46,6 +46,12 @@ const inviteBase = {
   email: EmailSchema,
   name: NameSchema(120),
   avatarColour: HexColourSchema.optional(),
+  /**
+   * How the person gets in (front door): "link" (default) = an invite link they open to set their own password
+   * (no usable password until then); "temp_password" = the old path, a temp password shown once to the inviter.
+   * A prepared secret passed to the service forces "temp_password".
+   */
+  method: z.enum(INVITE_METHODS).optional(),
 };
 
 /**

@@ -4,9 +4,10 @@
  * check. Routing only: `requireContext()` / `requirePortalContext()` and the (app) / portal layouts are
  * the real boundary.
  *
- * - no session cookie on an app page → redirect to /login?next=<path>
+ * - no session cookie on an app page → redirect to /login?next=<path>; the front door is public
+ *   (/, /signup, /forgot-password, /reset-password, /invite/*, /api/auth/*)
  * - no session cookie on /api/* (except /api/auth/*) → 401 JSON
- * - session cookie on /login → the persona's landing page (clients /portal, editors /my-jobs, else
+ * - session cookie on /login or /signup → the persona's landing page (clients /portal, editors /my-jobs, else
  *   /home), unless `?expired=1` (set by the layouts when the cookie is stale/revoked): then the cookie
  *   is deleted and the login page renders — no redirect loop
  * - client cookie on a staff page → /portal; staff cookie on /portal* → the staff landing page
@@ -19,7 +20,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@/lib/constants";
 
 // /api/system/cron/ authenticates with a bearer CRON_SECRET inside the route (server-to-server).
-const PUBLIC_PREFIXES = ["/api/auth/", "/api/system/cron/", "/_next/", "/favicon", "/robots.txt", "/sitemap.xml"];
+// Front door: the landing page, "Create your studio", forgot / reset password and invite links are public
+// (the pages themselves redirect a signed-in person where it makes sense).
+const PUBLIC_PREFIXES = ["/api/auth/", "/api/system/cron/", "/_next/", "/favicon", "/robots.txt", "/sitemap.xml", "/forgot-password", "/reset-password", "/invite/"];
+/** Public pages a SIGNED-IN person is sent away from (to their landing page), like /login. */
+const ENTRY_PAGES = ["/login", "/signup"];
 const DESIGN_SYSTEM_PREFIX = "/design-system";
 
 /** Staff landing pages (plan §3): editors live on My jobs, photographers on Home. */
@@ -79,7 +84,7 @@ export function proxy(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (pathname === "/login") {
+  if (ENTRY_PAGES.includes(pathname)) {
     if (req.nextUrl.searchParams.has("expired")) {
       const res = NextResponse.next();
       if (hasCookie) res.cookies.delete(SESSION_COOKIE_NAME);
@@ -90,6 +95,8 @@ export function proxy(req: NextRequest) {
   }
 
   if (isPublic(pathname)) return NextResponse.next();
+  // The landing page is public; src/app/page.tsx sends a signed-in person to their landing page.
+  if (pathname === "/" && !hasCookie) return NextResponse.next();
 
   if (hasCookie) {
     if (isApi(pathname)) return NextResponse.next();

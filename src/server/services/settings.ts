@@ -17,6 +17,7 @@ import { DismissRolesNoticeInput, SETTINGS_FIELDS, UpdateSettingsInput } from "@
 import { recordEvent } from "@/server/audit";
 import { assertCan } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/errors";
+import { emailConfig, type EmailProvider } from "@/server/email";
 import { first, parseInput, type DbLike, type Tx } from "./_shared";
 import { UserRuleError, checkVersion, ruleViolation } from "./_admin";
 
@@ -67,6 +68,8 @@ function defaultSettingsRow(organisationId: string): OrganisationSettings {
     primaryOwnerUserId: null,
     defaultPhotographerUserId: null,
     rolesV2NoticeDismissedAt: null,
+    onboardingDismissedAt: null,
+    emailNotificationsEnabled: false,
     lastOverdueSweepAt: null,
     advancedToolsEnabled: false,
     updatedAt: new Date(0).toISOString(),
@@ -190,4 +193,55 @@ export async function dismissRolesNotice(tx: Tx, ctx: AuthContext, input: unknow
     metadata: { field: "rolesV2NoticeDismissedAt" },
   });
   return loadSettingsRow(tx, ctx);
+}
+
+export interface DismissOnboardingResult {
+  dismissedAt: string;
+  /** False when it was already dismissed (idempotent). */
+  changed: boolean;
+}
+
+/**
+ * POST /api/settings/onboarding/dismiss (admin, `settings.manage`): hides the first-run checklist on Home
+ * for every admin of the studio. Idempotent; audited `settings.updated` (field onboardingDismissedAt).
+ */
+export async function dismissOnboarding(tx: Tx, ctx: AuthContext): Promise<DismissOnboardingResult> {
+  assertCan(ctx, "settings.manage");
+  const current = await loadSettingsRow(tx, ctx);
+  const row = current.settings;
+  if (row.version === 0) throw new NotFoundError("Organisation settings");
+  if (row.onboardingDismissedAt !== null) return { dismissedAt: row.onboardingDismissedAt, changed: false };
+  const now = ctx.now();
+  await tx
+    .update(organisationSettings)
+    .set({ onboardingDismissedAt: now, updatedAt: now, version: row.version + 1 })
+    .where(eq(organisationSettings.organisationId, ctx.organisationId));
+  await recordEvent(tx, ctx, {
+    entityType: "settings",
+    entityId: ctx.organisationId,
+    eventType: "settings.updated",
+    action: "updated",
+    previousValue: { field: "onboardingDismissedAt", value: null },
+    newValue: { field: "onboardingDismissedAt", value: now },
+    metadata: { field: "onboardingDismissedAt" },
+  });
+  return { dismissedAt: now, changed: true };
+}
+
+export interface EmailSettingsView {
+  /** True when invites / resets are emailed (RESEND_API_KEY + EMAIL_FROM set). */
+  configured: boolean;
+  provider: EmailProvider;
+  /** The sender address (null for the console provider). */
+  from: string | null;
+  /** Reserved: organisation_settings.email_notifications_enabled. */
+  notificationsEnabled: boolean;
+}
+
+/** GET /api/settings/email (admin, `settings.view`): whether the studio can email invite / reset links. */
+export async function getEmailSettings(db: DbLike, ctx: AuthContext): Promise<EmailSettingsView> {
+  assertCan(ctx, "settings.view");
+  const config = emailConfig();
+  const current = await loadSettingsRow(db, ctx);
+  return { configured: config.configured, provider: config.provider, from: config.from, notificationsEnabled: current.settings.emailNotificationsEnabled };
 }

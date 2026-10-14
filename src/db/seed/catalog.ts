@@ -3,7 +3,7 @@
  * Every organisation, brand and couple here is fictional; street names and
  * suburbs are real Sydney places so the data reads naturally.
  */
-import type { PermissionFlag, Role } from "@/lib/constants";
+import { DEFAULT_USUAL_DAYS_BY_JOB_TYPE, type PermissionFlag, type Role } from "@/lib/constants";
 
 /** Raw users.* switch columns set for a seeded person (docs/ROLES.md §2.2, §13). */
 export type SeedFlags = Partial<Record<PermissionFlag, boolean>>;
@@ -323,18 +323,7 @@ export const TYPE_CLIENT_KIND: Record<JobTypeName, ClientKind> = {
 };
 
 /** Typical days from shoot to editing deadline. */
-export const TURNAROUND_DAYS: Record<JobTypeName, number> = {
-  "Real Estate": 1,
-  Drone: 1,
-  Twilight: 2,
-  "Floor Plans": 1,
-  "Virtual Staging": 2,
-  Retouching: 2,
-  Product: 4,
-  Commercial: 6,
-  Video: 10,
-  Wedding: 28,
-};
+export const TURNAROUND_DAYS: Record<JobTypeName, number> = { ...(DEFAULT_USUAL_DAYS_BY_JOB_TYPE as Record<JobTypeName, number>) };
 
 /** Elapsed hours from "start editing" to "submit" [min, max]. */
 export const EDIT_SPAN_HOURS: Record<JobTypeName, readonly [number, number]> = {

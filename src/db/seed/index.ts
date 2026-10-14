@@ -41,9 +41,8 @@ import { DEFAULT_SEED_PROFILE, type SeedProfile } from "@/lib/constants";
 import { CLIENTS, NORTHLIGHT, OTHER_STUDIO, OWNER, PORTAL_CLIENTS, SEED_PASSWORD, STAFF, TEAMS, type SeedUserDef } from "./catalog";
 import { inviteSeedClientUser, schedulePortalStory, seedOtherStudioPortal, setSeedClientPortal } from "./portal";
 import {
+  bindJobTypeWorkflows,
   bootstrapOrganisation,
-  createDefaultWorkflow,
-  createJobTypes,
   createQuickWorkflow,
   createSeedClient,
   createSeedTeam,
@@ -123,18 +122,18 @@ export async function runFullSeed(db: Db, options: SeedOptions = {}): Promise<Se
     const tick = (minutes = 1) => at(t + minutes * MINUTE);
 
     at(t0);
-    const { organisationId: nl, ownerId } = await bootstrapOrganisation(rt, NORTHLIGHT, OWNER, passwordHash);
+    // The same bootstrap a real sign-up runs (organisation, owner, default workflow, types of shoot); the full
+    // fixture keeps "usual days" unset, as before the front door.
+    const { organisationId: nl, ownerId, workflow: defaultWf, jobTypes: defaultTypes } = await bootstrapOrganisation(rt, NORTHLIGHT, OWNER, passwordHash, { usualDays: null });
     tick(5);
     await enableTimeTracking(rt, ownerId);
-    tick(5);
-    const defaultWf = await createDefaultWorkflow(rt, ownerId);
-    tick(10);
+    tick(15);
     const quickWf = await createQuickWorkflow(rt, ownerId);
     tick(15);
     const videoWf = await createVideoWorkflow(rt, ownerId);
     tick(20);
     const workflows = { default: defaultWf, quick: quickWf, video: videoWf };
-    const jobTypes: Record<JobTypeName, string> = await createJobTypes(rt, ownerId, workflows);
+    const jobTypes: Record<JobTypeName, string> = await bindJobTypeWorkflows(rt, ownerId, defaultTypes, workflows);
 
     // The owner invites everyone (and sets each person's switches explicitly).
     at(t0 + DAY + 9 * HOUR);
@@ -418,11 +417,7 @@ export async function seedOtherStudio(rt: SeedRuntime, passwordHash: string, sec
     rt.setTime(t);
   };
   at(t);
-  const { organisationId, ownerId } = await bootstrapOrganisation(rt, OTHER_STUDIO, OTHER_OWNER, passwordHash);
-  at(t + 10 * MINUTE);
-  const wf = await createDefaultWorkflow(rt, ownerId);
-  at(t + 20 * MINUTE);
-  const jobTypes = await createJobTypes(rt, ownerId, { default: wf, quick: wf, video: wf });
+  const { organisationId, ownerId, jobTypes } = await bootstrapOrganisation(rt, OTHER_STUDIO, OTHER_OWNER, passwordHash, { usualDays: null });
   at(t + HOUR);
   const editorId = await inviteSeedUser(rt, OTHER_STUDIO.slug, ownerId, OTHER_EDITOR, secret);
   at(t + 2 * HOUR);

@@ -58,6 +58,7 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
       "user.capacity_changed", "user.flags_changed", "user.anonymised", "user.workload_band_changed", "user.notification_prefs_changed",
       "team.created", "team.updated", "team.archived", "team.member_added", "team.member_removed",
       "auth.logged_in", "auth.login_failed", "auth.logged_out",
+      "user.invite_sent", "user.invite_revoked", "user.accepted_invite", "auth.password_reset_requested",
     ],
   },
   {
@@ -70,7 +71,7 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
       "workflow_transition.created", "workflow_transition.updated", "workflow_transition.archived",
       "job_type.created", "job_type.updated", "job_type.archived",
       "automation.created", "automation.updated", "automation.enabled", "automation.disabled", "automation.archived", "automation.ran",
-      "settings.updated", "notification.sent",
+      "settings.updated", "notification.sent", "org.created",
     ],
   },
 ];
@@ -94,6 +95,7 @@ export type HistoryCategory = "Sign-in" | "Job" | "People" | "Studio" | "Client"
 
 export function historyCategoryOf(type: string): HistoryCategory {
   if (type.startsWith("auth.")) return "Sign-in";
+  if (type.startsWith("org.")) return "Studio";
   if (type.startsWith("user.") || type.startsWith("team.")) return "People";
   if (type.startsWith("client.") || type.startsWith("project.")) return "Client";
   const group = groupOfEventType(type);

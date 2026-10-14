@@ -1,25 +1,20 @@
 /**
  * Organisation bootstrap + admin structure for the demo seed.
  *
- * Only the organisation row, its settings row and the first owner are
- * inserted directly: no service creates an organisation (there is no
- * sign-up flow in v1), and every later service needs an owner to act as.
- * The owner is an admin photographer and the organisation's primary owner
- * (roles v2, docs/ROLES.md §0). Their `user.created` event is still written
- * through recordEvent().
- * Everything else (settings, users, workflows, job types, teams, clients,
- * projects, automations, saved views, dashboards) goes through the services.
+ * The organisation, its settings row, the first owner and the structure every studio starts with (default
+ * workflow, types of shoot) come from the SAME two service functions sign-up uses
+ * (`createOrganisationWithOwner` + `bootstrapOrganisation` in src/server/services/organisations.ts), so the
+ * demo studio is built exactly like a real one. Everything else (users, extra workflows, teams, clients,
+ * projects, automations, saved views, dashboards) goes through the admin services as the owner.
  */
 import { eq } from "drizzle-orm";
-import { one } from "@/db/index";
-import { organisationSettings, organisations, users } from "@/db/schema";
-import { DEFAULT_JOB_TYPES, DEFAULT_WORKFLOW_NAME, EDITOR_FLAGS, MEMBER_FLAGS, type PermissionFlag, type TransitionRole } from "@/lib/constants";
+import { first } from "@/db/index";
+import { jobTypes as jobTypesTable } from "@/db/schema";
+import { DEFAULT_JOB_TYPES, EDITOR_FLAGS, MEMBER_FLAGS, type PermissionFlag, type TransitionRole } from "@/lib/constants";
 import type { WorkflowStatus } from "@/lib/types";
-import { recordEvent } from "@/server/audit";
-import { systemContext } from "@/server/auth/session";
-import { nowIso } from "@/server/clock";
+import { bootstrapOrganisation as bootstrapStructure, createOrganisationWithOwner } from "@/server/services/organisations";
 import { createWorkflow, addStatus, addTransition, archiveStatus, reorderStatuses, updateStatus, type WorkflowGraph } from "@/server/services/workflows";
-import { createJobType } from "@/server/services/jobTypes";
+import { updateJobType } from "@/server/services/jobTypes";
 import { inviteUser, setPermissions, type PreparedSecret } from "@/server/services/users";
 import { createTeam } from "@/server/services/teams";
 import { createClient } from "@/server/services/clients";
@@ -34,52 +29,49 @@ export interface OrgDef {
   timezone: string;
 }
 
-/** Inserts the organisation, its settings row and the first owner (the only raw inserts in the seed). */
+export interface BootstrappedOrg {
+  organisationId: string;
+  ownerId: string;
+  /** The default workflow (13 statuses, every default edge + a cancel edge per open status). */
+  workflow: WorkflowRefs;
+  /** DEFAULT_JOB_TYPES, bound to the default workflow. */
+  jobTypes: Record<JobTypeName, string>;
+}
+
+/**
+ * Organisation + settings + owner + structure in ONE transaction through the sign-up services (cause "seed",
+ * actor = the owner). `usualDays`: per-type "usual days to edit" (`null` = none, the full fixture's shape).
+ */
 export async function bootstrapOrganisation(
   rt: SeedRuntime,
   def: OrgDef,
   owner: SeedUserDef,
   passwordHash: string,
-): Promise<{ organisationId: string; ownerId: string }> {
+  opts: { usualDays?: Readonly<Record<string, number>> | null } = {},
+): Promise<BootstrappedOrg> {
+  if (owner.role !== "photographer" || !owner.isAdmin) throw new Error(`seed: the first owner ${owner.email} must be an admin photographer`);
   return rt.db.transaction(async (tx) => {
-    const at = nowIso();
-    const org = await one(
-      tx.insert(organisations).values({ name: def.name, slug: def.slug, createdAt: at, updatedAt: at }).returning({ id: organisations.id }),
-      "organisation",
-    );
-    await tx.insert(organisationSettings).values({ organisationId: org.id, timezone: def.timezone, updatedAt: at });
-    const user = await one(
-      tx
-        .insert(users)
-        .values({
-          organisationId: org.id,
-          email: owner.email,
-          passwordHash,
-          name: owner.name,
-          role: owner.role,
-          isAdmin: owner.isAdmin ?? false,
-          title: owner.title,
-          avatarColour: owner.avatarColour,
-          createdAt: at,
-          updatedAt: at,
-        })
-        .returning({ id: users.id }),
-      "owner",
-    );
-    // The bootstrapped owner is the primary owner (trigger org_primary_owner: must be an active admin).
-    await tx.update(organisationSettings).set({ primaryOwnerUserId: user.id }).where(eq(organisationSettings.organisationId, org.id));
-    const sys = await systemContext(org.id, { db: tx, cause: "seed", requestId: "seed-bootstrap" });
-    await recordEvent(tx, sys, {
-      entityType: "user",
-      entityId: user.id,
-      eventType: "user.created",
-      action: "created",
-      previousValue: null,
-      newValue: { name: owner.name, email: owner.email, role: owner.role, isAdmin: owner.isAdmin ?? false, title: owner.title },
-      metadata: { targetUserId: user.id, bootstrap: true, primaryOwner: true },
+    const created = await createOrganisationWithOwner(tx, {
+      name: def.name,
+      slug: def.slug,
+      timezone: def.timezone,
+      owner: { name: owner.name, email: owner.email, passwordHash, title: owner.title, avatarColour: owner.avatarColour },
+      cause: "seed",
+      requestId: "seed-bootstrap",
     });
-    rt.registerUser(def.slug, owner.key, user.id, org.id);
-    return { organisationId: org.id, ownerId: user.id };
+    const structure = await bootstrapStructure(tx, {
+      organisationId: created.organisationId,
+      ownerUserId: created.ownerId,
+      ctx: created.ctx,
+      usualDays: opts.usualDays,
+    });
+    rt.registerUser(def.slug, owner.key, created.ownerId, created.organisationId);
+    return {
+      organisationId: created.organisationId,
+      ownerId: created.ownerId,
+      workflow: { id: structure.workflow.workflow.id, statuses: structure.statuses },
+      jobTypes: structure.jobTypes as Record<JobTypeName, string>,
+    };
   });
 }
 
@@ -147,14 +139,6 @@ function statusByKey(graph: WorkflowGraph, key: string): WorkflowStatus {
 /** Roles v2 edge roles (docs/ROLES.md §5.1): editor-side edges; reviewer-side / cancel / unassign edges. */
 const OME: TransitionRole[] = ["admin", "editor"];
 const OMP: TransitionRole[] = ["photographer"];
-
-/** Default workflow (the built-in template, made the organisation default). */
-export async function createDefaultWorkflow(rt: SeedRuntime, ownerId: string): Promise<WorkflowRefs> {
-  const graph = await rt.act(ownerId, (tx, ctx) =>
-    createWorkflow(tx, ctx, { name: DEFAULT_WORKFLOW_NAME, description: "Shoot, edit, review, deliver.", from: "default", isDefault: true }),
-  );
-  return refsOf(graph);
-}
 
 /** "Quick Turnaround": the default graph without accepted / review / delivered. */
 export async function createQuickWorkflow(rt: SeedRuntime, ownerId: string): Promise<WorkflowRefs> {
@@ -225,23 +209,26 @@ export async function createVideoWorkflow(rt: SeedRuntime, ownerId: string): Pro
   return refsOf(graph);
 }
 
-/** DEFAULT_JOB_TYPES, each bound to its workflow (Video → Video Production; Retouching / Virtual Staging → Quick Turnaround). */
-export async function createJobTypes(rt: SeedRuntime, actorId: string, workflows: Record<WorkflowKind, WorkflowRefs>): Promise<Record<JobTypeName, string>> {
-  const out = {} as Record<JobTypeName, string>;
-  for (const [i, jt] of DEFAULT_JOB_TYPES.entries()) {
+/**
+ * The full fixture binds some types of shoot to its custom workflows (Video → Video Production; Retouching /
+ * Virtual Staging → Quick Turnaround) AFTER the bootstrap created them on the default workflow: one audited
+ * `job_type.updated` per rebound type, exactly what an owner does under Settings → Types of shoot.
+ */
+export async function bindJobTypeWorkflows(
+  rt: SeedRuntime,
+  actorId: string,
+  jobTypes: Record<JobTypeName, string>,
+  workflows: Record<WorkflowKind, WorkflowRefs>,
+): Promise<Record<JobTypeName, string>> {
+  for (const jt of DEFAULT_JOB_TYPES) {
     const name = jt.name as JobTypeName;
-    const row = await rt.act(actorId, (tx, ctx) =>
-      createJobType(tx, ctx, {
-        name,
-        colour: jt.colour,
-        workflowId: workflows[TYPE_WORKFLOW[name]].id,
-        defaultEstimatedHours: jt.defaultEstimatedHours,
-        sortOrder: i,
-      }),
-    );
-    out[name] = row.id;
+    const kind = TYPE_WORKFLOW[name];
+    if (kind === "default") continue;
+    const row = await first(rt.db.select({ version: jobTypesTable.version }).from(jobTypesTable).where(eq(jobTypesTable.id, jobTypes[name])));
+    if (!row) throw new Error(`seed: job type ${name} missing`);
+    await rt.act(actorId, (tx, ctx) => updateJobType(tx, ctx, { jobTypeId: jobTypes[name], workflowId: workflows[kind].id, expectedVersion: row.version }));
   }
-  return out;
+  return jobTypes;
 }
 
 export async function enableTimeTracking(rt: SeedRuntime, ownerId: string): Promise<void> {

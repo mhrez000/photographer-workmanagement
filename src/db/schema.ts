@@ -36,6 +36,7 @@ import {
 import { nanoid } from "nanoid";
 import {
   ASSIGNMENT_ROLES,
+  AUTH_TOKEN_KINDS,
   AUTOMATION_RUN_STATUSES,
   COMMENT_KINDS,
   ENTITY_TYPES,
@@ -219,6 +220,11 @@ export const organisationSettings = pgTable("organisation_settings", {
    * studios that already rely on custom workflows or enabled automations.
    */
   advancedToolsEnabled: bool("advanced_tools_enabled", false),
+  // ---- front door (sign-up, invites, first run) ----
+  /** The first-run checklist on Home was dismissed by an admin (null = still shown while the studio is new). */
+  onboardingDismissedAt: text("onboarding_dismissed_at"),
+  /** Reserved: deliver in-app notifications by email too (the email channel ships first for invites / resets). */
+  emailNotificationsEnabled: bool("email_notifications_enabled", false),
   updatedAt: updatedAt(),
   version: version(),
 });
@@ -271,6 +277,15 @@ export const users = pgTable(
     usualCapacityJobs: integer("usual_capacity_jobs"),
     /** The one-time "Proofline got simpler" card on Home was dismissed. */
     simplerNoticeDismissedAt: text("simpler_notice_dismissed_at"),
+    // ---- front door (invite links). An invited user has NO usable password until they accept. ----
+    /** When the (last) invite was issued; null for the sign-up owner and pre-front-door rows. */
+    invitedAt: text("invited_at"),
+    /**
+     * When the person set their own password (accepted an invite / signed up / got a temp password).
+     * null = invite pending: `password_hash` is a random non-bcrypt string and login is refused with the
+     * generic message. Migration 0005 backfills every existing user with `created_at`.
+     */
+    acceptedAt: text("accepted_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     version: version(),
@@ -296,6 +311,37 @@ export const userNotificationPrefs = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [uniqueIndex("user_notification_prefs_uq").on(t.userId, t.type)],
+);
+
+/**
+ * Ledger: one-time links (invite acceptance, password reset). The plain token is shown / emailed ONCE and
+ * only its sha256 hex is stored; `used_at` is fill-once (trigger `at_fill_once`, drizzle/0005_front_door.sql)
+ * and marks a token consumed — accepted, or superseded by a newer token / revoked (see metadata on the
+ * audit event). A token is live while `used_at IS NULL AND expires_at > now`.
+ */
+export const authTokens = pgTable(
+  "auth_tokens",
+  {
+    id: id(),
+    organisationId: orgId(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    kind: text("kind", { enum: AUTH_TOKEN_KINDS }).notNull(),
+    /** sha256(token) as 64 hex chars; the plain token is never stored. */
+    tokenHash: text("token_hash").notNull(),
+    /** The admin who issued an invite; null for self-service password resets. */
+    createdByUserId: userRef("created_by_user_id"),
+    expiresAt: text("expires_at").notNull(),
+    /** Fill-once: consumed (accepted / reset) or superseded / revoked. */
+    usedAt: text("used_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("auth_tokens_hash_uq").on(t.tokenHash),
+    index("auth_tokens_user_kind_idx").on(t.userId, t.kind, t.usedAt),
+    index("auth_tokens_org_idx").on(t.organisationId, t.createdAt),
+  ],
 );
 
 export const teams = pgTable(
@@ -1344,6 +1390,7 @@ export const TABLE_NAMES = [
   "organisation_settings",
   "users",
   "user_notification_prefs",
+  "auth_tokens",
   "teams",
   "team_memberships",
   "clients",
@@ -1382,4 +1429,5 @@ export const LEDGER_TABLES = [
   "automation_runs",
   "notifications",
   "team_memberships",
+  "auth_tokens",
 ] as const satisfies readonly TableName[];
