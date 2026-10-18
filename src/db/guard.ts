@@ -1,7 +1,8 @@
 /**
  * DB-level integrity guards — thin view over the custom migrations
- * `drizzle/0001_guards.sql` and `drizzle/0003_roles_v2_data.sql` (roles v2:
- * users_keep_admin, users_client_link, org_primary_owner), which are the
+ * `drizzle/0001_guards.sql`, `drizzle/0003_roles_v2_data.sql` (roles v2:
+ * users_keep_admin, users_client_link, org_primary_owner) and
+ * `drizzle/0005_front_door.sql` (auth_tokens: at_no_delete, at_fill_once), which are the
  * SINGLE source of truth (PL/pgSQL functions + triggers, applied by every
  * migrate: PGlite auto-migrate, makeTestDb(), `npm run db:migrate`,
  * `npm run db:migrate:remote`).
@@ -25,15 +26,15 @@ import { sql } from "drizzle-orm";
 import { execRows, type DbLike } from "./index";
 
 /** Custom migrations that install guard triggers, in apply order. */
-export const GUARD_MIGRATION_FILES = ["0001_guards.sql", "0003_roles_v2_data.sql"] as const;
-/** @deprecated use GUARD_MIGRATION_FILES (roles v2 added a second guards file). */
+export const GUARD_MIGRATION_FILES = ["0001_guards.sql", "0003_roles_v2_data.sql", "0005_front_door.sql"] as const;
+/** @deprecated use GUARD_MIGRATION_FILES (roles v2 and the front door added further guards files). */
 export const GUARD_MIGRATION_FILE = GUARD_MIGRATION_FILES[0];
 
 export interface GuardDefinition {
   /** Trigger name (unique per table in Postgres; unique overall here). */
   name: string;
   table: string;
-  /** "row" = the 31 row-level guards (28 ported from SQLite + 3 roles v2); "truncate" = statement-level TRUNCATE guards. */
+  /** "row" = the 33 row-level guards (28 ported from SQLite + 3 roles v2 + 2 auth_tokens); "truncate" = statement-level TRUNCATE guards. */
   level: "row" | "truncate";
 }
 
@@ -58,10 +59,10 @@ export function parseGuards(text: string = guardSql()): GuardDefinition[] {
   return out;
 }
 
-/** All guard triggers (31 row-level + the TRUNCATE guards). */
+/** All guard triggers (33 row-level + the TRUNCATE guards). */
 export const GUARDS: readonly GuardDefinition[] = parseGuards();
 
-/** The 31 row-level integrity rules (28 from the former SQLite triggers + 3 roles v2 user/org guards). */
+/** The 33 row-level integrity rules (28 from the former SQLite triggers + 3 roles v2 user/org guards + 2 auth_tokens guards). */
 export const ROW_GUARDS: readonly GuardDefinition[] = GUARDS.filter((g) => g.level === "row");
 
 /** Tables that carry at least one guard. */

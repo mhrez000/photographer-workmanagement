@@ -57,7 +57,7 @@ async function auditFailure(db: Db, user: User, input: { email: string; ip?: str
  * Verifies credentials (rate-limited per email+IP AND per email alone), records the outcome and
  * returns the user. Throws RateLimitedError (429) or UnauthorizedError (401,
  * one generic message for unknown email / wrong password / inactive account /
- * client user whose portal is off or whose client is archived).
+ * invite not yet accepted / client user whose portal is off or whose client is archived).
  */
 export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedUser> {
   const input = parseInput(LoginInput, raw);
@@ -74,8 +74,10 @@ export async function authenticate(db: Db, raw: unknown): Promise<AuthenticatedU
 
   const passwordOk = await verifyPassword(input.password, user.passwordHash);
   const inactive = !user.isActive || user.anonymisedAt !== null;
-  if (!passwordOk || inactive) {
-    await auditFailure(db, user, input, inactive ? "inactive" : "bad_password");
+  // Front door: an invited person has no usable password until they accept their link (accepted_at null).
+  const notAccepted = user.acceptedAt === null;
+  if (!passwordOk || inactive || notAccepted) {
+    await auditFailure(db, user, input, inactive ? "inactive" : notAccepted ? "not_accepted" : "bad_password");
     const after = recordLoginAttemptFailure(input.email, input.ip);
     if (!after.allowed) throw new RateLimitedError(after.retryAfterSeconds);
     throw new UnauthorizedError(INVALID_CREDENTIALS);

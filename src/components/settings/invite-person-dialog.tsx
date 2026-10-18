@@ -12,9 +12,10 @@ import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
-import { PHOTOGRAPHER_PRESETS, PHOTOGRAPHER_PRESET_META, type PhotographerPreset, type Role } from "@/lib/constants";
+import { PHOTOGRAPHER_PRESETS, PHOTOGRAPHER_PRESET_META, type InviteMethod, type PhotographerPreset, type Role } from "@/lib/constants";
 import { cn } from "@/lib/utils";
-import { inviteMessage } from "./permission-copy";
+import { InviteLinkPanel } from "./invite-link-panel";
+import { inviteLinkMessage, inviteMessage } from "./permission-copy";
 import { TempPasswordPanel } from "./temp-password-panel";
 
 /** A client whose portal is on (only those can get portal users). */
@@ -26,10 +27,12 @@ export interface PortalClientOption {
 export interface InvitePersonDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** For the "Copy invite message" text. */
+  /** For the "Copy message" text. */
   studioName: string;
   /** Non-archived clients with the portal on. */
   portalClients: PortalClientOption[];
+  /** The studio's timezone (the link's expiry date). */
+  timeZone: string;
   initialRole?: Role;
   initialClientId?: string | null;
 }
@@ -41,17 +44,25 @@ export const ROLE_CARDS: { role: Role; title: string; body: string; icon: React.
   { role: "client", title: "Client", body: "Sees progress and the finished photos in a simple portal.", icon: Store },
 ];
 
-interface InviteResult {
-  user: { id: string; name: string; email: string };
-  tempPassword: string;
+interface InvitedUser {
+  id: string;
+  name: string;
+  email: string;
 }
 
+/** `POST /api/users` — the shape depends on `method` (src/app/api/README.md → Users). */
+export type InviteResult =
+  | { method: "link"; user: InvitedUser; inviteUrl: string; emailed: boolean; expiresAt: string }
+  | { method: "temp_password"; user: InvitedUser; tempPassword: string };
+
 /**
- * Invite someone (plan §2): pick a role, type a name and email. A photographer gets ONE choice,
- * "Only their own shoots" or "Everything (co-owner)"; an editor an optional "Can add their own jobs"
- * tick; a client picks the client they work for. The result is a one-time temporary password.
+ * Invite someone (plan §2, front door): pick a role, type a name and email. A photographer gets ONE
+ * choice, "Only their own shoots" or "Everything (co-owner)"; an editor an optional "Can add their own
+ * jobs" tick; a client picks the client they work for. By default the person gets a LINK to choose
+ * their own password (emailed when the studio has email set up, otherwise shown here to copy); "Set a
+ * temporary password instead" keeps the old one-time password path.
  */
-export function InvitePersonDialog({ open, onOpenChange, studioName, portalClients, initialRole = "photographer", initialClientId = null }: InvitePersonDialogProps) {
+export function InvitePersonDialog({ open, onOpenChange, studioName, portalClients, timeZone, initialRole = "photographer", initialClientId = null }: InvitePersonDialogProps) {
   const run = useMutationRunner();
   const [email, setEmail] = React.useState("");
   const [name, setName] = React.useState("");
@@ -59,6 +70,7 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
   const [preset, setPreset] = React.useState<PhotographerPreset>("own_shoots");
   const [editorCreates, setEditorCreates] = React.useState(false);
   const [clientId, setClientId] = React.useState<string>(initialClientId ?? portalClients[0]?.id ?? "");
+  const [method, setMethod] = React.useState<InviteMethod>("link");
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [pending, setPending] = React.useState(false);
   const [result, setResult] = React.useState<InviteResult | null>(null);
@@ -72,6 +84,7 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
     setPreset("own_shoots");
     setEditorCreates(false);
     setClientId(initialClientId ?? portalClients[0]?.id ?? "");
+    setMethod("link");
     setErrors({});
     setResult(null);
   };
@@ -83,7 +96,7 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
   };
 
   const body = (): Record<string, unknown> => {
-    const base = { email: email.trim(), name: name.trim() };
+    const base = { email: email.trim(), name: name.trim(), method };
     if (role === "client") return { ...base, role, clientId };
     if (role === "editor") return { ...base, role, flags: { canCreateJobs: editorCreates } };
     return { ...base, role, preset };
@@ -97,30 +110,54 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
       return;
     }
     setPending(true);
-    const res = await run(() => api.post<InviteResult>("/api/users", body()), { success: `${name.trim() || "Someone"} was invited` });
+    const res = await run(() => api.post<InviteResult>("/api/users", body()), {
+      success: `${name.trim() || "Someone"} was invited`,
+      onError: (err) => {
+        // 409 = the email is already in use somewhere (not an edit conflict): say so on the field.
+        if (err.status === 409) {
+          setErrors({ email: err.message || "That email is already in use." });
+          return true;
+        }
+        if (err.status !== 429) return false;
+        setErrors({ form: "That's a lot of invites in a short time. Wait a few minutes and try again." });
+        return true;
+      },
+    });
     setPending(false);
     if (res.ok) setResult(res.data);
-    else if (res.fieldErrors) setErrors(firstFieldErrors(res.fieldErrors));
+    else if (res.fieldErrors) setErrors((prev) => ({ ...prev, ...firstFieldErrors(res.fieldErrors) }));
   };
 
-  const message = result ? inviteMessage({ studio: studioName, origin, email: result.user.email, password: result.tempPassword }) : "";
+  const message = !result
+    ? ""
+    : result.method === "link"
+      ? inviteLinkMessage({ studio: studioName, inviteUrl: result.inviteUrl, name: result.user.name })
+      : inviteMessage({ studio: studioName, origin, email: result.user.email, password: result.tempPassword });
 
   return (
     <Dialog open={open} onOpenChange={close} size="lg">
       {result ? (
         <>
           <DialogHeader>
-            <DialogTitle>{result.user.name} can sign in now</DialogTitle>
-            <DialogDescription>Copy the temporary password or the whole message before you close this. It is shown once.</DialogDescription>
+            <DialogTitle>{result.method === "link" ? `Invite link for ${result.user.name}` : `${result.user.name} can sign in now`}</DialogTitle>
+            <DialogDescription>
+              {result.method === "link"
+                ? "They open the link, choose a password and are in. Copy it before you close this."
+                : "Copy the temporary password or the whole message before you close this. It is shown once."}
+            </DialogDescription>
           </DialogHeader>
           <DialogBody className="flex flex-col gap-4 pb-4">
-            <TempPasswordPanel name={result.user.name} email={result.user.email} password={result.tempPassword} />
+            {result.method === "link" ? (
+              <InviteLinkPanel name={result.user.name} email={result.user.email} inviteUrl={result.inviteUrl} emailed={result.emailed} expiresAt={result.expiresAt} timeZone={timeZone} />
+            ) : (
+              <TempPasswordPanel name={result.user.name} email={result.user.email} password={result.tempPassword} />
+            )}
             <div className="rounded-lg border border-border bg-surface p-3.5">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-sm font-medium text-ink">Message to send them</p>
                 <CopyButton value={message} label="Copy message" successMessage="Message copied" variant="outline" />
               </div>
-              <p className="mt-2 text-sm text-ink-muted" data-invite-message="">
+              <p className="mt-2 break-words text-sm text-ink-muted" data-invite-message="">
                 {message}
               </p>
             </div>
@@ -136,7 +173,9 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
         <form onSubmit={submit} noValidate className="flex min-h-0 flex-1 flex-col">
           <DialogHeader>
             <DialogTitle>Invite someone</DialogTitle>
-            <DialogDescription>They get a temporary password that you pass on. Nothing is emailed.</DialogDescription>
+            <DialogDescription>
+              {method === "link" ? "They get a link to choose their own password. You can copy it, and it is emailed when your studio has email set up." : "You get a temporary password to pass on. Nothing is emailed."}
+            </DialogDescription>
           </DialogHeader>
           <DialogBody className="flex flex-col gap-5 pb-4">
             <fieldset>
@@ -240,6 +279,29 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
                 </Select>
               </FormField>
             )}
+
+            <div className="rounded-md bg-surface-sunken px-3 py-2.5 text-sm text-ink-muted" data-invite-method={method}>
+              {method === "link" ? (
+                <>
+                  Prefer to hand them a password yourself?{" "}
+                  <button type="button" className="font-medium text-accent-ink underline-offset-4 hover:underline focus-ring rounded-xs" onClick={() => setMethod("temp_password")}>
+                    Set a temporary password instead
+                  </button>
+                </>
+              ) : (
+                <>
+                  They will be asked to change the temporary password after signing in.{" "}
+                  <button type="button" className="font-medium text-accent-ink underline-offset-4 hover:underline focus-ring rounded-xs" onClick={() => setMethod("link")}>
+                    Send an invite link instead
+                  </button>
+                </>
+              )}
+            </div>
+            {errors.form ? (
+              <p role="alert" className="text-sm text-danger">
+                {errors.form}
+              </p>
+            ) : null}
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => close(false)} disabled={pending}>

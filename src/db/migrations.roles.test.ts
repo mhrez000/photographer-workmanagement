@@ -365,8 +365,8 @@ describe("roles v2 migration (0002 + 0003) on a v1 database", () => {
     const jobs = await execRows<{ created_by_role: string; shared_with_client: boolean }>(db, sql`SELECT created_by_role, shared_with_client FROM jobs`);
     expect(jobs).toEqual([{ created_by_role: "photographer", shared_with_client: false }]);
 
-    // triggers: 31 row-level guards (+ TRUNCATE guards) installed
-    expect(ROW_GUARDS).toHaveLength(31);
+    // triggers: 33 row-level guards (+ TRUNCATE guards) known; the ones 0001–0003 install are present
+    expect(ROW_GUARDS).toHaveLength(33);
     expect((await listInstalledGuards(db)).sort()).toEqual(GUARDS.map((g) => g.name).sort());
 
     // zero drift

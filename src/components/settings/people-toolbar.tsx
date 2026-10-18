@@ -14,10 +14,12 @@ export interface PeopleToolbarProps {
   canInvite: boolean;
   studioName: string;
   portalClients: PortalClientOption[];
+  /** The studio's timezone (invite links show their expiry date). */
+  timeZone: string;
 }
 
 /** Search + Active / Deactivated (URL state) and the invite dialog (`?invite=1`, `?invite=client`). */
-export function PeopleToolbar({ canInvite, studioName, portalClients }: PeopleToolbarProps) {
+export function PeopleToolbar({ canInvite, studioName, portalClients, timeZone }: PeopleToolbarProps) {
   const url = useUrlState();
   const status = url.get("status") ?? "active";
   const invite = url.get("invite");
@@ -57,6 +59,7 @@ export function PeopleToolbar({ canInvite, studioName, portalClients }: PeopleTo
           onOpenChange={(open) => url.set("invite", open ? invite ?? "1" : null)}
           studioName={studioName}
           portalClients={portalClients}
+          timeZone={timeZone}
           initialRole={inviteRole}
         />
       ) : null}

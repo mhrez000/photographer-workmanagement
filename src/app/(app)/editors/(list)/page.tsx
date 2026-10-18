@@ -44,7 +44,7 @@ export default async function EditorsPage({ searchParams }: PageProps<"/editors"
       <OnTimeNote />
 
       <SectionCard title="Your editors" description={`${overview.period.label} · sorted with late work first`} flush>
-        <EditorsTable rows={overview.rows} canInvite={isAdmin(ctx)} />
+        <EditorsTable rows={overview.rows} pending={overview.pendingEditors} canInvite={isAdmin(ctx)} />
       </SectionCard>
 
       {overview.extraPhotographers.length > 0 ? (

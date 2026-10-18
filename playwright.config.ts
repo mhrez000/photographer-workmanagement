@@ -17,8 +17,9 @@ import { defineConfig, devices } from "@playwright/test";
  *   forced empty so e2e can never reach a remote database. When a server is already listening on
  *   :3100 (`reuseExistingServer`), stop it and run `npm run e2e:prepare && npm run e2e`.
  *
- * Projects: `desktop` (1440×900) runs every spec except mobile.spec.ts; `mobile` (390×844, touch)
- * runs mobile.spec.ts only (plan §3 phone tabs, §5 "pinned next step").
+ * Projects: `desktop` (1440×900) runs every spec except the phone ones; `mobile` (390×844, touch)
+ * runs `mobile.spec.ts` and `mobile-*.spec.ts` only (plan §3 phone tabs, §5 "pinned next step", the
+ * front door at 390px).
  */
 const OWN_PORT = 3100;
 const externalBaseURL = process.env.E2E_BASE_URL?.trim() || undefined;
@@ -45,9 +46,10 @@ export default defineConfig({
     navigationTimeout: 60_000,
   },
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } }, testIgnore: /mobile\.spec\.ts/ },
+    // Phone specs are `mobile.spec.ts` and `mobile-<area>.spec.ts` (e.g. mobile-frontdoor.spec.ts).
+    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } }, testIgnore: /mobile(-[a-z0-9]+)?\.spec\.ts/ },
     // A 390×844 phone with touch (Pixel 7 user agent and DPR, iPhone-size viewport).
-    { name: "mobile", use: { ...devices["Pixel 7"], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 } }, testMatch: /mobile\.spec\.ts/ },
+    { name: "mobile", use: { ...devices["Pixel 7"], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 } }, testMatch: /mobile(-[a-z0-9]+)?\.spec\.ts/ },
   ],
   webServer: externalBaseURL
     ? undefined

@@ -27,20 +27,22 @@ export function deskLabel(o: Pick<EditorPickerOption, "onDesk" | "late" | "usual
 
 /** Field 6 of the New job form: every active editor with the two numbers that matter when handing work out. */
 export function EditorPicker({ id, editors, value, onChange, disabled, clearLabel = "Decide later", ...aria }: EditorPickerProps) {
-  const options = React.useMemo<ComboboxOption[]>(
-    () =>
-      editors.map((o) => ({
+  const options = React.useMemo<ComboboxOption[]>(() => {
+    const names = new Map<string, number>();
+    for (const o of editors) names.set(o.editor.name.trim().toLowerCase(), (names.get(o.editor.name.trim().toLowerCase()) ?? 0) + 1);
+    return editors.map((o) => ({
         value: o.editor.id,
         label: o.editor.name,
-        description: deskLabel(o),
+        // Two editors with one name: the email tells them apart.
+        description: (names.get(o.editor.name.trim().toLowerCase()) ?? 0) > 1 ? `${o.email} · ${deskLabel(o)}` : deskLabel(o),
+        keywords: o.email,
         leading: <Avatar name={o.editor.name} size="xs" colour={o.editor.avatarColour || undefined} />,
         trailing:
           o.late > 0 || o.full ? (
             <span className={cn("shrink-0 text-2xs font-semibold", o.late > 0 ? "text-danger-fg" : "text-warning-fg")}>{o.late > 0 ? `${o.late} late` : "Full"}</span>
           ) : undefined,
-      })),
-    [editors],
-  );
+      }));
+  }, [editors]);
   return (
     <Combobox
       {...aria}

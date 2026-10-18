@@ -3,6 +3,7 @@ import Link from "next/link";
 import { History, Store } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
 import { PageContainer } from "@/components/shell/page-container";
+import { InviteStatusCard } from "@/components/settings/invite-status-card";
 import { PersonAccessCard, type PersonAccess } from "@/components/settings/person-access-card";
 import { TransferPrimaryOwnerCard, UserProfileCard, type UserAdminAccess } from "@/components/settings/user-admin";
 import { UserLifecycleCard, type LifecycleAccess, type OpenJobBrief } from "@/components/settings/user-lifecycle";
@@ -21,6 +22,7 @@ import { listClients } from "@/server/queries/clients";
 import { listJobs } from "@/server/queries/jobs";
 import { getSettingsView } from "@/server/queries/settings";
 import { getUserDetail, listUsers } from "@/server/queries/users";
+import { pendingInviteFor } from "@/server/services/invites";
 import { advancedEnabled, allowed, guard, load, pageContext } from "@/server/page";
 
 export const metadata: Metadata = { title: "Person" };
@@ -111,6 +113,10 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
     setCapacity: allowed(ctx, "user.set_capacity", target),
     lockedReason,
   };
+  // Front door: not joined yet (accepted_at null) → the Invite card (Send a new link / Revoke) replaces "Active".
+  const invitePending = profile.acceptedAt === null && profile.isActive && !profile.anonymisedAt;
+  const liveInvite = invitePending ? await load(() => pendingInviteFor(db, profile.id, ctx.now())) : null;
+  const canInvite = invitePending && allowed(ctx, "user.invite", { ...target, nextRole: profile.role });
   const lifecycle: LifecycleAccess = {
     resetPassword: !isSelf && allowed(ctx, "user.reset_password", target),
     deactivate: allowed(ctx, "user.deactivate", target),
@@ -158,6 +164,10 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
             {client ? <Badge variant="outline">{client.name}</Badge> : null}
             {profile.anonymisedAt ? (
               <Badge variant="neutral">Anonymised</Badge>
+            ) : invitePending ? (
+              <Badge variant="warning" dot data-invite-pending={liveInvite ? "live" : "stale"}>
+                Invite pending
+              </Badge>
             ) : profile.isActive ? (
               <Badge variant="success" dot>
                 Active
@@ -175,7 +185,7 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
             <span>{profile.email}</span>
             {profile.title ? <span>· {profile.title}</span> : null}
             <span>· Joined {formatDate(profile.createdAt, tz)}</span>
-            <span>· {profile.lastLoginAt ? `Last seen ${formatRelative(profile.lastLoginAt)}` : "Never signed in"}</span>
+            <span>· {profile.lastLoginAt ? `Last seen ${formatRelative(profile.lastLoginAt)}` : invitePending ? "Not joined yet" : "Never signed in"}</span>
             {!profile.isActive && profile.deactivatedAt ? <span>· Deactivated {formatDate(profile.deactivatedAt, tz)}</span> : null}
           </span>
         }
@@ -187,6 +197,8 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
           ) : undefined
         }
       />
+
+      {invitePending ? <InviteStatusCard userId={profile.id} name={profile.name} email={profile.email} pending={liveInvite} canInvite={canInvite} timeZone={tz} /> : null}
 
       {profile.role === "client" ? (
         <SectionCard title="Client portal" description="Client users only see the work shared with their client." actions={<Store aria-hidden="true" className="size-4 text-ink-subtle" />}>

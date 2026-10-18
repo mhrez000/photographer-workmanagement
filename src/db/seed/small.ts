@@ -14,13 +14,11 @@ import { hash } from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { first, type Db } from "@/db/index";
 import { jobs } from "@/db/schema";
-import { DEFAULT_JOB_TYPES } from "@/lib/constants";
 import { addCivilDays, civilDate, startOfCivilDayIso } from "@/lib/dates";
 import type { AuthContext } from "@/lib/types";
 import { resetClock } from "@/server/clock";
 import { addComment } from "@/server/services/comments";
 import { createJob } from "@/server/services/jobs";
-import { createJobType } from "@/server/services/jobTypes";
 import { addLink } from "@/server/services/links";
 import { addNote } from "@/server/services/notes";
 import { clientPortalUserIds } from "@/server/services/sharing";
@@ -38,7 +36,7 @@ import { inviteUser, type PreparedSecret } from "@/server/services/users";
 import { deliverJob, startJob } from "@/server/services/workflow";
 import type { Tx } from "@/server/services/_shared";
 import { NORTHLIGHT, OWNER as FULL_OWNER, SEED_PASSWORD as DEMO_PASSWORD, TURNAROUND_DAYS, type JobTypeName, type SeedUserDef } from "./catalog";
-import { bootstrapOrganisation, createDefaultWorkflow, createSeedClient } from "./org";
+import { bootstrapOrganisation, createSeedClient } from "./org";
 import { inviteSeedClientUser, postSeedClientFeedback, setSeedClientPortal } from "./portal";
 import { DAY, HOUR, MINUTE, SeedRuntime } from "./runtime";
 import type { SeedOptions, SeedResult } from "./index";
@@ -117,19 +115,10 @@ export async function runSmallSeed(db: Db, options: SeedOptions = {}): Promise<S
     const tick = (minutes = 1) => at(t + minutes * MINUTE);
 
     at(t0);
-    const { organisationId: nl, ownerId } = await bootstrapOrganisation(rt, NORTHLIGHT, SMALL_OWNER, passwordHash);
-    tick(5);
-    const wf = await createDefaultWorkflow(rt, ownerId);
-    tick(5);
-    const jobTypes = {} as Record<JobTypeName, string>;
-    for (const [i, jt] of DEFAULT_JOB_TYPES.entries()) {
-      const name = jt.name as JobTypeName;
-      const row = await rt.act(ownerId, (tx, ctx) =>
-        createJobType(tx, ctx, { name, colour: jt.colour, workflowId: wf.id, usualDaysToEdit: SMALL_USUAL_DAYS[name], sortOrder: i }),
-      );
-      jobTypes[name] = row.id;
-      tick(1);
-    }
+    // The same bootstrap a real sign-up runs: organisation, owner, default workflow and the types of shoot
+    // with their "usual days to edit" (plan §5), in one transaction.
+    const { organisationId: nl, ownerId, jobTypes } = await bootstrapOrganisation(rt, NORTHLIGHT, SMALL_OWNER, passwordHash, { usualDays: SMALL_USUAL_DAYS });
+    tick(15);
 
     // People: the extra photographer with the "Only their own shoots" preset; three editors (two with "Usually handles up to N").
     at(t0 + DAY + 9 * HOUR);

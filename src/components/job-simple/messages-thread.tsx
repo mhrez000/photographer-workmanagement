@@ -236,13 +236,16 @@ export function MessagesThread({ jobId, messages, canComment, deletable, timeZon
   const [toDelete, setToDelete] = React.useState<CommentNode | null>(null);
   const threads = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const who = participants.length > 0 ? participants.join(", ") : "the people on this job";
-  const invite = !canComment ? "" : viewerIsEditor ? ` Ask ${photographerName ?? "the photographer"} anything about this job.` : " Ask a question or leave a note for the editor.";
+  // One participant = no editor yet: say what will appear here rather than "Between <you>".
+  const alone = participants.length < 2 && !viewerIsEditor;
+  const description = alone ? "Messages with your editor will appear here once the job is given to someone. The client never sees these." : `Between ${who}. The client never sees these.`;
+  const invite = !canComment ? "" : viewerIsEditor ? ` Ask ${photographerName ?? "the photographer"} anything about this job.` : alone ? "" : " Ask a question or leave a note for the editor.";
 
   return (
     <SectionCard
       id="messages"
       title="Messages"
-      description={`Between ${who}. The client never sees these.`}
+      description={description}
       className={cn("rounded-lg transition-shadow duration-(--motion-slow) data-[highlight]:shadow-[0_0_0_3px_var(--accent)]", className)}
     >
       {threads.length === 0 ? (

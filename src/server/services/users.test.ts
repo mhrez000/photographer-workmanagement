@@ -92,12 +92,17 @@ describe("inviteUser", () => {
     expect(res.tempPassword).toBe(secret.tempPassword);
     expect(res.user).toMatchObject({ email: "new.editor@studio.test", role: "editor", isActive: true, capacityHoursPerWeek: 30, isAdmin: false });
     expect(res.user).not.toHaveProperty("passwordHash");
-    expect(compareSync(res.tempPassword, (await userRow(res.user.id))?.passwordHash ?? "")).toBe(true);
+    expect(compareSync(res.tempPassword ?? "", (await userRow(res.user.id))?.passwordHash ?? "")).toBe(true);
 
     const [ev] = await eventsOf("user.created");
     expect(ev).toMatchObject({ entityId: res.user.id, visibility: "management", actorUserId: ids.users.coAdmin });
     expect(ev.newValue).toMatchObject({ role: "editor", isAdmin: false, clientId: null, flags: { canCreateJobs: false, canViewTeamJobs: false } });
-    expect(JSON.stringify([ev.newValue, ev.previousValue, ev.metadata])).not.toMatch(/password|\$2[aby]\$/i);
+    const serialised = JSON.stringify([ev.newValue, ev.previousValue, ev.metadata]);
+    expect(serialised).not.toContain(secret.tempPassword);
+    expect(serialised).not.toMatch(/\$2[aby]\$/);
+    // the only "password" in the event is the front-door method label, never a value
+    expect(ev.metadata).toMatchObject({ method: "temp_password" });
+    expect(serialised.replace(/"method":"temp_password"/g, "")).not.toMatch(/password/i);
     expect(ev.summary).toBe("invited Nia New as Editor");
   });
 
@@ -210,8 +215,8 @@ describe("inviteUser", () => {
 
   it("async convenience hashes outside the transaction", async () => {
     const res = await inviteUserWithTempPassword(await contextFor(db, ids.users.owner), { email: "async@studio.test", name: "Ash", role: "photographer" }, db);
-    expect(res.tempPassword.length).toBeGreaterThanOrEqual(14);
-    expect(compareSync(res.tempPassword, (await userRow(res.user.id))?.passwordHash ?? "")).toBe(true);
+    expect(res.tempPassword?.length ?? 0).toBeGreaterThanOrEqual(14);
+    expect(compareSync(res.tempPassword ?? "", (await userRow(res.user.id))?.passwordHash ?? "")).toBe(true);
   });
 });
 

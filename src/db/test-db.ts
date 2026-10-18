@@ -376,6 +376,8 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
         isActive: u.active,
         deactivatedAt: u.active ? null : at,
         avatarColour: u.colour,
+        // Front door: fixture users have a usable password, so they count as accepted (like migration 0005's backfill).
+        acceptedAt: at,
         createdAt: at,
         updatedAt: at,
       };

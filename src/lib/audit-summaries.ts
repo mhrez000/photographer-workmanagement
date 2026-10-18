@@ -552,6 +552,20 @@ export function summarise(
     case "settings.primary_owner_changed":
       return "transferred primary ownership";
 
+    /* ---------------- front door: sign-up, invite links, password reset ---------------- */
+    case "org.created":
+      return `created the studio ${entityName(prev, next, meta, "")}`.trimEnd();
+    case "user.invite_sent":
+      return `${bool(meta, "resend") ? "re-sent" : "sent"} an invite link to ${targetName(prev, next, meta)}`;
+    case "user.invite_revoked":
+      return `revoked the invite link of ${targetName(prev, next, meta)}`;
+    case "user.accepted_invite":
+      return "accepted the invite and chose a password";
+    case "auth.password_reset_requested": {
+      const email = str(next, "email");
+      return email ? `requested a password reset link for ${email}` : "requested a password reset link";
+    }
+
     default:
       return assertNever(eventType);
   }

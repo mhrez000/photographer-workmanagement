@@ -32,11 +32,11 @@ describe("makeTestDb", () => {
   it("creates every table of the schema and installs every guard trigger", async () => {
     const db = await makeTestDb();
     const tables = await publicTables(db);
-    expect(tables).toHaveLength(27);
+    expect(tables).toHaveLength(28);
     expect(tables).toContain("activity_events");
     expect(tables.sort()).toEqual([...schema.TABLE_NAMES].sort());
-    expect(ROW_GUARDS).toHaveLength(31);
-    expect(ROW_GUARDS.map((g) => g.name)).toEqual(expect.arrayContaining(["users_keep_admin", "users_client_link", "org_primary_owner"]));
+    expect(ROW_GUARDS).toHaveLength(33);
+    expect(ROW_GUARDS.map((g) => g.name)).toEqual(expect.arrayContaining(["users_keep_admin", "users_client_link", "org_primary_owner", "at_no_delete", "at_fill_once"]));
     expect((await listInstalledGuards(db)).sort()).toEqual(GUARDS.map((g) => g.name).sort());
     // FKs are enforced (restrict): a job type pointing at a missing workflow is rejected.
     expect(

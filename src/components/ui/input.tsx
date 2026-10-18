@@ -16,9 +16,9 @@ export const inputVariants = cva(
   {
     variants: {
       size: {
-        sm: "h-8 pointer-coarse:h-9 rounded-sm px-2.5 text-sm",
-        md: "h-9 pointer-coarse:h-10 rounded-md px-3 text-base",
-        lg: "h-10 rounded-md px-3.5 text-md",
+        sm: "h-8 pointer-coarse:h-9 rounded-sm px-2.5 text-sm pointer-coarse:text-touch max-sm:text-touch",
+        md: "h-9 pointer-coarse:h-10 rounded-md px-3 text-base pointer-coarse:text-touch max-sm:text-touch",
+        lg: "h-10 rounded-md px-3.5 text-md pointer-coarse:text-touch max-sm:text-touch",
       },
       mono: {
         true: "font-mono numeric",

@@ -106,6 +106,8 @@ export async function loadOrgSettings(db: DbLike, ctx: AuthContext): Promise<Org
     automationsEnabled: ctx.settings.automationsEnabled,
     auditNotifications: ctx.settings.auditNotifications ?? false,
     advancedToolsEnabled: ctx.settings.advancedToolsEnabled ?? false,
+    onboardingDismissedAt: null,
+    emailNotificationsEnabled: false,
     lastOverdueSweepAt: null,
     updatedAt: ctx.now(),
     version: 1,

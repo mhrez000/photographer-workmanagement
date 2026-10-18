@@ -292,7 +292,7 @@ There is one page, **Editors** (owner and co-owners only). It replaces Team Work
 
 ### Hidden: the code and data stay, behind **Settings → Studio → Advanced tools** (off by default, owner only)
 
-- Board (Kanban) and Timeline. **For now the Board keeps 7 columns** — With editor and Done are each split in two (Not started / Editing; Not sent to client / Done) so a drop still lands on exactly one status category — but every column and legend chip is drawn exactly like the stage pill on the Jobs list (same words, same colours), and a drag is only allowed where the matching button would be. *Follow-up: collapse to the 5 stage columns.*
+- Board (Kanban) and Timeline. **The Board shows the five stages as columns** (Cancelled behind "Show cancelled"), with the same filters as Jobs and cards drawn like the Jobs rows (stage pill, "Waiting on", due chip, Round). A drag is allowed only where the matching button would be for you — Needs editor → With editor opens *Assign editor*; With editor / Changes asked → Ready to check opens *Send for checking* (the editor's); Ready to check → Done is *Approve* (with the share question) and → Changes asked is *Ask for changes*; Done → Changes asked is *Reopen* — and every other drop snaps back with a plain note saying why. *(The 5-column follow-up shipped 14 Oct 2026; the old 7-column drop API stays for integrations.)*
 - Reports & stats (Analytics, Bottlenecks, Reports), the 12 workload/bottleneck thresholds and the review time limit
 - Workloads with capacity hours, estimated hours and bands
 - Workflows editor, custom statuses and "Move to any status…"

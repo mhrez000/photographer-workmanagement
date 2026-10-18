@@ -79,6 +79,12 @@ function PickerForm({ onOpenChange, jobId, version, mode = "assign", currentEdit
     });
   }, [rows, query, currentEditorId]);
 
+  // Two editors with the same name: show the email under both so the owner can tell them apart.
+  const sharedNames = React.useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const r of rows ?? []) seen.set(r.editor.name.trim().toLowerCase(), (seen.get(r.editor.name.trim().toLowerCase()) ?? 0) + 1);
+    return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([name]) => name));
+  }, [rows]);
   const picked = rows?.find((r) => r.editor.id === selected) ?? null;
   const disabled = !picked || picked.editor.id === currentEditorId;
 
@@ -149,7 +155,14 @@ function PickerForm({ onOpenChange, jobId, version, mode = "assign", currentEdit
             <p className="px-2 py-6 text-center text-sm text-ink-muted">{query ? `No editors match “${query}”.` : "No editors yet. Invite one from Settings → People."}</p>
           ) : (
             filtered.map((row) => (
-              <EditorRow key={row.editor.id} row={row} isCurrent={row.editor.id === currentEditorId} selected={selected === row.editor.id} onSelect={() => setSelected(row.editor.id)} />
+              <EditorRow
+                key={row.editor.id}
+                row={row}
+                showEmail={sharedNames.has(row.editor.name.trim().toLowerCase())}
+                isCurrent={row.editor.id === currentEditorId}
+                selected={selected === row.editor.id}
+                onSelect={() => setSelected(row.editor.id)}
+              />
             ))
           )}
         </div>
@@ -189,7 +202,7 @@ export function EditorDeskLine({ row, className }: { row: EditorPickerOption; cl
   );
 }
 
-function EditorRow({ row, isCurrent, selected, onSelect }: { row: EditorPickerOption; isCurrent: boolean; selected: boolean; onSelect: () => void }) {
+function EditorRow({ row, showEmail, isCurrent, selected, onSelect }: { row: EditorPickerOption; showEmail: boolean; isCurrent: boolean; selected: boolean; onSelect: () => void }) {
   return (
     <button
       type="button"
@@ -217,6 +230,7 @@ function EditorRow({ row, isCurrent, selected, onSelect }: { row: EditorPickerOp
             </Badge>
           ) : null}
         </span>
+        {showEmail ? <span className="block truncate text-xs text-ink-muted">{row.email}</span> : null}
         <EditorDeskLine row={row} className="mt-0.5" />
       </span>
       {selected ? <Check aria-hidden="true" className="size-4 shrink-0 text-accent-ink" /> : null}

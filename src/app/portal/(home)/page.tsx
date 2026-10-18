@@ -78,7 +78,7 @@ export default async function PortalHome({ searchParams }: PageProps<"/portal">)
                   <h2 id={`project-${g.project.id}`} className="truncate text-lg font-semibold text-ink">
                     {g.project.name}
                   </h2>
-                  {g.project.address ? (
+                  {g.project.address && g.project.address.trim().toLowerCase() !== g.project.name.trim().toLowerCase() ? (
                     <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-ink-muted">
                       <MapPin aria-hidden="true" className="size-3.5" />
                       {g.project.address}

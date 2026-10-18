@@ -271,6 +271,7 @@ export function CreateJobForm(props: CreateJobFormProps) {
               }}
               canCreate={props.canCreateClient}
               disabled={busy}
+              autoFocus
             />
           )}
         </FormField>

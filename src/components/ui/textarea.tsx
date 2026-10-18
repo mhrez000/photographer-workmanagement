@@ -14,7 +14,7 @@ export function Textarea({ className, invalid, fixed, rows = 3, ...props }: Text
       rows={rows}
       aria-invalid={invalid || undefined}
       className={cn(
-        "w-full min-w-0 appearance-none rounded-md border border-border bg-surface px-3 py-2 text-base text-ink shadow-xs",
+        "w-full min-w-0 appearance-none rounded-md border border-border bg-surface px-3 py-2 text-base text-ink shadow-xs pointer-coarse:text-touch max-sm:text-touch",
         "placeholder:text-ink-subtle hover:border-border-hover",
         "transition-[border-color,box-shadow] duration-(--motion-fast) ease-out-soft",
         "focus:border-accent focus:outline-none focus:ring-3 focus:ring-accent/20",

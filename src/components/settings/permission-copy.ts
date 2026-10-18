@@ -75,6 +75,12 @@ export function inviteMessage(input: { studio: string; origin: string; email: st
   return `You've been invited to ${input.studio} on Proofline. Sign in at ${origin}/login with ${input.email} and the temporary password ${input.password}. You'll be asked to choose a new password.`;
 }
 
+/** "Copy message" text for a LINK invite (the default, front door): the link is the whole secret. */
+export function inviteLinkMessage(input: { studio: string; inviteUrl: string; name?: string | null }): string {
+  const first = input.name?.trim().split(/\s+/)[0];
+  return `${first ? `Hi ${first}, ` : ""}you've been invited to ${input.studio} on Proofline. Open ${input.inviteUrl} to choose your password and sign in. The link works for 7 days.`;
+}
+
 /** Picks the member flags out of any object carrying them (a user row, an AuthContext…). */
 export function memberFlagsOf(source: Partial<Record<MemberFlag, boolean | null | undefined>>): MemberFlagValues {
   return Object.fromEntries(MEMBER_FLAGS.map((f) => [f, source[f] === true])) as MemberFlagValues;

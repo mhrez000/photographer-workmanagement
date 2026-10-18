@@ -30,10 +30,22 @@ Who (roles v2; `docs/ROLES.md` §3.3 is authoritative): **A** admin (Owner / Pho
 
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
-| POST | `/api/auth/login` | `{ email, password, next? }` | `{ user, redirectTo }` + cookie (`redirectTo` = `/portal` for clients, else `next` or `/dashboard`). Wrong password, inactive account and a client whose portal is off all get the same 401 | public (rate-limited) |
+| POST | `/api/auth/login` | `{ email, password, next? }` | `{ user, redirectTo }` + cookie (`redirectTo` = `loginRedirectTarget`: clients `/portal`, editors `/my-jobs`, else `next` or `/home`). Wrong password, inactive account, an invite not yet accepted and a client whose portal is off all get the same 401 | public (rate-limited) |
 | POST | `/api/auth/logout` | — | `{ ok }` (HTML form → 303 `/login`) | any |
 | GET | `/api/auth/me` | — | staff: `{ kind: "staff", user (+ persona, personaLabel, isAdmin, isPrimaryOwner, 7 effective switches), organisation, settings, unreadCount }` · client: `{ kind: "client", name, email, clientName, studioName, unreadCount }` only | signed in (`requireAnyContext`) |
 | POST | `/api/auth/change-password` | `{ current, next }` | ok; other sessions revoked | self |
+
+### Front door (public — no session; CSRF Origin check + rate limits still apply; `src/proxy.ts` lets `/`, `/signup`, `/forgot-password`, `/reset-password`, `/invite/*` and `/api/auth/*` through)
+
+| Method | Path | Body / query | Response | Who |
+|---|---|---|---|---|
+| POST | `/api/auth/signup` | `SignUpInput` (strict) `{ ownerName, email, password (>= 10), studioName (2-80), timezone? (IANA) }` | `{ organisationId, slug, user: { id, name, email, role: "photographer" }, redirectTo: "/home" }` + staff cookie. ONE transaction: organisation + settings defaults + owner (admin, primary owner, every switch on, `accepted_at = now`) + the default workflow + the types of shoot (`bootstrapOrganisation`, the same function the demo seed runs); events `org.created` / `user.created` / ... with cause `signup`. Taken email (any org, any role) -> 400 `validation` with `fieldErrors.email = ["That email is already in use. Try signing in."]` (same timing as success) | public; `SIGNUP_RATE_LIMIT` 5 / hour / IP (per email when no client IP is known) -> 429 + `retry-after` |
+| POST | `/api/auth/forgot-password` | `{ email }` | ALWAYS `{ ok: true, emailed }` - never says whether the address has an account. A 60-minute single-use token is created (and emailed when email is configured) only for an active, accepted user; older live tokens of that user are superseded; audited `auth.password_reset_requested` (management). Local dev without email also returns `resetUrl` (never in production) | public; `PASSWORD_RESET_RATE_LIMIT` 5 / 15 min per email + IP -> 429 |
+| POST | `/api/auth/reset-password` | `{ token, password (>= 10) }` | `{ ok: true, redirectTo }` + cookie. Sets the password, bumps `session_version` (every other session dies), marks the token used, audits `user.password_changed` (cause `reset`). Unknown / expired / used link -> 400 `validation` "This reset link is no longer valid" | public |
+| GET | `/api/auth/invite/:token` | - | live link: `{ valid: true, studioName, inviterName, role, persona, personaLabel, email, name, expiresAt }` - anything else: `{ valid: false }` (200; unknown / expired / used / revoked are indistinguishable). Tokens here, on `/invite/:token` and on the reset routes are URL-decoded and trimmed first (`cleanToken` / `TokenSchema`: a trailing `%20` from a mail client is forgiven); `/invite` with no token is a friendly dead-link page, not a 404 | public |
+| POST | `/api/auth/invite/:token/accept` | `{ password (>= 10), name? }` | `{ user: { id, name, email, role }, redirectTo }` + cookie (staff, or client -> portal). Sets the password + `accepted_at` (+ name), bumps `session_version`, marks the token used, audits `user.accepted_invite` as the person. Any invalid link (incl. a client whose portal is off) -> 400 `validation` "This invite link is no longer valid" | public |
+
+Links: `inviteUrl` = `${appOrigin}/invite/${token}`, reset = `${appOrigin}/reset-password?token=...`; `appOrigin(req?)` (`src/server/origin.ts`): production (`NODE_ENV=production`) = env `APP_URL` -> `APP_ORIGIN` -> the request origin -> `http://localhost:3000`; development / test = the request origin -> `APP_URL` -> `APP_ORIGIN` -> `http://localhost:3000` (so a stale `APP_URL` on a dev server never hands out a dead link). Settings -> Studio's email card notes when `APP_URL` differs from the page's own address (`linkOriginStatus`). Tokens are 32 random bytes (base64url), shown ONCE; only `sha256` hex is stored (`auth_tokens`, append-only, `used_at` fill-once). Email: `RESEND_API_KEY` + `EMAIL_FROM` -> provider `resend`; otherwise `console` (one log line, no token) and the UI shows the copyable link (`emailed: false`).
 
 ## Jobs
 
@@ -128,14 +140,16 @@ Who (roles v2; `docs/ROLES.md` §3.3 is authoritative): **A** admin (Owner / Pho
 | Method | Path | Body / query | Response | Who |
 |---|---|---|---|---|
 | GET | `/api/users` | `role, active (1/0), q` | `(UserProfile \| ReducedUser)[]` — reduced projection (no email; never client users; `role=client` → 400) for M/E | user.view |
-| POST | `/api/users` | `InviteUserInput` (strict, by `role`): photographer `{ email, name, title?, capacityHoursPerWeek?, isAdmin?, flags?: {member switches} }` (omitted switches = invite defaults: review off) · editor `{ …, flags?: { canCreateJobs?, canViewTeamJobs? } }` · client `{ email, name, clientId }` (portal must be on, else 422). Email used anywhere → 409 | `{ user, tempPassword }` (show once) | A |
+| POST | `/api/users` | `InviteUserInput` (strict, by `role`): photographer `{ email, name, title?, capacityHoursPerWeek?, isAdmin?, flags?: {member switches} }` (omitted switches = invite defaults: review off) · editor `{ …, flags?: { canCreateJobs?, canViewTeamJobs? } }` · client `{ email, name, clientId }` (portal must be on, else 422). Plus `method?: "link" \| "temp_password"` (default `"link"`). Email used anywhere → 409 | `method: "link"` → `{ user, method: "link", inviteUrl, emailed, expiresAt }` — the person has NO usable password until they open the link (`accepted_at` null; login refused); `emailed` true when the link was emailed, else show `inviteUrl` to copy. `method: "temp_password"` → `{ user, method: "temp_password", tempPassword }` (show once; accepted at once) | A |
+| POST | `/api/users/:id/invite/resend` | — | `{ inviteUrl, emailed, expiresAt }` — a fresh 7-day link for a pending person; every older link stops working (audited `user.invite_sent` with `resend: true`). Already joined / deactivated → 422 | A |
+| POST | `/api/users/:id/invite/revoke` | — | `{ userId, revoked }` — every live invite link of a pending person stops working (`revoked` = how many; 0 is still a success; audited `user.invite_revoked`). The account stays, with no way in. Already joined → 422 | A |
 | GET | `/api/users/options` | `role` (one, comma list or repeated), `jobId` (only people who may view that job — @mentions), `includeInactive=1`, `excludeSelf=1`, `q` | `UserOption[] { id, name, role, avatarColour, isActive, workload: { band, active, overdue } \| null }` — workload only for editors and only when the actor may view team workloads | user.view (`jobId` not visible → 404) |
 | GET | `/api/users/:id` | — | `UserDetailView` | user.view (reduced for M/E; a client user's id → 404 for non-admins) |
 | PATCH | `/api/users/:id` | `{ expectedVersion, name?, title?, avatarColour?, email? }` | `SafeUser` | A (email: `user.change_email`; never the primary owner unless self); self (name/title/avatar) |
 | POST | `/api/users/:id/role` | `{ role, expectedVersion }` | `SafeUser` | A (photographer ⇄ editor only; never self; never the primary owner) |
 | POST | `/api/users/:id/deactivate` | `{ expectedVersion, reassignTo? \| unassign?, reason? }` | `DeactivateResult` | A (not self, not the primary owner, last-admin guard) |
 | POST | `/api/users/:id/reactivate` | `{ expectedVersion }` | `SafeUser` | A |
-| POST | `/api/users/:id/reset-password` | — | `{ userId, tempPassword }` (sessions revoked) | A (staff and client users; not the primary owner); self |
+| POST | `/api/users/:id/reset-password` | — | `{ userId, tempPassword }` (sessions revoked; on a still-pending invitee it also sets `accepted_at` and kills their live invite link) | A (staff and client users; not the primary owner); self |
 | POST | `/api/users/:id/anonymise` | `{ expectedVersion }` | `SafeUser` | A (deactivated target) |
 | POST | `/api/users/:id/capacity` | `{ capacityHoursPerWeek \| null, expectedVersion }` | `SafeUser` | A |
 | POST | `/api/users/:id/permissions` | `{ canCreateJobs?, canViewAllJobs?, canAssignEditors?, canReviewSubmissions?, canViewTeamWorkloads?, canViewAnalytics?, canViewTeamJobs?, expectedVersion }` (member switches on non-admin photographers, editor switches on editors; admin target → 422) | `SafeUser` | A (`/visibility` was removed) |
@@ -222,6 +236,9 @@ Kinds: `production | editors | photographers | business`. The query-string form 
 | PATCH | `/api/settings` | `{ expectedVersion, organisationName?, …any settings field }` (incl. `advancedToolsEnabled`, Settings → Studio → Advanced tools) | `UpdateSettingsResult { …, changedFields[] }` (no change → 200, empty list) | A |
 | POST | `/api/settings/close-delivered-jobs` | `{ confirm: true }` | `CloseDeliveredJobsResult { ok[], failed[] }` — every Approved / Delivered job completed one by one through the recorded engine move (SIMPLIFICATION-PLAN §9) | A |
 | GET | `/api/settings/permissions` ⚙ Advanced | — | `PermissionMatrixRow[]` | A |
+| GET | `/api/settings/email` | — | `EmailSettingsView { configured, provider: "resend" \| "console", from, notificationsEnabled }` — whether invite / reset links are emailed (`RESEND_API_KEY` + `EMAIL_FROM`) or must be copied from the screen; `notificationsEnabled` mirrors the reserved `organisation_settings.email_notifications_enabled` | A (`settings.view`) |
+| GET | `/api/settings/onboarding` | — | `OnboardingState \| null` — first-run checklist for admins (`steps { createdFirstJob, invitedEditor, addedClient, assignedEditor, approvedFirst }`, `completed`, `total: 5`, `dismissed`, `dismissedAt`, `isNewStudio` (< 3 jobs and < 30 days), `jobCount`, `studioAgeDays`, `show`); `null` for everyone else (`src/server/queries/onboarding.ts`) | signed-in staff (admins get data) |
+| POST | `/api/settings/onboarding/dismiss` | — | `{ dismissedAt, changed }` — hides the checklist for every admin of the studio (idempotent; audited `settings.updated`, field `onboardingDismissedAt`) | A (`settings.manage`) |
 | GET | `/api/workflows` ⚙ Advanced (every `/api/workflows/**`, `/api/statuses/**`, `/api/transitions/**` route) | — | `WorkflowListItem[]` | A |
 | POST | `/api/workflows` | `{ name, description?, from?: default\|workflow\|blank, sourceWorkflowId?, isDefault? }` | `WorkflowGraph` | A |
 | GET | `/api/workflows/:id` | — | `WorkflowGraph` | A |
@@ -314,7 +331,7 @@ Sharing and portal columns are written only by these routes (and the delivery st
 | GET | `/api/clients/:id/portal-users` | — | `ClientPortalUser[]` | A |
 | POST | `/api/me/scope` | **Removed** with the "My shoots / Whole business" switch (SIMPLIFICATION-PLAN §8): answers 404 for every method after auth. `?scope=` on list routes is ignored for everyone. | 404 | — |
 
-Client users are invited with `POST /api/users { role: "client", clientId, name, email }`; reset / deactivate / reactivate use the normal user routes.
+Client users are invited with `POST /api/users { role: "client", clientId, name, email }` — by default an invite link they open at `/invite/:token` to choose their password (the portal must be on when they accept); reset / deactivate / reactivate / invite resend / revoke use the normal user routes.
 
 ## Client portal (`/api/portal/**`, `requirePortalContext()`; staff sessions get 403)
 

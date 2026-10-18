@@ -47,6 +47,7 @@ import {
   PERMISSION_FLAGS,
   personaMayEver,
   type Action,
+  type InviteMethod,
   type NotificationType,
   type PermissionFlag,
   type Role,
@@ -69,6 +70,7 @@ import {
 import { recordEvent } from "@/server/audit";
 import { generateTempPassword, hashPassword } from "@/server/auth/password";
 import { assertCan, inviteSwitchesFor, isAdmin, personaOf, type UserPermissionRef } from "@/server/auth/permissions";
+import { consumeLiveTokens, issueToken, unusablePasswordHash } from "@/server/auth/tokens";
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from "@/server/errors";
 import { first, loadUserInOrg, one, parseInput, safeUser, withTx, type Db, type DbLike, type SafeUser, type Tx } from "./_shared";
 import { UserRuleError, checkVersion, diffFields, ruleViolation } from "./_admin";
@@ -283,8 +285,12 @@ async function loadPortalClient(db: DbLike, ctx: AuthContext, clientId: string):
 
 export interface InviteResult {
   user: SafeUser;
-  /** Shown once to the inviter; never stored in plaintext or audited. */
-  tempPassword: string;
+  /** How the person gets in (front door): a link they open, or a temp password read out to them. */
+  method: InviteMethod;
+  /** "temp_password" only. Shown once to the inviter; never stored in plaintext or audited. */
+  tempPassword: string | null;
+  /** "link" only: the plain token (show / email it once) and when it stops working. */
+  invite: { token: string; expiresAt: string } | null;
 }
 
 /** Every switch column of a new user: the invite defaults of its role, overridden by the input (§2.2). */
@@ -311,10 +317,15 @@ function definedOnly<T extends object>(value: T | undefined): Partial<T> {
  * portal-enabled client. Omitted switches take the invite defaults (members:
  * review ✗). Email uniqueness is global: a taken address is a 409 that names
  * neither the organisation nor the role.
+ *
+ * Front door: `method` "link" (default) stores an UNUSABLE password hash, `accepted_at = null` and issues a
+ * 7-day invite token (returned once in `invite.token`; audited `user.invite_sent`) — the person chooses their
+ * own password through `acceptInvite`. `method` "temp_password" (or a prepared `secret`) is the old path:
+ * a usable temp password, `accepted_at = now`.
  */
 export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
-  requireHuman(ctx, "user.invite");
+  const actorId = requireHuman(ctx, "user.invite");
   const parsed = parseInput(InviteUserInput, input);
   // SIMPLIFICATION-PLAN §2: one preset ("Only their own shoots" / "Everything (co-owner)") pre-fills the
   // switches; explicit `isAdmin` / `flags` still win.
@@ -323,6 +334,7 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
     parsed.role === "photographer" && preset
       ? { ...parsed, ...inviteSwitchesFor(preset, { isAdmin: parsed.isAdmin, flags: parsed.flags }) }
       : parsed;
+  const method: InviteMethod = secret ? "temp_password" : (data.method ?? "link");
   const newRef: UserPermissionRef = { id: "new", role: data.role, isActive: true, organisationId: ctx.organisationId, nextRole: data.role };
   assertCan(ctx, "user.invite", newRef);
   const makeAdmin = data.role === "photographer" && data.isAdmin === true;
@@ -330,7 +342,7 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
   const client = data.role === "client" ? await loadPortalClient(tx, ctx, data.clientId) : null;
   if (await isEmailTaken(tx, data.email)) throw new ConflictError(EMAIL_UNAVAILABLE_MESSAGE);
 
-  const { tempPassword, passwordHash } = await secretOrHash(secret);
+  const prepared = method === "temp_password" ? await secretOrHash(secret) : null;
   const now = ctx.now();
   const flags = inviteFlagValues(data);
   const row = await guarded(
@@ -340,7 +352,7 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
         .values({
           organisationId: ctx.organisationId,
           email: data.email,
-          passwordHash,
+          passwordHash: prepared ? prepared.passwordHash : unusablePasswordHash(),
           name: data.name,
           role: data.role,
           title: data.role === "client" ? null : (data.title ?? null),
@@ -351,6 +363,8 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
           ...flags,
           clientId: client?.id ?? null,
           isActive: true,
+          invitedAt: now,
+          acceptedAt: prepared ? now : null,
           createdAt: now,
           updatedAt: now,
         })
@@ -374,16 +388,39 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
       usualCapacityJobs: row.usualCapacityJobs,
       flags: pickFlags(flagsOf(row), relevantFlags(row.role, row.isAdmin)),
     },
-    metadata: { targetUserId: row.id, ...(client ? { clientName: client.name } : {}), ...(preset ? { preset } : {}) },
+    metadata: { targetUserId: row.id, method, ...(client ? { clientName: client.name } : {}), ...(preset ? { preset } : {}) },
   });
-  return { user: safeUser(row), tempPassword };
+  if (prepared) return { user: safeUser(row), method, tempPassword: prepared.tempPassword, invite: null };
+
+  const issued = await issueToken(tx, { organisationId: ctx.organisationId, userId: row.id, kind: "invite", createdByUserId: actorId, now });
+  await recordEvent(tx, ctx, {
+    entityType: "user",
+    entityId: row.id,
+    eventType: "user.invite_sent",
+    action: "invited",
+    previousValue: null,
+    newValue: { name: row.name, email: row.email, role: row.role, expiresAt: issued.expiresAt },
+    metadata: { targetUserId: row.id, targetName: row.name, resend: false, superseded: 0, method },
+  });
+  return { user: safeUser(row), method, tempPassword: null, invite: { token: issued.token, expiresAt: issued.expiresAt } };
 }
 
-/** Async convenience: hashes outside the transaction, then runs `inviteUser`. */
+/** Async convenience: hashes outside the transaction, then runs `inviteUser` with method "temp_password". */
 export async function inviteUserWithTempPassword(ctx: AuthContext, input: unknown, db?: Db): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
   const secret = await prepareTempPassword();
   return withTx((tx) => inviteUser(tx, ctx, input, secret), { db });
+}
+
+/**
+ * `POST /api/users`: picks the path from `method` in the body ("link" by default — no bcrypt, the token is
+ * issued in the transaction; "temp_password" → `inviteUserWithTempPassword`).
+ */
+export async function inviteUserByMethod(ctx: AuthContext, input: unknown, db?: Db): Promise<InviteResult> {
+  assertMayEver(ctx, "user.invite");
+  const method = input && typeof input === "object" && !Array.isArray(input) ? (input as { method?: unknown }).method : undefined;
+  if (method === "temp_password") return inviteUserWithTempPassword(ctx, input, db);
+  return withTx((tx) => inviteUser(tx, ctx, input), { db });
 }
 
 /* ------------------------------------------------------------------ */
@@ -832,9 +869,14 @@ export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, se
   checkVersion(target, data.expectedVersion, safeUser(target));
   const { tempPassword, passwordHash } = await secretOrHash(secret);
   const nextSession = target.sessionVersion + 1;
+  const now = ctx.now();
+  // Front door: a temp password is a usable password, so a still-pending invitee counts as accepted from here
+  // and any live invite link of theirs stops working (fill-once used_at).
+  const pendingInvite = target.acceptedAt === null;
+  const superseded = pendingInvite ? await consumeLiveTokens(tx, target.id, "invite", now) : 0;
   await tx
     .update(users)
-    .set({ passwordHash, sessionVersion: nextSession, updatedAt: ctx.now(), version: target.version + 1 })
+    .set({ passwordHash, sessionVersion: nextSession, updatedAt: now, version: target.version + 1, ...(pendingInvite ? { acceptedAt: now } : {}) })
     .where(eq(users.id, target.id));
   await recordEvent(tx, ctx, {
     entityType: "user",
@@ -843,7 +885,13 @@ export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, se
     action: "updated",
     previousValue: { sessionVersion: target.sessionVersion },
     newValue: { sessionVersion: nextSession, name: target.name },
-    metadata: { targetUserId: target.id, self: target.id === actorId, reset: true },
+    metadata: {
+      targetUserId: target.id,
+      self: target.id === actorId,
+      reset: true,
+      // (the audit redactor drops keys matching /password/i, so the method is a VALUE here)
+      ...(pendingInvite ? { acceptedVia: "temp_password" satisfies InviteMethod, invitesSuperseded: superseded } : {}),
+    },
   });
   return { userId: target.id, tempPassword };
 }

@@ -1,4 +1,3 @@
 export { KanbanBoard, type KanbanBoardProps } from "./kanban-board";
 export { KanbanCardView, type KanbanCardViewProps } from "./kanban-card";
-export { ShowCancelledToggle } from "./kanban-controls";
-export { kanbanLimitKey, columnLabelParts, columnStage, columnTone, type BoardColumnKey } from "./shared";
+export { BOARD_STAGES, MOVE_BUTTON_LABEL, columnLabel, columnTone, kanbanLimitKey, whyNotMove, type BoardColumnKey } from "./shared";

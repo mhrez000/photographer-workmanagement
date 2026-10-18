@@ -4,7 +4,7 @@ import { SectionCard } from "@/components/common/section-card";
 import { ArchiveControl } from "@/components/production/archive-control";
 import { EditClientDialog } from "@/components/production/client-form";
 import { ClientJobsByAddress } from "@/components/production/client-jobs";
-import { ClientOnlineAccess } from "@/components/production/client-online-access";
+import { ClientOnlineAccess, type ClientUserInvite } from "@/components/production/client-online-access";
 import { PageContainer } from "@/components/shell";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,8 @@ import { getViewer } from "@/server/auth/session";
 import { allowed, guard, load, pageContext } from "@/server/page";
 import { getClientDetail, listClientJobsSimple } from "@/server/queries/clients";
 import { getClientPortalAccess } from "@/server/queries/portal";
+import { listUsers } from "@/server/queries/users";
+import { pendingInviteFor } from "@/server/services/invites";
 
 export const metadata: Metadata = { title: "Client" };
 
@@ -38,6 +40,15 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
   const canManagePortal = allowed(ctx, "client.manage_portal", { organisationId: ctx.organisationId });
   const access = canManagePortal ? await load(() => getClientPortalAccess(db, ctx, client.id)) : null;
   const studioName = access ? ((await getViewer())?.organisationName ?? "Your studio") : "";
+  // Front door: which of this client's portal users have not opened their invite link yet (and whether a link still works).
+  const invites: Record<string, ClientUserInvite> = {};
+  if (access && access.users.some((u) => u.isActive)) {
+    const profiles = await load(() => listUsers(db, ctx, { role: "client", active: "1" }));
+    for (const u of profiles) {
+      if (!("email" in u) || u.clientId !== client.id || u.acceptedAt !== null || u.anonymisedAt) continue;
+      invites[u.id] = { live: await load(() => pendingInviteFor(db, u.id, ctx.now())) };
+    }
+  }
   const active = jobs.filter((j) => j.stage.active).length;
   const late = jobs.filter((j) => j.due.late).length;
 
@@ -121,7 +132,7 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
         </SectionCard>
 
         <div className="flex min-w-0 flex-col gap-6">
-          {access ? <ClientOnlineAccess access={access} studioName={studioName} timeZone={tz} /> : null}
+          {access ? <ClientOnlineAccess access={access} studioName={studioName} timeZone={tz} invites={invites} /> : null}
 
           {ctx.role !== "editor" && detail.notes ? (
             <SectionCard title="Private notes" description="Only you and your photographers see this.">

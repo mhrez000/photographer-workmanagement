@@ -97,9 +97,11 @@ test("the editor's page: five numbers with vs-last-month arrows, On their desk n
   const { editor, onDesk, late, finished } = await editorWithNumbers(api, "Detail");
 
   await gotoReady(page, "/editors", editorRow(page, editor.user.name));
+  const editorUrl = new RegExp(`/editors/${editor.user.id}`);
   await retrying(async () => {
-    await editorRow(page, editor.user.name).getByRole("link").first().click({ timeout: 5_000 });
-    await expect(page).toHaveURL(new RegExp(`/editors/${editor.user.id}`), { timeout: 15_000 });
+    // A slow first compile can land after the 15 s check: click again only while still on the list.
+    if (!editorUrl.test(page.url())) await editorRow(page, editor.user.name).getByRole("link").first().click({ timeout: 5_000 });
+    await expect(page).toHaveURL(editorUrl, { timeout: 15_000 });
   });
   await expectPlainWords(page, `/editors/${editor.user.id}`);
   const main = page.getByRole("main");

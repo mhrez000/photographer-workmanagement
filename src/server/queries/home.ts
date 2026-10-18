@@ -28,11 +28,11 @@ import { STAGE_META } from "@/lib/stages";
 import { can, isAdmin, workedOnJob } from "@/server/auth/permissions";
 import { loadJobRefs } from "@/server/auth/job-ref";
 import { ForbiddenError } from "@/server/errors";
-import { computeEditorRows } from "./editors";
+import { computeEditorRows, pendingEditors } from "./editors";
 import { activeStageWhere, countSimpleRows, lateWhere, selectSimpleRows, simpleBounds, stageWhere } from "./jobsSimple";
 import { loadUserRefs } from "./metrics";
 import { assertStaffRead, type OrgDayBounds } from "./scope";
-import { loadSimplerNoticeDismissedAt } from "./simpleColumns";
+import { loadShowSimplerNotice } from "./simpleColumns";
 
 export const HOME_LIST_LIMIT = 20;
 /** Needs attention shows at most this many late / no-editor jobs (questions and client messages always show). */
@@ -299,6 +299,7 @@ export async function getOwnerHome(db: DbLike, ctx: AuthContext): Promise<OwnerH
   const yourEditors: HomeEditorRow[] | null = admin
     ? (await computeEditorRows(db, ctx, "this_month", now)).map((r) => ({
         editor: r.editor,
+        email: r.email,
         onDesk: r.onDesk,
         lateNow: r.lateNow,
         onTimePctThisMonth: r.onTimePct,
@@ -316,8 +317,10 @@ export async function getOwnerHome(db: DbLike, ctx: AuthContext): Promise<OwnerH
     needsAttention: attention.rows,
     needsAttentionMore: attention.more,
     yourEditors,
+    pendingEditors: admin ? await pendingEditors(db, ctx) : null,
     comingUp: await comingUpItems(db, ctx, bounds),
-    simplerNotice: (await loadSimplerNoticeDismissedAt(db, ctx)) === null,
+    // Pre-simplification studios only, until dismissed; a new sign-up never saw the old screens.
+    simplerNotice: await loadShowSimplerNotice(db, ctx),
     emptyStudio: total === 0,
     asOf: now,
   };

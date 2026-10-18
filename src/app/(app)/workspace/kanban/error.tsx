@@ -8,10 +8,10 @@ export default function KanbanError({ error, retry }: { error: Error & { digest?
     <PageContainer>
       <ErrorState
         title="The board could not be loaded"
-        message="Something went wrong while loading the kanban board. Your jobs are safe — try again."
+        message="Something went wrong while loading the board. Your jobs are safe — try again, or open the Jobs list."
         onRetry={retry}
-        homeHref="/workspace/all"
-        homeLabel="Open All Work"
+        homeHref="/jobs"
+        homeLabel="Open Jobs"
         digest={error.digest}
       />
     </PageContainer>

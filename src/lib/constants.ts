@@ -494,6 +494,7 @@ export const ENTITY_TYPES = [
   "job", "assignment", "transition", "comment", "revision", "note", "link", "work_session",
   "user", "team", "client", "project", "workflow", "status", "workflow_transition", "job_type",
   "automation", "automation_run", "settings", "notification", "auth", "saved_view", "dashboard",
+  "organisation",
 ] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 
@@ -502,6 +503,8 @@ export const EVENT_ACTIONS = [
   "started", "paused", "resumed", "stopped", "superseded", "removed", "archived", "restored",
   "deactivated", "reactivated", "anonymised", "flagged", "mentioned", "soft_deleted", "ran",
   "logged_in", "login_failed", "logged_out", "migrated",
+  // front door (sign-up, invite links, password reset)
+  "invited", "revoked",
   // job milestones (§5: the action matches the milestone name)
   "accepted", "declined", "submitted", "approved", "delivered", "completed", "cancelled", "reopened",
 ] as const;
@@ -553,11 +556,13 @@ export const EVENT_TYPES = [
   "job.client_sharing_changed", "project.client_sharing_changed", "link.client_sharing_changed",
   "client.portal_updated", "user.admin_changed", "settings.primary_owner_changed",
   "saved_view.created", "saved_view.updated", "saved_view.deleted", "dashboard.updated",
+  // front door: sign-up, invite links, password reset (src/server/services/{organisations,invites,passwordReset}.ts)
+  "org.created", "user.invite_sent", "user.invite_revoked", "user.accepted_invite", "auth.password_reset_requested",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
 /** Event types that are always written with visibility = "management". */
-export const MANAGEMENT_EVENT_PREFIXES = ["user.", "auth.", "team.", "workflow.", "status.", "workflow_transition.", "job_type.", "automation.", "settings.", "notification."] as const;
+export const MANAGEMENT_EVENT_PREFIXES = ["user.", "auth.", "team.", "workflow.", "status.", "workflow_transition.", "job_type.", "automation.", "settings.", "notification.", "org."] as const;
 
 /** Event types shown in the job History tab (milestones); the Activity tab shows everything. */
 export const HISTORY_EVENT_TYPES: readonly EventType[] = [
@@ -859,6 +864,44 @@ export const DEFAULT_JOB_TYPES: readonly { name: string; colour: string; default
   { name: "Retouching", colour: "#f97316", defaultEstimatedHours: 1.5 },
 ];
 
+/**
+ * "Usual days to edit" a fresh studio starts with per type of shoot (SIMPLIFICATION-PLAN §5: a new job's due
+ * date defaults to shoot date + N). Set by `bootstrapOrganisation`; editable under Settings → Types of shoot.
+ */
+export const DEFAULT_USUAL_DAYS_BY_JOB_TYPE: Readonly<Record<string, number>> = {
+  "Real Estate": 1,
+  Drone: 1,
+  Twilight: 2,
+  "Floor Plans": 1,
+  "Virtual Staging": 2,
+  Retouching: 2,
+  Product: 4,
+  Commercial: 6,
+  Video: 10,
+  Wedding: 28,
+};
+
+/* ------------------------------------------------------------------ */
+/*  Front door: sign-up, invite links, password reset                  */
+/* ------------------------------------------------------------------ */
+
+/** `auth_tokens.kind` (one-time links; the plain token is never stored). */
+export const AUTH_TOKEN_KINDS = ["invite", "password_reset"] as const;
+export type AuthTokenKind = (typeof AUTH_TOKEN_KINDS)[number];
+/** Invite links stay valid for 7 days. */
+export const INVITE_TTL_HOURS = 168;
+/** Password-reset links stay valid for an hour. */
+export const RESET_TTL_MINUTES = 60;
+/** How a new person gets in: a link they open to set their own password (default), or a temp password read out to them. */
+export const INVITE_METHODS = ["link", "temp_password"] as const;
+export type InviteMethod = (typeof INVITE_METHODS)[number];
+/** organisations.slug: lower-case letters, digits and single hyphens; a numeric suffix is added when taken. */
+export const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+export const SLUG_MAX_LENGTH = 48;
+export const SLUG_FALLBACK = "studio";
+export const STUDIO_NAME_MIN_LENGTH = 2;
+export const STUDIO_NAME_MAX_LENGTH = 80;
+
 /* ------------------------------------------------------------------ */
 /*  Permissions: action → personas that can EVER perform it            */
 /*  Scope conditions live in src/server/auth/permissions.ts (POLICY)   */
@@ -1091,6 +1134,10 @@ export const JOB_NUMBER_PAD = 4;
 export const SESSION_COOKIE_NAME = "pwm_session";
 export const SESSION_TTL_DAYS = 7;
 export const LOGIN_RATE_LIMIT = { attempts: 5, windowMinutes: 15 } as const;
+/** Public sign-up: 5 studios per hour per IP (per email when no client IP is known, see src/server/auth/rate-limit.ts). */
+export const SIGNUP_RATE_LIMIT = { attempts: 5, windowMinutes: 60 } as const;
+/** Forgot-password requests per email + IP. */
+export const PASSWORD_RESET_RATE_LIMIT = { attempts: 5, windowMinutes: 15 } as const;
 export const SWEEP_MIN_INTERVAL_MINUTES = 5;
 export const BCRYPT_COST = 12;
 export const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#8b5cf6", "#64748b", "#d97706", "#0891b2"] as const;
@@ -1100,7 +1147,7 @@ export const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#22c55e", "#f59
 /* ------------------------------------------------------------------ */
 
 /** Why an event was written; recorded in every activity_events.metadata (ARCHITECTURE.md §5). */
-export const EVENT_CAUSES = ["user", "automation", "sweep", "seed", "recompute", "migration"] as const;
+export const EVENT_CAUSES = ["user", "automation", "sweep", "seed", "recompute", "migration", "signup", "reset"] as const;
 export type EventCause = (typeof EVENT_CAUSES)[number];
 
 /** Business reason of a sharing event (`metadata.reason`); the cause stays the actor cause (§1.1). */
