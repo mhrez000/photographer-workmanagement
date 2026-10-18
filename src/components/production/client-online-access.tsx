@@ -1,41 +1,59 @@
 "use client";
 
 import * as React from "react";
-import { KeyRound, MoreHorizontal, UserCheck, UserX } from "lucide-react";
+import { Ban, KeyRound, MoreHorizontal, Send, UserCheck, UserX } from "lucide-react";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { SectionCard } from "@/components/common/section-card";
 import { RelativeTime } from "@/components/jobs/relative-time";
 import { useMutationRunner } from "@/components/jobs/mutation";
+import { InviteLinkPanel } from "@/components/settings/invite-link-panel";
 import { TempPasswordPanel } from "@/components/settings/temp-password-panel";
-import { InviteClientUserDialog } from "@/components/sharing/invite-client-user-dialog";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api-client";
+import { formatDate } from "@/lib/dates";
 import type { ClientPortalAccess, ClientPortalUser } from "@/lib/sharing";
+import { ClientInviteDialog } from "./client-invite-dialog";
+
+/** Front door: a portal user who has not opened their invite link yet. `live` = a link still works. */
+export interface ClientUserInvite {
+  live: { expiresAt: string } | null;
+}
 
 export interface ClientOnlineAccessProps {
   access: ClientPortalAccess;
   studioName: string;
   timeZone: string;
+  /** Pending invites by user id (people with `accepted_at` null); anyone missing has joined. */
+  invites?: Record<string, ClientUserInvite>;
 }
 
-type PendingAction = { kind: "deactivate" | "reset"; user: ClientPortalUser } | null;
+type PendingAction = { kind: "deactivate" | "reset" | "resend" | "revoke"; user: ClientPortalUser } | null;
+
+interface ResendResult {
+  inviteUrl: string;
+  emailed: boolean;
+  expiresAt: string;
+}
 
 /**
  * The client page's portal card in plain words (docs/SIMPLIFICATION-PLAN.md §3, §8 "Clients (with the
  * portal switch per client)"): "Client can see their work online", "Client can leave feedback", and the
  * people from the client who can sign in. Owners only (`client.manage_portal`); the page renders nothing
  * for anyone else. POST /api/clients/:id/portal with the client's version; 409 → reload toast.
+ * Invites (front door): the default is a LINK; a pending person shows "Invite pending · expires …" with
+ * Send a new link / Revoke invite in their menu. Copying never invalidates a link; only a new one does.
  */
-export function ClientOnlineAccess({ access, studioName, timeZone }: ClientOnlineAccessProps) {
+export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} }: ClientOnlineAccessProps) {
   const run = useMutationRunner();
   const [saving, setSaving] = React.useState<"portal" | "feedback" | null>(null);
   const [action, setAction] = React.useState<PendingAction>(null);
   const [tempPassword, setTempPassword] = React.useState<{ user: ClientPortalUser; password: string } | null>(null);
+  const [freshLink, setFreshLink] = React.useState<{ user: ClientPortalUser; link: ResendResult } | null>(null);
   const activeUsers = access.users.filter((u) => u.isActive);
 
   async function setSwitch(which: "portal" | "feedback", value: boolean) {
@@ -68,6 +86,43 @@ export function ClientOnlineAccess({ access, studioName, timeZone }: ClientOnlin
     });
     if (res.ok) setTempPassword({ user, password: res.data.tempPassword });
   }
+
+  async function resendInvite(user: ClientPortalUser) {
+    const res = await run(() => api.post<ResendResult>(`/api/users/${user.id}/invite/resend`, {}), { success: `New invite link for ${user.name}` });
+    if (res.ok) setFreshLink({ user, link: res.data });
+  }
+
+  async function revokeInvite(user: ClientPortalUser) {
+    await run(() => api.post<{ userId: string; revoked: number }>(`/api/users/${user.id}/invite/revoke`, {}), { success: `${user.name}'s invite link no longer works` });
+  }
+
+  const confirmCopy: Record<NonNullable<PendingAction>["kind"], { title: (n: string) => string; description: string; confirm: string; destructive: boolean }> = {
+    deactivate: {
+      title: (n) => `Remove ${n}'s access?`,
+      description: "They are signed out and can't sign in until you give access back. Their feedback stays on the jobs.",
+      confirm: "Remove access",
+      destructive: true,
+    },
+    reset: {
+      title: (n) => `Reset ${n}'s password?`,
+      description: "They are signed out everywhere. You'll get a temporary password to send them.",
+      confirm: "Reset password",
+      destructive: false,
+    },
+    resend: {
+      title: (n) => `Send ${n} a new invite link?`,
+      description: "Any link they already have stops working. You can copy the new one here, and it is emailed when your studio has email set up.",
+      confirm: "Send a new link",
+      destructive: false,
+    },
+    revoke: {
+      title: (n) => `Revoke ${n}'s invite?`,
+      description: "Their link stops working and they have no way in until you send a new one. The account stays.",
+      confirm: "Revoke invite",
+      destructive: true,
+    },
+  };
+  const current = action ? confirmCopy[action.kind] : null;
 
   return (
     <SectionCard
@@ -113,59 +168,86 @@ export function ClientOnlineAccess({ access, studioName, timeZone }: ClientOnlin
             <h3 className="text-sm font-semibold text-ink">
               Who can sign in <span className="font-normal text-ink-muted">({activeUsers.length})</span>
             </h3>
-            <InviteClientUserDialog clientId={access.clientId} clientName={access.clientName} studioName={studioName} disabled={!access.portalEnabled || access.archived} />
+            <ClientInviteDialog clientId={access.clientId} clientName={access.clientName} studioName={studioName} timeZone={timeZone} disabled={!access.portalEnabled || access.archived} />
           </div>
           {!access.portalEnabled && !access.archived ? <p className="text-xs text-ink-muted">Turn on online access first, then invite someone.</p> : null}
           {access.users.length === 0 ? (
             <p className="rounded-md border border-dashed border-border-strong px-3 py-4 text-center text-sm text-ink-muted">Nobody from {access.clientName} has a login yet.</p>
           ) : (
             <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
-              {access.users.map((u) => (
-                <li key={u.id} className="flex items-center gap-3 px-3 py-2.5">
-                  <Avatar name={u.name} size="sm" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="truncate text-sm font-medium text-ink">{u.name}</span>
-                      {!u.isActive ? (
-                        <Badge size="sm" variant="outline">
-                          Can&apos;t sign in
-                        </Badge>
-                      ) : null}
+              {access.users.map((u) => {
+                const invite = u.isActive ? invites[u.id] : undefined;
+                return (
+                  <li key={u.id} className="flex items-center gap-3 px-3 py-2.5">
+                    <Avatar name={u.name} size="sm" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-ink">{u.name}</span>
+                        {!u.isActive ? (
+                          <Badge size="sm" variant="outline">
+                            Can&apos;t sign in
+                          </Badge>
+                        ) : invite ? (
+                          invite.live ? (
+                            <Badge size="sm" variant="warning" dot data-invite-pending="live">
+                              Invite pending · expires {formatDate(invite.live.expiresAt, timeZone)}
+                            </Badge>
+                          ) : (
+                            <Badge size="sm" variant="neutral" data-invite-pending="stale">
+                              Invite pending · needs a new link
+                            </Badge>
+                          )
+                        ) : null}
+                      </div>
+                      <p className="truncate text-xs text-ink-muted">
+                        {u.email} ·{" "}
+                        {u.lastLoginAt ? (
+                          <>
+                            last signed in <RelativeTime value={u.lastLoginAt} timeZone={timeZone} />
+                          </>
+                        ) : invite ? (
+                          "not joined yet"
+                        ) : (
+                          "never signed in"
+                        )}
+                      </p>
                     </div>
-                    <p className="truncate text-xs text-ink-muted">
-                      {u.email} ·{" "}
-                      {u.lastLoginAt ? (
-                        <>
-                          last signed in <RelativeTime value={u.lastLoginAt} timeZone={timeZone} />
-                        </>
-                      ) : (
-                        "never signed in"
-                      )}
-                    </p>
-                  </div>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger variant="ghost" size="icon" aria-label={`Actions for ${u.name}`}>
-                      <MoreHorizontal aria-hidden="true" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" aria-label={`Actions for ${u.name}`}>
-                      {u.isActive ? (
-                        <>
-                          <DropdownMenuItem icon={<KeyRound aria-hidden="true" />} onSelect={() => setAction({ kind: "reset", user: u })}>
-                            Reset password
+                    <DropdownMenu>
+                      <DropdownMenuTrigger variant="ghost" size="icon" aria-label={`Actions for ${u.name}`}>
+                        <MoreHorizontal aria-hidden="true" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" aria-label={`Actions for ${u.name}`}>
+                        {u.isActive ? (
+                          <>
+                            {invite ? (
+                              <>
+                                <DropdownMenuItem icon={<Send aria-hidden="true" />} onSelect={() => setAction({ kind: "resend", user: u })}>
+                                  Send a new link
+                                </DropdownMenuItem>
+                                {invite.live ? (
+                                  <DropdownMenuItem icon={<Ban aria-hidden="true" />} onSelect={() => setAction({ kind: "revoke", user: u })}>
+                                    Revoke invite
+                                  </DropdownMenuItem>
+                                ) : null}
+                              </>
+                            ) : null}
+                            <DropdownMenuItem icon={<KeyRound aria-hidden="true" />} onSelect={() => setAction({ kind: "reset", user: u })}>
+                              {invite ? "Set a temporary password" : "Reset password"}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem destructive icon={<UserX aria-hidden="true" />} onSelect={() => setAction({ kind: "deactivate", user: u })}>
+                              Remove access
+                            </DropdownMenuItem>
+                          </>
+                        ) : (
+                          <DropdownMenuItem icon={<UserCheck aria-hidden="true" />} onSelect={() => void reactivate(u)}>
+                            Give access back
                           </DropdownMenuItem>
-                          <DropdownMenuItem destructive icon={<UserX aria-hidden="true" />} onSelect={() => setAction({ kind: "deactivate", user: u })}>
-                            Remove access
-                          </DropdownMenuItem>
-                        </>
-                      ) : (
-                        <DropdownMenuItem icon={<UserCheck aria-hidden="true" />} onSelect={() => void reactivate(u)}>
-                          Give access back
-                        </DropdownMenuItem>
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </li>
-              ))}
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -176,15 +258,23 @@ export function ClientOnlineAccess({ access, studioName, timeZone }: ClientOnlin
         onOpenChange={(o) => {
           if (!o) setAction(null);
         }}
-        title={action?.kind === "deactivate" ? `Remove ${action.user.name}'s access?` : `Reset ${action?.user.name ?? ""}'s password?`}
-        description={
-          action?.kind === "deactivate"
-            ? "They are signed out and can't sign in until you give access back. Their feedback stays on the jobs."
-            : "They are signed out everywhere. You'll get a temporary password to send them."
-        }
-        confirmLabel={action?.kind === "deactivate" ? "Remove access" : "Reset password"}
-        destructive={action?.kind === "deactivate"}
-        onConfirm={() => (action ? (action.kind === "deactivate" ? deactivate(action.user) : resetPassword(action.user)) : undefined)}
+        title={action && current ? current.title(action.user.name) : ""}
+        description={current?.description}
+        confirmLabel={current?.confirm ?? "Confirm"}
+        destructive={current?.destructive ?? false}
+        onConfirm={() => {
+          if (!action) return undefined;
+          switch (action.kind) {
+            case "deactivate":
+              return deactivate(action.user);
+            case "reset":
+              return resetPassword(action.user);
+            case "resend":
+              return resendInvite(action.user);
+            case "revoke":
+              return revokeInvite(action.user);
+          }
+        }}
       />
 
       <Dialog open={tempPassword !== null} onOpenChange={(o) => (o ? undefined : setTempPassword(null))}>
@@ -194,6 +284,28 @@ export function ClientOnlineAccess({ access, studioName, timeZone }: ClientOnlin
         <DialogBody>{tempPassword ? <TempPasswordPanel name={tempPassword.user.name} email={tempPassword.user.email} password={tempPassword.password} /> : null}</DialogBody>
         <DialogFooter>
           <Button onClick={() => setTempPassword(null)}>Done</Button>
+        </DialogFooter>
+      </Dialog>
+
+      <Dialog open={freshLink !== null} onOpenChange={(o) => (o ? undefined : setFreshLink(null))} size="lg">
+        <DialogHeader>
+          <DialogTitle>{freshLink ? `Invite link for ${freshLink.user.name}` : "Invite link"}</DialogTitle>
+          <DialogDescription>Their older links stopped working. Copy this one before you close it.</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          {freshLink ? (
+            <InviteLinkPanel
+              name={freshLink.user.name}
+              email={freshLink.user.email}
+              inviteUrl={freshLink.link.inviteUrl}
+              emailed={freshLink.link.emailed}
+              expiresAt={freshLink.link.expiresAt}
+              timeZone={timeZone}
+            />
+          ) : null}
+        </DialogBody>
+        <DialogFooter>
+          <Button onClick={() => setFreshLink(null)}>Done</Button>
         </DialogFooter>
       </Dialog>
     </SectionCard>

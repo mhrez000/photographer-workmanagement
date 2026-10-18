@@ -31,6 +31,12 @@ export interface ApproveButtonProps extends ButtonLook {
   onConflict?: (error: ApiError) => void;
   onDone?: () => void;
   label?: string;
+  /**
+   * Open the first question (the self-check confirm, else the share question) as soon as this mounts
+   * and render no button — the Board's drop on Done. Only for a job that HAS a question
+   * (`selfReviewNeedsConfirm || shareQuestion`); otherwise render the button and let it be pressed.
+   */
+  autoStart?: boolean;
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -61,10 +67,11 @@ export function ApproveButton({
   size,
   variant = "primary",
   className,
+  autoStart = false,
 }: ApproveButtonProps) {
   const run = useMutationRunner();
-  const [confirmSelf, setConfirmSelf] = React.useState(false);
-  const [askShare, setAskShare] = React.useState(false);
+  const [confirmSelf, setConfirmSelf] = React.useState(autoStart && selfReviewNeedsConfirm);
+  const [askShare, setAskShare] = React.useState(autoStart && !selfReviewNeedsConfirm && shareQuestion);
   const [busy, setBusy] = React.useState(false);
 
   const approve = async (share: "send" | "only" | "n/a", shareLinkIds?: string[]) => {
@@ -108,16 +115,18 @@ export function ApproveButton({
 
   return (
     <>
-      <Button
-        size={size}
-        variant={variant}
-        className={className}
-        leadingIcon={<BadgeCheck aria-hidden="true" />}
-        loading={busy && !askShare}
-        onClick={() => (selfReviewNeedsConfirm ? setConfirmSelf(true) : next())}
-      >
-        {label}
-      </Button>
+      {autoStart && (selfReviewNeedsConfirm || shareQuestion) ? null : (
+        <Button
+          size={size}
+          variant={variant}
+          className={className}
+          leadingIcon={<BadgeCheck aria-hidden="true" />}
+          loading={busy && !askShare}
+          onClick={() => (selfReviewNeedsConfirm ? setConfirmSelf(true) : next())}
+        >
+          {label}
+        </Button>
+      )}
 
       <ConfirmDialog
         open={confirmSelf}

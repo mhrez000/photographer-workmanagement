@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { ROLE_EMAILS, civilDate, expectHiddenPage, loginApi, uniq } from "./api";
+import { ROLE_EMAILS, civilDate, expectHiddenPage, loginApi, newApi, uniq } from "./api";
 import { UI_TEST_TIMEOUT, dialogButton, expect, expectPlainWords, gotoReady, mainNav, mainNavLabels, retrying, test } from "./fixtures";
 
 /**
@@ -90,18 +90,36 @@ test("People: plain cards; inviting a photographer offers the one choice, an edi
   await expect(canAdd).toBeVisible();
   await expect(canAdd).not.toBeChecked();
 
-  // Invite an editor through the dialog: the temporary password shows once and they sign in.
+  // Invite an editor through the dialog (front door): the default is an invite LINK, shown once with
+  // Copy link; the person opens it, chooses a password and signs in. Until then they are "Invite pending".
   const stamp = Date.now().toString(36);
   const email = `e2e-invite-${stamp}@studio.test`;
   await dialog.getByRole("textbox", { name: /full name/i }).fill(`E2E Invited ${stamp}`);
   await dialog.getByRole("textbox", { name: /email/i }).fill(email);
+  await expect(dialog.getByRole("button", { name: /set a temporary password instead/i })).toBeVisible();
   await dialogButton(page, /^invite$/i).click();
-  const password = dialog.locator('code[aria-label="Temporary password"]');
-  await expect(password).toBeVisible({ timeout: 30_000 });
-  const temp = (await password.innerText()).trim();
+  const link = dialog.locator('code[aria-label="Invite link"]');
+  await expect(link).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByRole("button", { name: /copy link/i })).toBeVisible();
+  const inviteUrl = (await link.innerText()).trim();
+  const token = inviteUrl.split("/invite/")[1];
+  expect(token, inviteUrl).toBeTruthy();
   const invited = await api.userByEmail(email);
   expect(invited.role).toBe("editor");
-  const session = await loginApi(email, temp);
+  const anon = await newApi();
+  try {
+    // Not accepted yet: login is refused with the generic 401, and the public lookup says the link is live.
+    expect((await anon.raw("POST", "/api/auth/login", { email, password: "Password123!" })).status).toBe(401);
+    expect((await anon.get<{ valid: boolean; email: string }>(`/api/auth/invite/${token}`)).email).toBe(email);
+    await dialogButton(page, /^done$/i).click();
+    await expect(page.getByRole("main").getByText(/Invite pending/i).first()).toBeVisible();
+    // Accept: choose a password through the link, then sign in with it.
+    const accepted = await anon.raw<{ user: { role: string } }>("POST", `/api/auth/invite/${token}/accept`, { password: `E2e-${stamp}-pass!` });
+    expect(accepted.status, JSON.stringify(accepted.error)).toBe(200);
+  } finally {
+    await anon.dispose();
+  }
+  const session = await loginApi(email, `E2e-${stamp}-pass!`);
   expect((await session.me()).user.canCreateJobs).toBe(false);
   await session.dispose();
 

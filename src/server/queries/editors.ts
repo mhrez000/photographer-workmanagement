@@ -17,7 +17,7 @@
  * Access: owners / co-owners (admins) and members with the analytics switch
  * (`performance.view`). Clients and editors → 403.
  */
-import { and, asc, eq, inArray, isNotNull, ne, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, ne, sql, type SQL } from "drizzle-orm";
 import type { DbLike } from "@/db/index";
 import { jobs, users } from "@/db/schema";
 import { buildCsv, csvFileName } from "@/lib/csv";
@@ -49,6 +49,7 @@ import type {
   EditorsCsv,
   EditorsOverview,
   ExtraPhotographerRow,
+  PendingEditor,
   UserRef,
 } from "@/lib/types";
 import { can, isAdmin, managedJobsWhere } from "@/server/auth/permissions";
@@ -118,19 +119,39 @@ export async function loadDeskCounts(db: DbLike, ctx: AuthContext, bounds: OrgDa
 
 const USER_REF = { id: users.id, name: users.name, role: users.role, avatarColour: users.avatarColour, isActive: users.isActive };
 
-/** Active editors of the org (name order), plus any other editor in `extraIds` (e.g. a deactivated one still credited). */
-async function loadEditors(db: DbLike, ctx: AuthContext, extraIds: readonly string[] = []): Promise<UserRef[]> {
+/** An editor row with the email the pickers show when two people share a name. */
+interface EditorRef {
+  editor: UserRef;
+  email: string;
+}
+
+/**
+ * JOINED editors of the org (name order): active AND accepted (`accepted_at` set). A person whose invite is
+ * still pending cannot sign in, so they are never offered in the Assign picker, never counted on Home or the
+ * Editors page (front door; `pendingEditors` lists them instead). `extraIds` re-admits editors who already
+ * hold or finished jobs (a deactivated one still credited, a pending one assigned before this rule).
+ */
+async function loadEditors(db: DbLike, ctx: AuthContext, extraIds: readonly string[] = []): Promise<EditorRef[]> {
   const extra = [...new Set(extraIds)];
-  return db
-    .select(USER_REF)
+  const joined = sql`(${users.isActive} and ${users.acceptedAt} is not null)`;
+  const rows = await db
+    .select({ ...USER_REF, email: users.email })
     .from(users)
-    .where(
-      and(
-        eq(users.organisationId, ctx.organisationId),
-        eq(users.role, "editor"),
-        extra.length > 0 ? sql`(${users.isActive} or ${inArray(users.id, extra)})` : eq(users.isActive, true),
-      ),
-    )
+    .where(and(eq(users.organisationId, ctx.organisationId), eq(users.role, "editor"), extra.length > 0 ? sql`(${joined} or ${inArray(users.id, extra)})` : joined))
+    .orderBy(binaryAsc(users.name), asc(users.id));
+  return rows.map(({ email, ...editor }) => ({ editor, email }));
+}
+
+/**
+ * Editors who have been invited but have not opened their link yet (active, `accepted_at` null): shown as
+ * "Invite pending - not joined yet" with the email under Home -> Your editors and on the Editors page, so the
+ * owner can tell a ghost from a person before handing out a job.
+ */
+export async function pendingEditors(db: DbLike, ctx: AuthContext): Promise<PendingEditor[]> {
+  return db
+    .select({ id: users.id, name: users.name, email: users.email, invitedAt: users.invitedAt })
+    .from(users)
+    .where(and(eq(users.organisationId, ctx.organisationId), eq(users.role, "editor"), eq(users.isActive, true), isNull(users.acceptedAt), isNull(users.anonymisedAt)))
     .orderBy(binaryAsc(users.name), asc(users.id));
 }
 
@@ -150,17 +171,17 @@ export async function editorPickerOptions(db: DbLike, ctx: AuthContext): Promise
     db,
     ctx,
     bounds,
-    editors.map((e) => e.id),
+    editors.map((e) => e.editor.id),
   );
   const capacities = await loadUsualCapacities(
     db,
     ctx,
-    editors.map((e) => e.id),
+    editors.map((e) => e.editor.id),
   );
-  return editors.map((editor) => {
+  return editors.map(({ editor, email }) => {
     const d = desk.get(editor.id) ?? { onDesk: 0, late: 0 };
     const usualCapacity = capacities.get(editor.id) ?? null;
-    return { editor, onDesk: d.onDesk, late: d.late, usualCapacity, full: isDeskFull(d.onDesk, usualCapacity) };
+    return { editor, email, onDesk: d.onDesk, late: d.late, usualCapacity, full: isDeskFull(d.onDesk, usualCapacity) };
   });
 }
 
@@ -209,13 +230,13 @@ export async function computeEditorRows(db: DbLike, ctx: AuthContext, period: Ed
   const capacities = await loadUsualCapacities(
     db,
     ctx,
-    editors.map((e) => e.id),
+    editors.map((e) => e.editor.id),
   );
   return sortOverviewRows(
-    editors.map((editor) => {
+    editors.map(({ editor, email }) => {
       const numbers = fiveNumbers(desk.get(editor.id), finished.get(editor.id) ?? [], tz);
       const usualCapacity = capacities.get(editor.id) ?? null;
-      return { editor, ...numbers, usualCapacity, full: isDeskFull(numbers.onDesk, usualCapacity) };
+      return { editor, email, ...numbers, usualCapacity, full: isDeskFull(numbers.onDesk, usualCapacity) };
     }),
   );
 }
@@ -276,6 +297,7 @@ export async function getEditorsOverview(db: DbLike, ctx: AuthContext, input: { 
     period: range,
     waitingOnYou: await waitingOnYou(db, ctx, now),
     rows: await computeEditorRows(db, ctx, period, now),
+    pendingEditors: await pendingEditors(db, ctx),
     extraPhotographers: await extraPhotographerRows(db, ctx, range, bounds),
     asOf: now,
   };

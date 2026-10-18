@@ -23,8 +23,9 @@ It is **not** a media store. Raw files, editing workspaces and finished gallerie
 | **New job** | One screen, eight fields; the due date defaults to the shoot date plus the shoot type's usual days; "Create & send to Sam" when an editor is picked. Projects are created silently from the address. |
 | **Editors** | One page with five plain numbers per editor — On their desk · Late now · Finished · On time · Needed changes — measured from the editor's send, never from your check. "Waiting on you: 4 edits to check" keeps the owner honest. Optional "Usually handles up to N", CSV download, and an editor page with vs-last-month arrows, their desk, recently finished and a finished-per-week chart. |
 | **Clients and the portal** | Clients with open and late counts; each client has an **Online access** card (portal on/off, feedback, who can sign in). Client users see Booked → Shot → Editing → Delivered, the shared finished links and a feedback thread. |
-| **Settings** | One entry: **Studio** (name, timezone, job prefix, the **Advanced tools** switch, Close delivered jobs), **People** (Owner / Photographer / Editor cards, invite with "Only their own shoots" or "Everything (co-owner)", "Can add their own jobs" per editor, deactivate with "Move their jobs to…"), **Types of shoot** (name, colour, usual days to edit), **My account** (8 notification groups on by default, Mark old updates as read, Light / Dark / System), **History** (the studio-wide audit log, each row tagged Sign-in / Job / People / Studio / Client). |
-| **Advanced tools (off by default)** | Hidden, not deleted: Board (its columns are drawn like the stage pills; 7 columns for now), Timeline, Reports & stats, Workloads, custom workflows, Automations, Teams, the full permission table, saved views, bulk actions, projects as a page, time tracking, pause / resume, completion %, four priority levels and extra link / note / message kinds. A studio that already uses custom workflows or automations gets the switch turned on automatically. Hidden pages and APIs are blocked on the server, not just removed from the menu. |
+| **Front door** | A public landing page at `/`, **Create your studio** (`/signup`: name, email, password, studio name, detected timezone → straight into Home), **invite links** for editors, photographers and clients (`/invite/<token>`, 7 days, single use; copyable from Settings → People or a client's Online access card, emailed when email is set up), **Forgot / Reset password** (`/forgot-password`, `/reset-password?token=…`, 60 minutes) and a **Get set up** checklist on Home for a fresh studio (first job · invite an editor · add a client · give a job to an editor · approve the first edit). |
+| **Settings** | One entry: **Studio** (name, timezone, job prefix, the **Advanced tools** switch, Close delivered jobs, the **Email sending** card), **People** (Owner / Photographer / Editor cards, invite with "Only their own shoots" or "Everything (co-owner)", "Can add their own jobs" per editor, deactivate with "Move their jobs to…"), **Types of shoot** (name, colour, usual days to edit), **My account** (8 notification groups on by default, Mark old updates as read, Light / Dark / System), **History** (the studio-wide audit log, each row tagged Sign-in / Job / People / Studio / Client). |
+| **Advanced tools (off by default)** | Hidden, not deleted: Board (the five stages as columns, with the Jobs filters; a drop opens the same dialog as the job page's button and anything else snaps back with a plain note), Timeline, Reports & stats, Workloads, custom workflows, Automations, Teams, the full permission table, saved views, bulk actions, projects as a page, time tracking, pause / resume, completion %, four priority levels and extra link / note / message kinds. A studio that already uses custom workflows or automations gets the switch turned on automatically. Hidden pages and APIs are blocked on the server, not just removed from the menu. |
 | **Under the hood** | Configurable workflow engine (every status change through one audited service), append-only `activity_events` enforced by DB triggers, optimistic-concurrency conflict dialogs, in-app notifications, ⌘K / Ctrl K search, a mobile layout with a bottom tab bar and a compact pinned next-step bar (the finished-link box opens from it), light and dark themes. |
 
 Roles (contract [`docs/ROLES.md`](docs/ROLES.md); plain summary in the plan §2) — exactly three: **Photographer**, **Editor**, **Client**.
@@ -70,6 +71,30 @@ The default seed is the **small studio** from the plan (`SEED_PROFILE=small`): o
 
 The 160-job, 25-person fixture is still available as `SEED_PROFILE=full` (the full roster is in `src/db/seed/catalog.ts`). Both seeds run the real services under a fake clock, so history, revisions, audit events and the editors' numbers are consistent with each other.
 
+## Getting started for a real studio
+
+The demo accounts are for looking around. A real studio starts from the front door:
+
+1. **Create your studio.** Open `/` and press **Create your studio** (`/signup`): your name, email, a password (10+ characters) and the studio name. The timezone is detected from the browser and can be changed later in Settings → Studio. You land on Home as the owner with a **Get set up** checklist (create a job · invite an editor · add a client · give a job to an editor · approve the first edit); it disappears once the five steps are done, or when you dismiss it.
+2. **Invite people by link.** Settings → People → **Invite someone** (editors and extra photographers) or a client's **Online access** card → **Invite someone** (portal users). The default is an **invite link**: copy it from the dialog and send it any way you like; the person opens it, sees who invited them, chooses a password and is in. Links work once and expire after 7 days — the person's page shows **Invite pending · expires …** with **Send a new link** (the old one stops working) and **Revoke invite**. A temporary password is still available as the fallback (**Set a temporary password instead**).
+3. **Lost passwords.** Sign in → **Forgot password?** sends a 60-minute reset link. The confirmation never says whether the address has an account.
+
+### Email set-up (optional but recommended)
+
+Without email, every invite and reset link is shown on screen for you to copy (Settings → Studio → **Email sending: not set up** says so; the Studio history records that a link was created, never the link itself). To send them automatically, set these in your hosting environment:
+
+| Variable | Why |
+|---|---|
+| `APP_URL` | The public origin the links point at, e.g. `https://studio.example.com`. Without it links fall back to the request origin (and `http://localhost:3000` outside a request), so always set it in production. |
+| `RESEND_API_KEY` | A [Resend](https://resend.com) API key; invite and reset emails go through Resend. |
+| `EMAIL_FROM` | The sender, e.g. `Proofline <hello@studio.example.com>` — a domain verified in Resend. |
+
+Both `RESEND_API_KEY` and `EMAIL_FROM` must be set for sending to turn on; `GET /api/settings/email` (and the Studio card) report `provider: "resend"` when it is.
+
+### Behind a proxy (Vercel and friends)
+
+Sign-up and password-reset rate limits are keyed by client IP. Forwarding headers (`X-Forwarded-For`) are ignored unless you say how many trusted proxies sit in front of the app: on Vercel set `TRUSTED_PROXY_COUNT=1`. With it unset (`0`) the limits fall back to the email address, so a deployment never shares one anonymous bucket — but a single network cannot be slowed down either.
+
 ## Scripts
 
 | Command | What it does |
@@ -90,7 +115,8 @@ After any change to `src/db/schema.ts`, run `npx drizzle-kit generate` (the comm
 ## Architecture in one screen
 
 ```
-src/app/(auth)/login              public sign-in
+src/app/(public)                  the landing page (own minimal chrome; signed-in people are sent to their landing page)
+src/app/(auth)/*                  public forms: login, signup, forgot-password, reset-password, invite/[token]
 src/app/(app)/…                   authenticated pages (async Server Components) + loading/error boundaries
 src/app/api/**/route.ts           thin REST handlers → one service or query (src/app/api/_lib/route.ts)
 src/server/services/*             every write: permission check → Zod → transaction → audit event
@@ -138,6 +164,7 @@ Set these Vercel environment variables (Production, and Preview if previews shou
 - `DATABASE_URL` — Supabase **transaction pooler** (port 6543); the app connects with `prepare: false`.
 - `DIRECT_URL` — Supabase **session pooler** (port 5432); `vercel-build` runs `drizzle-kit migrate` against it before `next build` (skipped when unset).
 - `SESSION_SECRET` (≥ 32 chars, required), optional `CRON_SECRET`.
+- `APP_URL` — the public origin for invite / reset links (e.g. `https://studio.example.com`); `RESEND_API_KEY` + `EMAIL_FROM` to email them (otherwise they are shown on screen to copy); `TRUSTED_PROXY_COUNT=1` so the sign-up / reset rate limits see the real client IP behind Vercel's proxy. See [Getting started for a real studio](#getting-started-for-a-real-studio).
 
 - **Overdue alerts on a schedule (optional):** set `CRON_SECRET` and point a scheduler at `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>`.
 - **Region:** pick the Vercel region closest to your Supabase project (for Australia, Sydney `syd1`).
@@ -161,8 +188,8 @@ Two ways to run it:
 | Own server (default) | `npm run e2e` | Playwright resets `data/pglite-e2e` (`npm run e2e:prepare`: delete → migrate → seed → verify), starts `next dev` on **:3100** against it, runs both projects. If something already listens on :3100 it is reused **without** a reset — stop it, or run `npm run e2e:prepare` first. |
 | Existing server | `E2E_BASE_URL=http://localhost:3000 npx playwright test` | No server is started and no database is reset: specs create every job, client and user they need through the API, so they also run against a shared, already-seeded dev server. |
 
-- Projects: `desktop` (1440×900, every spec except `mobile.spec.ts`) and `mobile` (390×844 touch, `mobile.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/simple-owner-flow.spec.ts`.
+- Projects: `desktop` (1440×900, every spec except the phone ones) and `mobile` (390×844 touch, `mobile.spec.ts` and `mobile-*.spec.ts`, e.g. `mobile-frontdoor.spec.ts`). Run one with `npm run e2e:desktop` / `npm run e2e:mobile`, or a single file with `npx playwright test e2e/simple-owner-flow.spec.ts`.
 - One worker, no retries by default (`E2E_RETRIES=n` to allow some). Pages wait for hydration and the dev-server HMR socket is muted so other people's edits cannot reload a page mid-test (`E2E_KEEP_HMR=1` to keep it).
 - Output: `test-results/` and `playwright-report/` (`npx playwright show-report`); override with `E2E_OUTPUT_DIR` / `E2E_REPORT_DIR` when several runs share a checkout.
-- Layout: `e2e/api.ts` (server URL, seeded accounts, REST client and data factories built on the simple routes), `e2e/fixtures.ts` (role fixtures — `test.use({ role: "editor" })`, `api`, `apiAs`, `pageAs`, `loginAs`, `pageWithState` — plus UI/layout helpers), the simplified-product specs (`simple-owner-flow`, `simple-editor`, `jobs-page`, `editors-page`, `settings`, `notifications-defaults`, `redirects`, `nav-per-role`, `self-approval`, `advanced`, `mobile`), the kept area specs (`auth`, `permissions`, `assignment`, `revisions`, `comments`, `links`, `activity-audit`, `edge-cases`, `client-portal`, `stacking`) and `regression-*.spec.ts` for audit regressions. Screenshots of the simplified screens live in `docs/screenshots/simple/` (desktop 1440×900 and phone 390×844).
+- Layout: `e2e/api.ts` (server URL, seeded accounts, REST client and data factories built on the simple routes), `e2e/fixtures.ts` (role fixtures — `test.use({ role: "editor" })`, `api`, `apiAs`, `pageAs`, `loginAs`, `pageWithState` — plus UI/layout helpers), the simplified-product specs (`simple-owner-flow`, `simple-editor`, `jobs-page`, `editors-page`, `settings`, `notifications-defaults`, `redirects`, `nav-per-role`, `self-approval`, `advanced`, `mobile`), the front-door specs (`landing`, `signup`, `invite-flow`, `client-invite`, `password-reset`, `onboarding`, `advanced-board`, `mobile-frontdoor` — each creates its own studio or users and never touches the seeded accounts), the kept area specs (`auth`, `permissions`, `assignment`, `revisions`, `comments`, `links`, `activity-audit`, `edge-cases`, `client-portal`, `stacking`) and `regression-*.spec.ts` for audit regressions. Screenshots of the simplified screens live in `docs/screenshots/simple/`, the front door (landing, sign-up, invite, forgot / reset, People invite dialog, Get set up, Studio email card, Board) in `docs/screenshots/front-door/` (desktop 1440×900 and phone 390×844).
 - Seeded accounts are only ever signed in through their own cookie jars; tests that log out, deactivate or anonymise users invite their own.

@@ -11,17 +11,54 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { PHOTOGRAPHER_PRESET_META, photographerPresetOf, type Role } from "@/lib/constants";
-import { formatDateTime, formatRelative } from "@/lib/dates";
+import { formatDate, formatDateTime, formatRelative } from "@/lib/dates";
 import type { ReducedUser, UserProfile } from "@/lib/types";
 import { listClients } from "@/server/queries/clients";
 import { getSettingsView } from "@/server/queries/settings";
 import { listUsers } from "@/server/queries/users";
+import { pendingInviteFor } from "@/server/services/invites";
 import { allowed, guard, load, pageContext, param } from "@/server/page";
 
 export const metadata: Metadata = { title: "People" };
 
 function isProfile(u: UserProfile | ReducedUser): u is UserProfile {
   return "email" in u;
+}
+
+/** Front door: an active person who has not opened their invite link yet (`accepted_at` null). */
+function invitePending(u: UserProfile): boolean {
+  return u.acceptedAt === null && u.isActive && !u.anonymisedAt;
+}
+
+/** The plain-word status chip: Anonymised · Deactivated · Invite pending (expires / needs a new link) · Active. */
+function StatusBadge({ u, live, tz, size }: { u: UserProfile; live: { expiresAt: string } | null | undefined; tz: string; size: "sm" }) {
+  if (u.anonymisedAt)
+    return (
+      <Badge variant="neutral" size={size}>
+        Anonymised
+      </Badge>
+    );
+  if (!u.isActive)
+    return (
+      <Badge variant="danger" size={size} dot>
+        Deactivated
+      </Badge>
+    );
+  if (invitePending(u))
+    return live ? (
+      <Badge variant="warning" size={size} dot data-invite-pending="live">
+        Invite pending · expires {formatDate(live.expiresAt, tz)}
+      </Badge>
+    ) : (
+      <Badge variant="neutral" size={size} data-invite-pending="stale">
+        Invite pending · needs a new link
+      </Badge>
+    );
+  return (
+    <Badge variant="success" size={size} dot>
+      Active
+    </Badge>
+  );
 }
 
 /** The three roles (docs/SIMPLIFICATION-PLAN.md §2), one card each. */
@@ -68,6 +105,8 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
   const portalClients = allClients.filter((c) => c.client.portalEnabled && c.client.archivedAt === null).map((c) => ({ id: c.client.id, name: c.client.name }));
   const canInvite = allowed(ctx, "user.invite");
   const filtered = Boolean(q || roleFilter || status !== "active");
+  // Front door: which pending people still have a live link ("Invite pending · expires …").
+  const liveInvites = new Map(await Promise.all(people.filter(invitePending).map(async (u) => [u.id, await load(() => pendingInviteFor(db, u.id, ctx.now()))] as const)));
 
   return (
     <PageContainer>
@@ -110,7 +149,7 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
         })}
       </ul>
 
-      <PeopleToolbar canInvite={canInvite} studioName={view.organisation.name} portalClients={portalClients} />
+      <PeopleToolbar canInvite={canInvite} studioName={view.organisation.name} portalClients={portalClients} timeZone={tz} />
 
       {people.length === 0 ? (
         <Card>
@@ -179,19 +218,7 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
                         </Badge>
                       </TD>
                       <TD>
-                        {u.anonymisedAt ? (
-                          <Badge variant="neutral" size="sm">
-                            Anonymised
-                          </Badge>
-                        ) : u.isActive ? (
-                          <Badge variant="success" size="sm" dot>
-                            Active
-                          </Badge>
-                        ) : (
-                          <Badge variant="danger" size="sm" dot>
-                            Deactivated
-                          </Badge>
-                        )}
+                        <StatusBadge u={u} live={liveInvites.get(u.id)} tz={tz} size="sm" />
                       </TD>
                       <TD muted>
                         {u.lastLoginAt ? (
@@ -230,19 +257,16 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
                   >
                     <Avatar name={u.name} colour={u.avatarColour} size="lg" className={u.isActive ? undefined : "opacity-50 grayscale"} />
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate font-medium text-ink">{u.name}</span>
-                        {!u.isActive ? (
-                          <Badge variant="danger" size="sm">
-                            Deactivated
-                          </Badge>
-                        ) : null}
+                      {/* flex-wrap: a long "Invite pending · expires …" badge drops under the name rather than truncating it to "To…". */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="max-w-full truncate font-medium text-ink">{u.name}</span>
+                        {!u.isActive || invitePending(u) ? <StatusBadge u={u} live={liveInvites.get(u.id)} tz={tz} size="sm" /> : null}
                       </div>
                       <p className="truncate text-sm text-ink-muted">{u.email}</p>
                       <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-ink-muted">
                         <span className="font-medium text-ink-secondary">{r.label}</span>
                         <span aria-hidden="true">·</span>
-                        <span>{u.lastLoginAt ? `Seen ${formatRelative(u.lastLoginAt)}` : "Never signed in"}</span>
+                        <span>{u.lastLoginAt ? `Seen ${formatRelative(u.lastLoginAt)}` : invitePending(u) ? "Not joined yet" : "Never signed in"}</span>
                       </p>
                     </div>
                     <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-ink-subtle" />

@@ -12,7 +12,7 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { first, type DbLike } from "@/db/index";
-import { jobTypes, organisationSettings, users } from "@/db/schema";
+import { jobTypes, organisationSettings, organisations, users } from "@/db/schema";
 import type { AuthContext } from "@/lib/types";
 
 /** `advanced_tools_enabled` for the org (false when the settings row is missing). */
@@ -50,4 +50,25 @@ export async function loadSimplerNoticeDismissedAt(db: DbLike, ctx: AuthContext)
     db.select({ at: users.simplerNoticeDismissedAt }).from(users).where(and(eq(users.organisationId, ctx.organisationId), eq(users.id, ctx.userId))),
   );
   return row?.at ?? null;
+}
+
+/**
+ * When the simplified product shipped (docs/SIMPLIFICATION-PLAN.md, PR #3, 13 Oct 2026). A studio created
+ * after this never saw the old screens: no "Proofline got simpler" card, no "old bookmarks" paragraph in Help.
+ */
+export const SIMPLIFICATION_SHIPPED_AT = "2026-10-13T00:00:00.000Z";
+
+/** True for a studio that existed before the simplification (and so may still hold old bookmarks). */
+export async function loadIsPreSimplificationStudio(db: DbLike, ctx: AuthContext): Promise<boolean> {
+  const row = await first(db.select({ createdAt: organisations.createdAt }).from(organisations).where(eq(organisations.id, ctx.organisationId)));
+  return row !== undefined && row.createdAt < SIMPLIFICATION_SHIPPED_AT;
+}
+
+/**
+ * Show the one-time "Proofline got simpler" card: only to people of a pre-simplification studio who have not
+ * dismissed it. A new sign-up has nothing to compare against, so the card never appears for them.
+ */
+export async function loadShowSimplerNotice(db: DbLike, ctx: AuthContext): Promise<boolean> {
+  if (!(await loadIsPreSimplificationStudio(db, ctx))) return false;
+  return (await loadSimplerNoticeDismissedAt(db, ctx)) === null;
 }

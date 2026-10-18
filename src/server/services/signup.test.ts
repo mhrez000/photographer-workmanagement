@@ -108,6 +108,29 @@ describe("signUp — validation", () => {
   });
 });
 
+describe("signUp — one 400 says everything", () => {
+  it("a taken email AND a short password come back together in one validation error", async () => {
+    const err = await fail({ ...GOOD, email: ids.emails.editor1, password: "short" });
+    expect(err).toBeInstanceOf(ValidationError);
+    const details = (err as ValidationError).details as { fieldErrors: Record<string, string[]> };
+    expect(details.fieldErrors.email).toEqual([EMAIL_IN_USE_MESSAGE]);
+    expect(details.fieldErrors.password?.[0]).toMatch(/at least 10 characters/);
+    expect(await eventsOf("org.created")).toHaveLength(0);
+  });
+
+  it("a free email with a short password reports only the password; a malformed email never triggers the lookup", async () => {
+    const a = (await fail({ ...GOOD, password: "short" })) as ValidationError;
+    expect((a.details as { fieldErrors: Record<string, string[]> }).fieldErrors).toEqual({ password: [expect.stringMatching(/at least 10/)] });
+    const b = (await fail({ ...GOOD, email: "not-an-email", password: "short" })) as ValidationError;
+    expect((b.details as { fieldErrors: Record<string, string[]> }).fieldErrors.email).toEqual([expect.stringMatching(/valid email/)]);
+  });
+
+  it("the new owner's last_login_at is set at sign-up (they are signed in)", async () => {
+    const result = await signUp(db, GOOD);
+    expect((await first(db.select().from(users).where(eq(users.id, result.userId))))?.lastLoginAt).toBe(fakeClock.now());
+  });
+});
+
 describe("signUp — slugs", () => {
   it("adds a numeric suffix when the slug is taken, and falls back to 'studio' for an unusable name", async () => {
     const a = await signUp(db, { ...GOOD, studioName: "Studio", email: "a@northlight.test" });

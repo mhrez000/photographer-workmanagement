@@ -1,14 +1,17 @@
 import Link from "next/link";
-import { ArrowRight, WandSparkles } from "lucide-react";
+import { ArrowRight, MailQuestion, WandSparkles } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
-import type { HomeEditorRow } from "@/lib/types";
+import type { HomeEditorRow, PendingEditor } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export interface YourEditorsSectionProps {
   rows: HomeEditorRow[];
+  /** Invited editors who have not opened their link yet: listed greyed, never counted, never assignable. */
+  pending?: PendingEditor[];
   canInvite: boolean;
 }
 
@@ -21,11 +24,46 @@ function Number_({ label, value, tone = "neutral", title }: { label: string; val
   );
 }
 
+/** Names that appear more than once in a list (lower-cased, trimmed) — those rows get the email as a second line. */
+export function sharedNames(names: readonly string[]): Set<string> {
+  const seen = new Map<string, number>();
+  for (const n of names) {
+    const key = n.trim().toLowerCase();
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([key]) => key));
+}
+
 /**
- * "Your editors" — one row per editor: On their desk · Late (red) · On time this month
+ * "Your editors" — one row per JOINED editor: On their desk · Late (red) · On time this month
  * (docs/SIMPLIFICATION-PLAN.md §6, §7). Clicking a row opens that editor's page. Owners only.
+ * Invited editors who have not joined yet sit under the list as "Invite pending · not joined yet" with
+ * their email (front door), so the owner never hands a job to a ghost.
  */
-export function YourEditorsSection({ rows, canInvite }: YourEditorsSectionProps) {
+export function YourEditorsSection({ rows, pending = [], canInvite }: YourEditorsSectionProps) {
+  const duplicates = sharedNames([...rows.map((r) => r.editor.name), ...pending.map((p) => p.name)]);
+  const pendingList =
+    pending.length > 0 ? (
+      <ul className="divide-y divide-border border-t border-border bg-surface-sunken/40" aria-label="Invites pending" data-pending-editors="">
+        {pending.map((p) => (
+          <li key={p.id}>
+            <Link href={`/settings/people/${p.id}`} className="flex flex-col gap-1 px-5 py-2.5 transition-colors hover:bg-surface-muted/60 focus-ring sm:flex-row sm:items-center sm:justify-between" data-pending-editor={p.id}>
+              <span className="flex min-w-0 items-center gap-3">
+                <Avatar name={p.name} size="md" className="opacity-50 grayscale" />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium text-ink-muted">{p.name}</span>
+                  <span className="block truncate text-xs text-ink-muted">{p.email}</span>
+                </span>
+              </span>
+              <Badge variant="neutral" size="sm" className="shrink-0 self-start sm:self-auto">
+                Invite pending · not joined yet
+              </Badge>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    ) : null;
+
   return (
     <SectionCard
       id="your-editors"
@@ -43,13 +81,17 @@ export function YourEditorsSection({ rows, canInvite }: YourEditorsSectionProps)
       {rows.length === 0 ? (
         <EmptyState
           size="sm"
-          icon={WandSparkles}
-          title="No editors yet"
-          description="Invite an editor and give them a job; their numbers appear here."
+          icon={pending.length > 0 ? MailQuestion : WandSparkles}
+          title={pending.length > 0 ? "No one has joined yet" : "No editors yet"}
+          description={
+            pending.length > 0
+              ? "Your invite is out. Once they open their link and choose a password, their numbers appear here and you can give them jobs."
+              : "Invite an editor and give them a job; their numbers appear here."
+          }
           action={
             canInvite ? (
-              <Button size="sm" variant="outline" href="/settings/people?invite=1">
-                Invite an editor
+              <Button size="sm" variant="outline" href="/settings/people?invite=editor">
+                {pending.length > 0 ? "Invite another editor" : "Invite an editor"}
               </Button>
             ) : undefined
           }
@@ -64,7 +106,10 @@ export function YourEditorsSection({ rows, canInvite }: YourEditorsSectionProps)
               >
                 <span className="flex min-w-0 items-center gap-3">
                   <Avatar name={row.editor.name} size="md" colour={row.editor.avatarColour || undefined} />
-                  <span className="truncate font-medium text-ink">{row.editor.name}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-ink">{row.editor.name}</span>
+                    {duplicates.has(row.editor.name.trim().toLowerCase()) ? <span className="block truncate text-xs text-ink-muted">{row.email}</span> : null}
+                  </span>
                 </span>
                 <span className="flex flex-wrap items-center gap-x-5 gap-y-1 sm:justify-end">
                   <Number_
@@ -85,6 +130,7 @@ export function YourEditorsSection({ rows, canInvite }: YourEditorsSectionProps)
           ))}
         </ul>
       )}
+      {pendingList}
     </SectionCard>
   );
 }

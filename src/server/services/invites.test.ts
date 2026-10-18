@@ -136,7 +136,8 @@ describe("lookupInvite + acceptInvite", () => {
     expect(accepted).toMatchObject({ userId: res.user.id, organisationId: ids.organisationId, name: "Samuel Whitfield", email: "sam@studio.test", role: "editor", sessionVersion: (before?.sessionVersion ?? 1) + 1 });
 
     const after = await userRow(res.user.id);
-    expect(after).toMatchObject({ name: "Samuel Whitfield", acceptedAt: fakeClock.now(), sessionVersion: (before?.sessionVersion ?? 1) + 1, version: (before?.version ?? 1) + 1 });
+    expect(before?.lastLoginAt).toBeNull();
+    expect(after).toMatchObject({ name: "Samuel Whitfield", acceptedAt: fakeClock.now(), lastLoginAt: fakeClock.now(), sessionVersion: (before?.sessionVersion ?? 1) + 1, version: (before?.version ?? 1) + 1 });
     expect(await verifyPassword(NEW_PASSWORD, after?.passwordHash ?? "")).toBe(true);
     expect((await tokensOf(res.user.id))[0].usedAt).toBe(fakeClock.now());
 

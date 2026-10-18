@@ -376,6 +376,9 @@
   --text-3xl--line-height: 2.25rem;
   --text-4xl: 2.25rem;
   --text-4xl--line-height: 2.5rem;
+  /* Touch text boxes: iOS Safari zooms the page when a focused field is under 16px (Input / Select / Textarea use `pointer-coarse:text-touch max-sm:text-touch`) */
+  --text-touch: 1rem;
+  --text-touch--line-height: 1.375rem;
 
   --tracking-tight: -0.015em;
   --tracking-snug: -0.008em;

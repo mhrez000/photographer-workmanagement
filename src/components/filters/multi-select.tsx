@@ -143,7 +143,7 @@ export function MultiSelect({
                   }
                 }}
                 placeholder={`Search ${label.toLowerCase()}…`}
-                className="h-8 w-full rounded-sm border border-border bg-surface pl-8 pr-2 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+                className="h-8 w-full rounded-sm border border-border bg-surface pl-8 pr-2 text-sm text-ink placeholder:text-ink-subtle pointer-coarse:text-touch max-sm:text-touch focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
               />
             </label>
           </div>

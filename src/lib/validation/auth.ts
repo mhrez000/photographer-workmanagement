@@ -87,13 +87,30 @@ export const ForgotPasswordInput = z.strictObject({
 });
 export type ForgotPasswordInput = z.infer<typeof ForgotPasswordInput>;
 
+/**
+ * Mail clients and chat apps encode a trailing space as `%20` (and some paste the link percent-encoded);
+ * Next hands a dynamic segment over still encoded. Decode once (never throwing) and trim, so the same
+ * mistake is forgiven on the invite page, the reset page and the API alike.
+ */
+export function cleanToken(raw: string): string {
+  let value = raw;
+  try {
+    value = decodeURIComponent(raw);
+  } catch {
+    // Not percent-encoded (or malformed): the regex below rejects it as it is.
+  }
+  return value.trim();
+}
+
 /** A one-time token from an invite / reset link (base64url, 43 chars for 32 random bytes; bounds are generous). */
-export const TokenSchema = z
-  .string({ error: "This link is not valid" })
-  .trim()
-  .min(16, "This link is not valid")
-  .max(128, "This link is not valid")
-  .regex(/^[A-Za-z0-9_-]+$/, "This link is not valid");
+export const TokenSchema = z.preprocess(
+  (v) => (typeof v === "string" ? cleanToken(v) : v),
+  z
+    .string({ error: "This link is not valid" })
+    .min(16, "This link is not valid")
+    .max(128, "This link is not valid")
+    .regex(/^[A-Za-z0-9_-]+$/, "This link is not valid"),
+);
 
 /** POST /api/auth/reset-password. */
 export const ResetPasswordInput = z.strictObject({

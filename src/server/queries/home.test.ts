@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clients, jobComments, jobs, users } from "@/db/schema";
+import { clients, jobComments, jobs, organisations, users } from "@/db/schema";
 import { contextFor, fakeClock, insertJobFixture, inviteDefaultsMember, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { endOfCivilDayIso } from "@/lib/dates";
 import { ForbiddenError } from "@/server/errors";
@@ -170,6 +170,25 @@ describe("getOwnerHome", () => {
     await db.update(users).set({ simplerNoticeDismissedAt: NOW }).where(eq(users.id, ids.users.owner));
     expect((await getOwnerHome(db, await ctxOf("owner"))).simplerNotice).toBe(false);
     expect((await getOwnerHome(db, await ctxOf("coAdmin"))).simplerNotice).toBe(true);
+  });
+
+  it("a studio created after the simplification shipped (13 Oct 2026) never gets the simpler notice", async () => {
+    await db.update(organisations).set({ createdAt: "2026-10-14T01:00:00.000Z" }).where(eq(organisations.id, ids.organisationId));
+    expect((await getOwnerHome(db, await ctxOf("owner"))).simplerNotice).toBe(false);
+    await db.update(organisations).set({ createdAt: "2026-10-12T23:59:59.000Z" }).where(eq(organisations.id, ids.organisationId));
+    expect((await getOwnerHome(db, await ctxOf("owner"))).simplerNotice).toBe(true);
+  });
+
+  it("Your editors never counts a pending invitee; pendingEditors lists them for owners only", async () => {
+    const [ghost] = await db
+      .insert(users)
+      .values({ organisationId: ids.organisationId, email: "ghost@studio.test", passwordHash: "!invite!", name: "Ghost Editor", role: "editor", isActive: true, acceptedAt: null, invitedAt: NOW, createdAt: NOW, updatedAt: NOW })
+      .returning({ id: users.id });
+    const home = await getOwnerHome(db, await ctxOf("owner"));
+    expect(home.yourEditors?.map((r) => r.editor.id)).not.toContain(ghost.id);
+    expect(home.yourEditors?.map((r) => r.email)).toEqual([ids.emails.editor2, ids.emails.editor1]);
+    expect(home.pendingEditors).toEqual([{ id: ghost.id, name: "Ghost Editor", email: "ghost@studio.test", invitedAt: NOW }]);
+    expect((await getOwnerHome(db, await ctxOf("photographer1"))).pendingEditors).toBeNull();
   });
 
   it("editors and clients do not get Home", async () => {

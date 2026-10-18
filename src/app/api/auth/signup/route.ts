@@ -1,4 +1,5 @@
 import { methodNotAllowed } from "@/app/api/_lib/route";
+import { markSignedUp } from "@/server/auth/signed-up";
 import { bodyOrNull, clientIp, handle } from "@/server/http";
 import { signUpAndSignIn } from "@/server/services/organisations";
 
@@ -15,6 +16,8 @@ export const POST = handle(async (req, _ctx, meta) => {
     { ...fields, ip: clientIp(req.headers), userAgent: req.headers.get("user-agent") },
     { requestId: meta.requestId },
   );
+  // This browser now belongs to a real studio: the sign-in page stops offering the demo accounts here.
+  await markSignedUp();
   return {
     organisationId: result.organisationId,
     slug: result.slug,

@@ -274,6 +274,97 @@ export interface InviteOptions {
   clientId?: string;
 }
 
+/** A user invited by LINK (`Api.inviteByLink`): no password until they open `inviteUrl`. */
+export interface InviteLink {
+  user: UserProfile;
+  email: string;
+  name: string;
+  inviteUrl: string;
+  /** The plain token from `inviteUrl` (`/invite/<token>`). */
+  token: string;
+  emailed: boolean;
+  expiresAt: string;
+}
+/** `POST /api/users (link)` / `/api/users/:id/invite/resend` delivery part. */
+export interface InviteDelivery {
+  inviteUrl: string;
+  emailed: boolean;
+  expiresAt: string;
+}
+/** `GET /api/auth/invite/:token`. */
+export type InviteLookup =
+  | { valid: true; studioName: string; inviterName: string | null; role: string; persona: string; personaLabel: string; email: string; name: string; expiresAt: string }
+  | { valid: false };
+/** `POST /api/auth/signup` success body. */
+export interface SignUpResponse {
+  organisationId: string;
+  slug: string;
+  user: { id: string; name: string; email: string; role: "photographer" };
+  redirectTo: string;
+}
+/** `GET /api/settings/onboarding` (src/server/queries/onboarding.ts). */
+export interface OnboardingState {
+  steps: { createdFirstJob: boolean; invitedEditor: boolean; addedClient: boolean; assignedEditor: boolean; approvedFirst: boolean };
+  completed: number;
+  total: 5;
+  dismissed: boolean;
+  dismissedAt: string | null;
+  isNewStudio: boolean;
+  jobCount: number;
+  studioAgeDays: number;
+  show: boolean;
+}
+
+/** The front door's generic messages (src/server/services/invites.ts, passwordReset.ts, organisations.ts). */
+export const INVITE_INVALID_MESSAGE = "This invite link is no longer valid";
+export const RESET_INVALID_MESSAGE = "This reset link is no longer valid";
+export const EMAIL_TAKEN_MESSAGE = "That email is already in use. Try signing in.";
+export const PASSWORD_TOO_SHORT_MESSAGE = "Use at least 10 characters";
+
+/** An invite link anywhere in a text (the UI shows it to copy when email is not configured). */
+export const INVITE_LINK_RE = /https?:\/\/[^\s"'<>]+\/invite\/[A-Za-z0-9_-]{16,128}/;
+/** A reset link anywhere in a text (dev only: the forgot-password page shows it). */
+export const RESET_LINK_RE = /https?:\/\/[^\s"'<>]+\/reset-password\?token=[A-Za-z0-9_-]{16,128}/;
+
+/** The token of an invite link (`…/invite/<token>`). */
+export function tokenOfInviteUrl(url: string): string {
+  const m = /\/invite\/([A-Za-z0-9_-]+)/.exec(url);
+  if (!m) throw new Error(`not an invite link: ${url}`);
+  return m[1];
+}
+
+/** The token of a reset link (`…/reset-password?token=<token>`). */
+export function tokenOfResetUrl(url: string): string {
+  const token = new URL(url).searchParams.get("token");
+  if (!token) throw new Error(`not a reset link: ${url}`);
+  return token;
+}
+
+/** A link's path on THIS server (APP_URL may name another origin than the one the specs talk to). */
+export function localPath(url: string): string {
+  const u = new URL(url);
+  return `${u.pathname}${u.search}`;
+}
+
+/** A well-formed token that was never issued (43 base64url chars like a real one). */
+export function bogusToken(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+  let out = "";
+  for (let i = 0; i < 43; i += 1) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+}
+
+/** A fresh, valid password for a created account (≥ 10 characters, no edge spaces). */
+export function uniqPassword(): string {
+  return `E2E-pass-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}!`;
+}
+
+/** `fieldErrors` of a 400 / 422 validation answer (`error.details.fieldErrors`). */
+export function fieldErrorsOf(r: RawResult): Record<string, string[]> {
+  const details = r.error?.details as { fieldErrors?: Record<string, string[]> } | undefined;
+  return details?.fieldErrors ?? {};
+}
+
 /** `GET /api/auth/me` for staff. */
 export interface StaffMe {
   kind?: "staff";
@@ -801,10 +892,13 @@ export class Api {
     const label = opts.label ?? "E2E";
     const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const email = `e2e-${role}-${stamp}@studio.test`;
+    // The front door made `method: "link"` the default (the person has no password until they open their
+    // link): specs that sign the person in straight away ask for the temporary-password path explicitly.
     const res = await this.post<{ user: UserProfile; tempPassword: string }>("/api/users", {
       email,
       name: `E2E ${label} ${role} ${stamp}`,
       role,
+      method: "temp_password",
       title: opts.title,
       preset: opts.preset,
       isAdmin: opts.isAdmin,
@@ -812,6 +906,74 @@ export class Api {
       clientId: opts.clientId,
     });
     return { ...res, email };
+  }
+  /**
+   * Invites by LINK (the front door default, `POST /api/users` with `method: "link"`): the person has no
+   * usable password and `accepted_at = null` until they open `inviteUrl` and choose one. Returns the plain
+   * token too (`/invite/<token>`), which the server shows exactly once.
+   */
+  async inviteByLink(role: "photographer" | "editor" | "client", labelOrOptions: string | InviteOptions = "E2E"): Promise<InviteLink> {
+    const opts: InviteOptions = typeof labelOrOptions === "string" ? { label: labelOrOptions } : labelOrOptions;
+    const label = opts.label ?? "E2E";
+    const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const email = `e2e-link-${role}-${stamp}@studio.test`;
+    const name = `E2E ${label} ${role} ${stamp}`;
+    const res = await this.post<{ user: UserProfile; method: "link"; inviteUrl: string; emailed: boolean; expiresAt: string }>("/api/users", {
+      email,
+      name,
+      role,
+      method: "link",
+      title: opts.title,
+      preset: opts.preset,
+      isAdmin: opts.isAdmin,
+      flags: opts.flags,
+      clientId: opts.clientId,
+    });
+    expect(res.method, "POST /api/users answers method: link").toBe("link");
+    return { user: res.user, email, name, inviteUrl: res.inviteUrl, token: tokenOfInviteUrl(res.inviteUrl), emailed: res.emailed, expiresAt: res.expiresAt };
+  }
+  /** `POST /api/users/:id/invite/resend` (admin): a fresh link; every older link stops working. */
+  async resendInvite(userId: string): Promise<InviteDelivery & { token: string }> {
+    const res = await this.post<InviteDelivery>(`/api/users/${userId}/invite/resend`);
+    return { ...res, token: tokenOfInviteUrl(res.inviteUrl) };
+  }
+  /** `POST /api/users/:id/invite/revoke` (admin): every live link of a pending person stops working. */
+  revokeInvite(userId: string) {
+    return this.post<{ userId: string; revoked: number }>(`/api/users/${userId}/invite/revoke`);
+  }
+
+  /* ---- front door (public: works from an anonymous `newApi()` too) ---- */
+  /** `GET /api/auth/invite/:token` — what the accept page shows; `{ valid: false }` for any dead link. */
+  inviteLookup(token: string) {
+    return this.get<InviteLookup>(`/api/auth/invite/${token}`);
+  }
+  /** `POST /api/auth/invite/:token/accept { password, name? }` — on success THIS session becomes the person. */
+  acceptInvite(token: string, password: string, name?: string) {
+    return this.raw<{ user: { id: string; name: string; email: string; role: string }; redirectTo: string }>("POST", `/api/auth/invite/${token}/accept`, name === undefined ? { password } : { password, name });
+  }
+  /** `POST /api/auth/forgot-password { email }` — always ok; local dev without email also returns `resetUrl`. */
+  forgotPassword(email: string) {
+    return this.raw<{ ok: true; emailed: boolean; resetUrl?: string }>("POST", "/api/auth/forgot-password", { email });
+  }
+  /** `POST /api/auth/reset-password { token, password }` — on success THIS session becomes the person. */
+  resetPassword(token: string, password: string) {
+    return this.raw<{ ok: true; redirectTo: string }>("POST", "/api/auth/reset-password", { token, password });
+  }
+  /** `POST /api/auth/signup` (raw: lets a spec assert 400 field errors). */
+  signup(body: Record<string, unknown>) {
+    return this.raw<SignUpResponse>("POST", "/api/auth/signup", body);
+  }
+  /** `GET /api/settings/onboarding` — the first-run checklist (admins; `null` for everyone else). */
+  onboarding() {
+    return this.get<OnboardingState | null>("/api/settings/onboarding");
+  }
+  /** `POST /api/settings/onboarding/dismiss` (admin) — hides the checklist for every admin of the studio. */
+  dismissOnboarding() {
+    return this.post<{ dismissedAt: string; changed: boolean }>("/api/settings/onboarding/dismiss");
+  }
+  /** `GET /api/settings/email` (admin) — whether invite / reset links are emailed or shown to copy. */
+  emailSettings() {
+    return this.get<{ configured: boolean; provider: "resend" | "console"; from: string | null; notificationsEnabled: boolean }>("/api/settings/email");
   }
   async userVersion(userId: string): Promise<number> {
     const detail = await this.get<{ profile: { version: number } | null }>(`/api/users/${userId}`);
@@ -874,6 +1036,41 @@ export const NO_SESSION = { cookies: [], origins: [] };
 export async function newApi(storageState?: string): Promise<Api> {
   const ctx = await playwrightRequest.newContext({ baseURL: BASE_URL, storageState: storageState ?? NO_SESSION, extraHTTPHeaders: { Origin: BASE_URL } });
   return new Api(ctx);
+}
+
+/** A studio a spec created through `POST /api/auth/signup` (`signUpStudio`): its owner is signed in on `api`. */
+export interface Studio {
+  /** The owner's session (dispose it when done). */
+  api: Api;
+  organisationId: string;
+  slug: string;
+  userId: string;
+  ownerName: string;
+  email: string;
+  password: string;
+  studioName: string;
+}
+
+/**
+ * "Create your studio" through the API (the front door, src/app/api/README.md): a brand-new organisation
+ * with its own owner, so a spec never depends on the shared demo studio's data. Emails are unique
+ * (`e2e-<label>-<stamp>@example.test`), which also keeps each sign-up in its own rate-limit bucket.
+ */
+export async function signUpStudio(label = "E2E"): Promise<Studio> {
+  const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "e2e";
+  const email = `e2e-${slug}-${stamp}@example.test`;
+  const password = uniqPassword();
+  const ownerName = `E2E ${label} Owner ${stamp}`;
+  const studioName = `E2E ${label} Studio ${stamp}`;
+  const ctx = await playwrightRequest.newContext({ baseURL: BASE_URL, storageState: NO_SESSION, extraHTTPHeaders: { Origin: BASE_URL } });
+  const api = new Api(ctx);
+  const res = await api.signup({ ownerName, email, password, studioName });
+  if (!res.ok) {
+    await ctx.dispose();
+    throw new Error(`signup ${email} failed: ${res.status} ${JSON.stringify(res.error)}`);
+  }
+  return { api, organisationId: res.data.organisationId, slug: res.data.slug, userId: res.data.user.id, ownerName, email, password, studioName };
 }
 
 /** Signs in through `POST /api/auth/login` (no UI) and returns the authenticated client. */

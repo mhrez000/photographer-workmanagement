@@ -250,7 +250,8 @@ export async function acceptInvite(db: Db, raw: unknown, opts: { requestId?: str
       const name = input.name ?? live.user.name;
       await tx
         .update(users)
-        .set({ passwordHash, acceptedAt: now, name, sessionVersion: nextSession, updatedAt: now, version: live.user.version + 1 })
+        // Accepting signs the person in, so People's "Last signed in" reads now rather than "Never".
+        .set({ passwordHash, acceptedAt: now, lastLoginAt: now, name, sessionVersion: nextSession, updatedAt: now, version: live.user.version + 1 })
         .where(eq(users.id, live.user.id));
       await recordEvent(tx, ctx, {
         entityType: "user",

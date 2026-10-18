@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, type JobFixtureOptions, type SeedIds, type TestDb } from "@/db/test-db";
 import { endOfCivilDayIso } from "@/lib/dates";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
-import { editorPickerOptions, editorsCsv, getEditorDetail, getEditorsOverview } from "./editors";
+import { editorPickerOptions, editorsCsv, getEditorDetail, getEditorsOverview, pendingEditors } from "./editors";
 import { addRevision, moveJob } from "./test-history";
 
 const TZ = "Australia/Sydney";
@@ -96,6 +96,44 @@ describe("getEditorsOverview — the five numbers", () => {
       ["Ed Editor", 0, 0, null, false],
       ["Eve Editor", 3, 1, 3, true],
     ]);
+  });
+
+  it("a pending invitee (accepted_at null) is never in the picker, Home rows or the Editors table; pendingEditors lists them with their email", async () => {
+    await seedEditors();
+    const [ghost] = await db
+      .insert(users)
+      .values({
+        organisationId: ids.organisationId,
+        email: "tom.pending@studio.test",
+        passwordHash: "!invite!",
+        name: "Eve Editor", // same name as the joined editor1: the UI shows the email on both
+        role: "editor",
+        isActive: true,
+        acceptedAt: null,
+        invitedAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })
+      .returning({ id: users.id });
+    const picker = await editorPickerOptions(db, await ctxOf("owner"));
+    expect(picker.map((p) => p.editor.id)).not.toContain(ghost.id);
+    expect(picker.map((p) => [p.editor.name, p.email])).toEqual([
+      ["Ed Editor", ids.emails.editor2],
+      ["Eve Editor", ids.emails.editor1],
+    ]);
+    const o = await getEditorsOverview(db, await ctxOf("owner"), {});
+    expect(o.rows.map((r) => r.editor.id)).not.toContain(ghost.id);
+    expect(o.rows).toHaveLength(2);
+    expect(o.pendingEditors).toEqual([{ id: ghost.id, name: "Eve Editor", email: "tom.pending@studio.test", invitedAt: NOW }]);
+    expect(await pendingEditors(db, await ctxOf("owner"))).toHaveLength(1);
+    // Once they accept, they are an editor like any other.
+    await db.update(users).set({ acceptedAt: NOW }).where(eq(users.id, ghost.id));
+    expect((await editorPickerOptions(db, await ctxOf("owner"))).map((p) => p.editor.id)).toContain(ghost.id);
+    expect(await pendingEditors(db, await ctxOf("owner"))).toEqual([]);
+    // A deactivated pending account is neither.
+    await db.update(users).set({ acceptedAt: null, isActive: false }).where(eq(users.id, ghost.id));
+    expect(await pendingEditors(db, await ctxOf("owner"))).toEqual([]);
+    expect((await editorPickerOptions(db, await ctxOf("owner"))).map((p) => p.editor.id)).not.toContain(ghost.id);
   });
 
   it("lists extra photographers with shoots this period, jobs waiting for their check and late jobs", async () => {

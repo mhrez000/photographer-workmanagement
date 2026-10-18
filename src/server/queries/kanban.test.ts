@@ -3,7 +3,9 @@ import { contextFor, fakeClock, insertJobFixture, makeTestDb, seedMinimalOrg, se
 import { KANBAN_COLUMNS } from "@/lib/constants";
 import type { KanbanCard } from "@/lib/types";
 import { NotFoundError } from "@/server/errors";
-import { getKanbanBoard, previewKanbanDrop } from "./kanban";
+import { STAGE_TABS } from "@/lib/stages";
+import { ForbiddenError } from "@/server/errors";
+import { getKanbanBoard, getStageBoard, previewKanbanDrop } from "./kanban";
 
 let db: TestDb;
 let ids: SeedIds;
@@ -135,5 +137,109 @@ describe("getKanbanBoard — view scope and client isolation", () => {
     expect(client.columns.every((c) => c.count === 0 && c.cards.length === 0)).toBe(true);
     expect(client.cancelled?.count).toBe(0);
     await expect(previewKanbanDrop(db, await ctxOf("client"), own.id, "review")).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe("getStageBoard — the Board in the five stages (plan §8 follow-up)", () => {
+  const cardOf = async (key: keyof SeedIds["users"], jobId: string, input: Record<string, unknown> = {}) => {
+    const board = await getStageBoard(db, await ctxOf(key), input);
+    return [...board.columns, ...(board.cancelled ? [board.cancelled] : [])].flatMap((c) => c.cards).find((c) => c.job.id === jobId);
+  };
+
+  it("has one column per stage tab, counts every category of the stage, and hides Cancelled behind showCancelled", async () => {
+    await job({ statusKey: "new" });
+    await job({ statusKey: "ready" });
+    await job({ statusKey: "accepted" });
+    await job({ statusKey: "in_progress" });
+    await job({ statusKey: "submitted" });
+    await job({ statusKey: "resubmitted" });
+    await job({ statusKey: "revision" });
+    await job({ statusKey: "approved" });
+    await job({ statusKey: "delivered" });
+    await job({ statusKey: "completed" });
+    await job({ statusKey: "cancelled" });
+    const board = await getStageBoard(db, await ctxOf("owner"));
+    expect(board.columns.map((c) => c.stage)).toEqual([...STAGE_TABS]);
+    expect(Object.fromEntries(board.columns.map((c) => [c.stage, c.count]))).toEqual({
+      needs_editor: 2,
+      with_editor: 2,
+      ready_to_check: 2,
+      changes_asked: 1,
+      done: 3,
+    });
+    expect(board.cancelled).toBeNull();
+    expect(board.viewerId).toBe(ids.users.owner);
+    const withCancelled = await getStageBoard(db, await ctxOf("owner"), { showCancelled: "1" });
+    expect(withCancelled.cancelled?.count).toBe(1);
+    expect(withCancelled.cancelled?.cards[0].moves).toEqual([]); // restored from the job page, never by a drop
+  });
+
+  it("offers each viewer exactly the drops that are their own simple buttons", async () => {
+    const fresh = await job({ statusKey: "new", editorId: null, photographerId: ids.users.photographer1 });
+    const notStarted = await job({ statusKey: "assigned", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const editing = await job({ statusKey: "in_progress", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const sent = await job({ statusKey: "submitted", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const changes = await job({ statusKey: "revision", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const finished = await job({ statusKey: "completed", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+
+    // Owner: Assign editor · Approve / Ask for changes · Reopen.
+    expect((await cardOf("owner", fresh.id))?.moves).toEqual([{ to: "with_editor", action: "assign" }]);
+    expect((await cardOf("owner", notStarted.id))?.moves).toEqual([]);
+    expect((await cardOf("owner", editing.id))?.moves).toEqual([]);
+    expect((await cardOf("owner", sent.id))?.moves).toEqual([
+      { to: "done", action: "approve" },
+      { to: "changes_asked", action: "ask_for_changes" },
+    ]);
+    expect((await cardOf("owner", changes.id))?.moves).toEqual([]);
+    expect((await cardOf("owner", finished.id))?.moves).toEqual([{ to: "changes_asked", action: "reopen" }]);
+
+    // The editor who has the job: Send for checking from With editor (started or not) and Changes asked; nothing else.
+    expect((await cardOf("editor1", notStarted.id))?.moves).toEqual([{ to: "ready_to_check", action: "send_for_checking" }]);
+    expect((await cardOf("editor1", editing.id))?.moves).toEqual([{ to: "ready_to_check", action: "send_for_checking" }]);
+    expect((await cardOf("editor1", changes.id))?.moves).toEqual([{ to: "ready_to_check", action: "send_for_checking" }]);
+    expect((await cardOf("editor1", sent.id))?.moves).toEqual([]);
+    expect((await cardOf("editor1", finished.id))?.moves).toEqual([]);
+    expect(await cardOf("editor1", fresh.id)).toBeUndefined(); // not theirs: not on their board at all
+
+    // The photographer who manages the job follows their switches: Assign editors / Review submissions.
+    expect((await cardOf("photographer1", fresh.id))?.moves).toEqual([{ to: "with_editor", action: "assign" }]);
+    expect((await cardOf("photographer1", sent.id))?.moves).toEqual([
+      { to: "done", action: "approve" },
+      { to: "changes_asked", action: "ask_for_changes" },
+    ]);
+    await setUserFlags(db, ids.users.photographer1, { canAssignEditors: false, canReviewSubmissions: false });
+    expect((await cardOf("photographer1", fresh.id))?.moves).toEqual([]);
+    expect((await cardOf("photographer1", sent.id))?.moves).toEqual([]);
+    await setUserFlags(db, ids.users.photographer1, { canAssignEditors: true, canReviewSubmissions: true });
+  });
+
+  it("marks the Approve drop's share question (portal client) and the owner's self-check confirm", async () => {
+    const forPortalClient = await job({ statusKey: "submitted", editorId: ids.users.editor1, photographerId: ids.users.photographer1 });
+    const ownEdit = await job({ statusKey: "submitted", editorId: ids.users.owner, photographerId: ids.users.photographer1 });
+    const portalCard = await cardOf("owner", forPortalClient.id);
+    expect(portalCard?.shareQuestion).toBe(true);
+    expect(portalCard?.selfReviewNeedsConfirm).toBe(false);
+    const ownCard = await cardOf("owner", ownEdit.id);
+    expect(ownCard?.moves.map((m) => m.action)).toEqual(["approve", "ask_for_changes"]);
+    expect(ownCard?.selfReviewNeedsConfirm).toBe(true);
+    // Flags are only computed where Approve is a drop: a card the viewer cannot check carries neither.
+    const editorView = await cardOf("editor1", forPortalClient.id);
+    expect(editorView?.shareQuestion).toBe(false);
+    expect(editorView?.selfReviewNeedsConfirm).toBe(false);
+  });
+
+  it("applies the Jobs filters and the per-column cap, and refuses clients", async () => {
+    await job({ statusKey: "in_progress", editorId: ids.users.editor1, dueDate: "2026-10-01T13:59:59.999Z" });
+    await job({ statusKey: "in_progress", editorId: ids.users.editor2, dueDate: "2026-10-20T13:59:59.999Z" });
+    await job({ statusKey: "in_progress", editorId: ids.users.editor2 });
+    const owner = await ctxOf("owner");
+    const col = (b: Awaited<ReturnType<typeof getStageBoard>>) => b.columns.find((c) => c.stage === "with_editor");
+    expect(col(await getStageBoard(db, owner))?.count).toBe(3);
+    const capped = col(await getStageBoard(db, owner, { perColumnLimit: 2 }));
+    expect(capped?.count).toBe(3);
+    expect(capped?.cards).toHaveLength(2);
+    expect(col(await getStageBoard(db, owner, { late: "1" }))?.count).toBe(1);
+    expect(col(await getStageBoard(db, owner, { editorId: ids.users.editor2 }))?.count).toBe(2);
+    await expect(getStageBoard(db, await ctxOf("client"))).rejects.toThrow(ForbiddenError);
   });
 });

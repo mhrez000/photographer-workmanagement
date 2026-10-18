@@ -461,3 +461,115 @@ export async function expectPlainWords(page: Page, where: string): Promise<void>
   const hit = text.match(DROPPED_WORDS);
   expect(hit, `${where} uses a dropped word: ${hit?.[0]}`).toBeNull();
 }
+
+/* ---------------------------- front door helpers ---------------------------- */
+
+/**
+ * The front door's words (plain, per docs/SIMPLIFICATION-PLAN.md): no jargon on the public pages either.
+ * "Workflow" and "Kanban" are banned there too (they are allowed only on Advanced screens).
+ */
+export const FRONT_DOOR_DROPPED_WORDS = /\b(turnaround|utilisation|utilization|capacity hours|workload band|bottleneck|throughput|headroom|kanban|workflow|dashboard)\b/i;
+
+export async function expectFrontDoorWords(page: Page, where: string): Promise<void> {
+  const text = await page.locator("body").innerText();
+  const hit = text.match(FRONT_DOOR_DROPPED_WORDS);
+  expect(hit, `${where} uses a dropped word: ${hit?.[0]}`).toBeNull();
+}
+
+/** The one form on a public page (sign-up, forgot / reset password, accept invite). */
+export function publicForm(page: Page) {
+  return page.locator("form").first();
+}
+
+/** The form's submit button (the page's one obvious next step), whatever it is called. */
+export function submitButton(scope: Locator) {
+  return scope.locator('button[type="submit"]').or(scope.getByRole("button", { name: /create|sign up|get started|continue|join|set password|save|reset|send|accept/i })).first();
+}
+
+/** Every password box of a form (the page may ask once or ask to confirm): fills them all. */
+export async function fillPasswords(scope: Locator, password: string): Promise<void> {
+  const boxes = scope.locator('input[type="password"]');
+  const n = await boxes.count();
+  expect(n, "the form has a password box").toBeGreaterThan(0);
+  for (let i = 0; i < n; i += 1) await boxes.nth(i).fill(password);
+}
+
+/** The email box of a public form (labelled "Email" / "Email address" / "Your email"). */
+export function emailBox(scope: Locator) {
+  return scope.getByRole("textbox", { name: /email/i }).or(scope.locator('input[type="email"], input[name="email"]')).first();
+}
+
+/**
+ * The first link matching `re` anywhere in `scope`: link texts, `href`s, inputs' values and `data-*`
+ * attributes (the UI shows the invite / reset link to copy when email is not configured).
+ */
+export async function findLink(scope: Locator, re: RegExp): Promise<string | null> {
+  return scope.evaluate((root, source) => {
+    const regex = new RegExp(source);
+    // One candidate per element, so a link's token is never glued to the text of its neighbour
+    // ("…token" + "Copy link") or to inline script text when the whole body is searched.
+    const candidates: string[] = [];
+    const push = (value: string | null | undefined) => {
+      if (value && value.trim()) candidates.push(value.trim());
+    };
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>("a[href], input, textarea, [data-link], [data-url], code, pre"))) {
+      if (el instanceof HTMLAnchorElement) push(el.href);
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) push(el.value);
+      push(el.getAttribute("data-link"));
+      push(el.getAttribute("data-url"));
+      push(el.textContent);
+    }
+    // Last resort: whitespace-separated chunks of the visible text.
+    for (const chunk of (root instanceof HTMLElement ? root.innerText : root.textContent ?? "").split(/\s+/)) push(chunk);
+    for (const text of candidates) {
+      const m = regex.exec(text);
+      if (m) return m[0];
+    }
+    return null;
+  }, re.source);
+}
+
+/** Lets the page's "Copy" buttons write the clipboard and the test read it back (Chromium only; harmless elsewhere). */
+export async function grantClipboard(page: Page): Promise<void> {
+  try {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  } catch {
+    // Not supported by this browser: readClipboard() then answers null.
+  }
+}
+
+/** Waits for a link matching `re` to appear in `scope` and returns it. */
+export async function waitForLink(scope: Locator, re: RegExp, timeout = 30_000): Promise<string> {
+  let found: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        found = await findLink(scope, re).catch(() => null);
+        return found;
+      },
+      { timeout, message: `a link matching ${re} appears` },
+    )
+    .not.toBeNull();
+  return found as unknown as string;
+}
+
+/** A visible card / row / list item that mentions `text` (People list, Clients, Board columns, …). */
+export function itemMentioning(scope: Locator, text: string) {
+  const re = new RegExp(escapeRegExp(text));
+  return scope.getByRole("row").filter({ hasText: re }).or(scope.getByRole("listitem").filter({ hasText: re })).or(scope.getByRole("article").filter({ hasText: re })).first();
+}
+
+/** The session cookie of a browser context (undefined when nobody is signed in). */
+export async function sessionCookie(page: Page) {
+  return (await page.context().cookies()).find((c) => c.name === "pwm_session" && c.value);
+}
+
+/** Reads the clipboard after a "Copy" press; null when the browser refuses (no permission in this context). */
+export async function readClipboard(page: Page): Promise<string | null> {
+  try {
+    await grantClipboard(page);
+    return await page.evaluate(() => navigator.clipboard.readText());
+  } catch {
+    return null;
+  }
+}

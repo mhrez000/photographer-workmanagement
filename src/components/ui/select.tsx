@@ -19,9 +19,9 @@ export interface SelectProps extends Omit<React.ComponentPropsWithRef<"select">,
 }
 
 const sizeClasses = {
-  sm: "h-8 pointer-coarse:h-9 rounded-sm pl-2.5 pr-8 text-sm",
-  md: "h-9 pointer-coarse:h-10 rounded-md pl-3 pr-9 text-base",
-  lg: "h-10 rounded-md pl-3.5 pr-9 text-md",
+  sm: "h-8 pointer-coarse:h-9 rounded-sm pl-2.5 pr-8 text-sm pointer-coarse:text-touch max-sm:text-touch",
+  md: "h-9 pointer-coarse:h-10 rounded-md pl-3 pr-9 text-base pointer-coarse:text-touch max-sm:text-touch",
+  lg: "h-10 rounded-md pl-3.5 pr-9 text-md pointer-coarse:text-touch max-sm:text-touch",
 } as const;
 
 /** Native `<select>` with consistent styling and a chevron affordance. */

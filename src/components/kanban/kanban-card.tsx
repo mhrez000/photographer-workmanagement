@@ -2,39 +2,36 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { DueChip } from "@/components/jobs/due-chip";
-import { jobHref } from "@/components/jobs/job-link";
-import { PausedChip } from "@/components/jobs/paused-chip";
-import { PersonChip } from "@/components/jobs/person";
-import { PriorityPill } from "@/components/jobs/priority-pill";
-import { RevisionCount } from "@/components/jobs/revision-count";
-import { StatusPill } from "@/components/jobs/status-pill";
-import { STATUS_CATEGORY_META } from "@/lib/constants";
-import type { KanbanCard as KanbanCardData } from "@/lib/types";
+import { Images } from "lucide-react";
+import { RoundBadge, RushBadge, StagePill, WaitingOn, stageSubLabelText } from "@/components/jobs/stage-pill";
+import { SimpleDueChip } from "@/components/jobs-list/simple-due-chip";
+import type { StageBoardCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export interface KanbanCardViewProps {
-  card: KanbanCardData;
+  card: StageBoardCard;
   timeZone: string;
+  /** The viewer's id ("Waiting on: You"). */
+  viewerId: string | null;
   /** Rendered inside the DragOverlay (lifted look, no link focus). */
   overlay?: boolean;
   /** The card's slot while its overlay is being dragged. */
   ghost?: boolean;
-  /** Optimistically moved; waiting for the server. */
+  /** Saving a drop; waiting for the server. */
   pending?: boolean;
-  /** Show the precise status pill (columns that hold several statuses). */
-  showStatus?: boolean;
 }
 
 /**
- * Presentational kanban card: number + priority, job name, client, then a
- * footer with editor avatar, due chip, revision count and paused chip.
- * Overdue jobs get a danger hairline on the left edge, due today attention.
+ * One job on the Board — the same pieces as a row on the Jobs list (docs/SIMPLIFICATION-PLAN.md §4):
+ * number, address, client · type of shoot, the stage pill with Round / Rush beside it and the
+ * secondary text underneath ("Not started", "Editing since 9 Oct", "Not sent to client"), then
+ * "Waiting on: Sam" and the due chip. Late jobs get a red hairline on the left, due today amber.
  */
-export function KanbanCardView({ card, timeZone, overlay = false, ghost = false, pending = false, showStatus = false }: KanbanCardViewProps) {
-  const done = STATUS_CATEGORY_META[card.statusCategory]?.done ?? false;
-  const completedAt = card.statusCategory === "completed" ? card.statusEnteredAt : null;
-  const edge = card.isOverdue ? "before:bg-danger" : card.isDueToday ? "before:bg-attention" : "before:bg-transparent";
+export function KanbanCardView({ card, timeZone, viewerId, overlay = false, ghost = false, pending = false }: KanbanCardViewProps) {
+  const { job } = card;
+  const dueToday = job.stage.active && job.due.daysFromToday === 0;
+  const edge = job.due.late ? "before:bg-danger" : dueToday ? "before:bg-attention" : "before:bg-transparent";
+  const sub = job.stage.subLabel === "round" ? null : stageSubLabelText(job.stage, job.startedAt, timeZone);
 
   return (
     <div
@@ -50,40 +47,65 @@ export function KanbanCardView({ card, timeZone, overlay = false, ghost = false,
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="numeric text-2xs font-semibold tracking-wide text-ink-muted">{card.jobNumber}</span>
+        <span className="numeric text-2xs font-semibold tracking-wide text-ink-muted">{job.jobNumber}</span>
         <div className="flex items-center gap-1">
-          {card.isPaused ? <PausedChip compact /> : null}
-          <RevisionCount count={card.revisionCount} />
-          <PriorityPill priority={card.priority} quietNormal compact />
+          <RushBadge rush={job.rush} />
+          <RoundBadge round={job.round} />
+          {pending ? <span className="text-2xs text-ink-subtle">Saving…</span> : null}
         </div>
       </div>
 
       <p className="mt-1.5 line-clamp-2 text-sm font-medium leading-snug text-ink">
         {overlay ? (
-          card.name
+          job.name
         ) : (
           <Link
-            href={jobHref(card.id)}
+            href={`/jobs/${encodeURIComponent(job.id)}`}
             tabIndex={-1}
             draggable={false}
             className="after:absolute after:inset-0 after:content-[''] hover:underline hover:decoration-border-strong hover:underline-offset-2"
             onClick={(e) => e.stopPropagation()}
           >
-            {card.name}
+            {job.name}
           </Link>
         )}
       </p>
-      <p className="mt-0.5 truncate text-xs text-ink-muted">{card.client.name}</p>
+      <p className="mt-0.5 truncate text-xs text-ink-muted" title={`${job.client.name} · ${job.jobTypeName}`}>
+        {job.client.name} <span aria-hidden="true">·</span> {job.jobTypeName}
+      </p>
 
-      {showStatus ? (
-        <div className="mt-2">
-          <StatusPill status={card.status} size="xs" />
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+        <StagePill display={job.stage} hideSubLabel className="shrink-0" />
+        {sub ? <span className="truncate text-xs text-ink-muted">{sub}</span> : null}
+      </div>
+
+      <div className="mt-2.5 flex items-center justify-between gap-2">
+        <WaitingOn
+          job={{ category: job.statusCategory, photographer: job.photographer, editor: job.editor }}
+          viewerId={viewerId}
+          className="min-w-0 truncate text-xs"
+        />
+        <div className="flex shrink-0 items-center gap-1.5">
+          {job.finishedLink ? (
+            overlay ? (
+              <Images aria-hidden="true" className="size-3.5 text-ink-muted" />
+            ) : (
+              <a
+                href={job.finishedLink.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                draggable={false}
+                onClick={(e) => e.stopPropagation()}
+                aria-label="Open finished photos"
+                title="Open finished photos"
+                className="relative z-10 inline-flex size-6 items-center justify-center rounded-sm text-ink-muted hover:bg-surface-muted hover:text-ink focus-ring"
+              >
+                <Images aria-hidden="true" className="size-3.5" />
+              </a>
+            )
+          ) : null}
+          <SimpleDueChip due={job.due} active={job.stage.active} />
         </div>
-      ) : null}
-
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <PersonChip user={card.editor} size="xs" avatarOnly emptyLabel="No editor" />
-        <DueChip due={card.dueDate} timeZone={timeZone} done={done} completedAt={completedAt} compact />
       </div>
     </div>
   );

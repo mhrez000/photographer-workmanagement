@@ -12,4 +12,6 @@ export { YourEditorsSection, type YourEditorsSectionProps } from "./your-editors
 export { ComingUpSection, type ComingUpSectionProps } from "./coming-up";
 export { EmptyStudio, type EmptyStudioProps } from "./empty-studio";
 export { SimplerNoticeCard, SIMPLER_NOTICE_DISMISS_PATH } from "./simpler-notice";
+export { GetSetUpCard, SET_UP_STEPS, ONBOARDING_DISMISS_PATH, type GetSetUpCardProps } from "./get-set-up";
+export { FirstRunHome, type FirstRunHomeProps } from "./first-run";
 export { greetingAt, firstName } from "./greeting";

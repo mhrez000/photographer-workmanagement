@@ -69,3 +69,18 @@ export async function logoutAction(): Promise<void> {
   await logout(await getOptionalContext(), { ip: clientIp(h), userAgent: h.get("user-agent") });
   redirect("/login");
 }
+
+/** Only the invite page is allowed as a return address after signing out from a notice (no open redirects). */
+function inviteReturnPath(next: unknown): string {
+  return typeof next === "string" && next.startsWith("/invite/") && !next.startsWith("//") ? next : "/login";
+}
+
+/**
+ * "Sign out to accept this invite" on /invite/[token] when a DIFFERENT person is signed in on this browser:
+ * ends the current session (audited like any logout) and comes straight back to the invite, now anonymous.
+ */
+export async function signOutToInviteAction(formData: FormData): Promise<void> {
+  const h = await headers();
+  await logout(await getOptionalContext(), { ip: clientIp(h), userAgent: h.get("user-agent") });
+  redirect(inviteReturnPath(formData.get("next")));
+}

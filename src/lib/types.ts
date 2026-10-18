@@ -1608,9 +1608,19 @@ export interface NeedsAttentionRow {
   since: string;
 }
 
+/** An editor who was invited but has not opened their link yet (front door): never assignable, never counted. */
+export interface PendingEditor {
+  id: string;
+  name: string;
+  email: string;
+  invitedAt: string | null;
+}
+
 /** "Your editors" row on Home (a cut of EditorOverviewRow). */
 export interface HomeEditorRow {
   editor: UserRef;
+  /** Shown as a second line when two editors share a name. */
+  email: string;
   onDesk: number;
   lateNow: number;
   /** null with `notEnough` when fewer than MIN_JOBS_FOR_RATES finished this month. */
@@ -1636,6 +1646,8 @@ export interface OwnerHome {
   needsAttentionMore: number;
   /** Owners / co-owners only (null for an extra photographer). */
   yourEditors: HomeEditorRow[] | null;
+  /** Owners / co-owners only: invited editors who have not joined yet (listed under Your editors, never counted). */
+  pendingEditors: PendingEditor[] | null;
   comingUp: ComingUpItem[];
   /** Show the one-time "Proofline got simpler" card. */
   simplerNotice: boolean;
@@ -1705,6 +1717,8 @@ export interface EditorFiveNumbers {
 
 export interface EditorOverviewRow extends EditorFiveNumbers {
   editor: UserRef;
+  /** Shown as a second line when two editors share a name. */
+  email: string;
   usualCapacity: number | null;
   full: boolean;
 }
@@ -1720,6 +1734,8 @@ export interface EditorsOverview {
   period: EditorPeriodRange;
   waitingOnYou: { count: number; oldestAgeSeconds: number | null };
   rows: EditorOverviewRow[];
+  /** Invited editors who have not opened their link yet (not in `rows`). */
+  pendingEditors: PendingEditor[];
   extraPhotographers: ExtraPhotographerRow[];
   asOf: string;
 }
@@ -1776,9 +1792,11 @@ export interface EditorsCsv {
   csv: string;
 }
 
-/** An editor in the Assign / Change editor picker ("On their desk 3 · Late 1"). */
+/** An editor in the Assign / Change editor picker ("On their desk 3 · Late 1"). Joined editors only: a pending invitee is never offered. */
 export interface EditorPickerOption {
   editor: UserRef;
+  /** Shown as a second line when two editors share a name. */
+  email: string;
   onDesk: number;
   late: number;
   usualCapacity: number | null;
@@ -1804,6 +1822,43 @@ export interface SimpleNextStep {
   hasFinishedLink: boolean;
   /** The latest finished link (pre-fills the Send for checking box after changes). */
   lastFinishedLink: SimpleLink | null;
+}
+
+/* ---------------- the Advanced Board in the five stages (plan §8 follow-up) ---------------- */
+
+/** The simple button a Board drop stands for (each one is a `POST /api/jobs/:id/simple/<action>` dialog). */
+export type StageBoardMoveAction = "assign" | "send_for_checking" | "approve" | "ask_for_changes" | "reopen";
+
+export interface StageBoardMove {
+  /** The stage column the card may be dropped into. */
+  to: Stage;
+  action: StageBoardMoveAction;
+}
+
+export interface StageBoardCard {
+  job: SimpleJobRow;
+  /** Drops the VIEWER may make — exactly the simple buttons they would see on the job page. Empty = read only. */
+  moves: StageBoardMove[];
+  /** Approve: the client uses the portal → "Approve & send / Approve only" (plan §12.2). */
+  shareQuestion: boolean;
+  /** Approve: owner / co-owner edited this themselves → "Approve anyway?" first (plan §12.3). */
+  selfReviewNeedsConfirm: boolean;
+}
+
+export interface StageBoardColumn {
+  stage: Stage;
+  cards: StageBoardCard[];
+  /** Full total in the stage (cards may be capped by the per-column limit). */
+  count: number;
+}
+
+export interface StageBoard {
+  /** The five stage columns, in `STAGE_TABS` order. */
+  columns: StageBoardColumn[];
+  /** Cancelled jobs when `showCancelled`; otherwise null. */
+  cancelled: StageBoardColumn | null;
+  viewerId: string | null;
+  asOf: string;
 }
 
 export interface SimpleFiles {

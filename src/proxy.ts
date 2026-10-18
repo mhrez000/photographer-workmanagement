@@ -95,7 +95,7 @@ export function proxy(req: NextRequest) {
   }
 
   if (isPublic(pathname)) return NextResponse.next();
-  // The landing page is public; src/app/page.tsx sends a signed-in person to their landing page.
+  // The landing page is public; src/app/(public)/layout.tsx sends a signed-in person to their landing page (a real 307).
   if (pathname === "/" && !hasCookie) return NextResponse.next();
 
   if (hasCookie) {

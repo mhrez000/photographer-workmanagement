@@ -31,10 +31,20 @@ export interface ComboboxProps {
   loading?: boolean;
   disabled?: boolean;
   invalid?: boolean;
+  /** Focus the trigger on mount (the first field of a form). */
+  autoFocus?: boolean;
   /** Offer a "None" row that clears the value. */
   clearLabel?: string;
-  /** Pinned row under the list (e.g. "+ New client"). Receives the current query. */
-  footer?: (query: string, close: () => void) => React.ReactNode;
+  /**
+   * Pinned row under the list (e.g. "+ New client"). Receives the current query, a `close` callback and
+   * whether the row is the highlighted default (no option matches the query and `commitQuery` would take it).
+   */
+  footer?: (query: string, close: () => void, highlighted: boolean) => React.ReactNode;
+  /**
+   * What Enter / Tab / clicking away do with a typed query that matches NO option: return true to take the
+   * query (e.g. select "New client …"), false to ignore it. Without it, a non-matching query is just dropped.
+   */
+  commitQuery?: (query: string) => boolean;
   /** Fires when the panel opens (lazy loading). */
   onOpen?: () => void;
   "aria-describedby"?: string;
@@ -54,33 +64,72 @@ function matches(option: ComboboxOption, query: string): boolean {
     .every((word) => hay.includes(word));
 }
 
+function visibleRows(options: ComboboxOption[], query: string, clearLabel: string | undefined): ComboboxOption[] {
+  const filtered = options.filter((o) => matches(o, query.trim()));
+  return clearLabel && !query.trim() ? [{ value: "", label: clearLabel } as ComboboxOption, ...filtered] : filtered;
+}
+
+/** A single printable character with no modifier (what typing into the search box would add). */
+function printableKey(event: React.KeyboardEvent): string | null {
+  if (event.ctrlKey || event.metaKey || event.altKey) return null;
+  return event.key.length === 1 ? event.key : null;
+}
+
 /**
  * Searchable single-select for forms: an input-styled trigger opening a
  * panel with a search box and a keyboard-navigable listbox (↑/↓, Enter,
  * Esc). Options are filtered locally.
+ *
+ * The query lives HERE, not in the panel, so nothing typed is ever lost: keys pressed on the trigger while
+ * the panel is still mounting (a fast typist right after the click) are appended to the query the search box
+ * then shows. Closing the panel (Tab, Escape, clicking away) with a query that matches nothing hands the
+ * query to `commitQuery` (the Client picker turns it into "New client …").
  */
 export function Combobox(props: ComboboxProps) {
-  const { id, options, value, placeholder = "Select…", disabled, invalid, className, onOpen } = props;
+  const { id, options, value, placeholder = "Select…", disabled, invalid, className, onOpen, autoFocus, clearLabel, commitQuery } = props;
   const selected = options.find((o) => o.value === value) ?? null;
   const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+
+  // Closing with a typed query that matches nothing hands it to `commitQuery` (handlers are re-created per render, so `query` is current).
+  const commitPending = () => {
+    const q = query.trim();
+    if (!q || !commitQuery) return;
+    if (visibleRows(options, q, clearLabel).length === 0) commitQuery(q);
+  };
+
+  const onOpenChange = (next: boolean) => {
+    if (next) {
+      setQuery("");
+      onOpen?.();
+    } else {
+      commitPending();
+    }
+    setOpen(next);
+  };
 
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) onOpen?.();
-      }}
-      className={cn("flex w-full", className)}
-    >
+    <Popover open={open} onOpenChange={onOpenChange} className={cn("flex w-full", className)}>
       <PopoverTrigger
         id={id}
         variant="outline"
         disabled={disabled}
+        autoFocus={autoFocus}
         aria-describedby={props["aria-describedby"]}
         aria-invalid={invalid || props["aria-invalid"] || undefined}
         aria-required={props["aria-required"]}
         aria-label={props["aria-label"]}
+        onKeyDown={(event) => {
+          // Typing on the closed (or still-mounting) trigger opens the panel with that text as the query.
+          const key = printableKey(event);
+          if (key === null) return;
+          event.preventDefault();
+          setQuery((q) => (open ? q + key : key));
+          if (!open) {
+            onOpen?.();
+            setOpen(true);
+          }
+        }}
         className={cn(
           "h-9 w-full justify-between gap-2 px-3 font-normal",
           "aria-invalid:border-danger",
@@ -95,7 +144,7 @@ export function Combobox(props: ComboboxProps) {
         </span>
       </PopoverTrigger>
       <PopoverContent align="start" aria-label={props["aria-label"] ?? placeholder} className="w-full min-w-64 p-0">
-        <ComboboxPanel {...props} onPicked={() => setOpen(false)} />
+        <ComboboxPanel {...props} query={query} setQuery={setQuery} onPicked={() => setOpen(false)} />
       </PopoverContent>
     </Popover>
   );
@@ -110,28 +159,49 @@ function ComboboxPanel({
   loading,
   clearLabel,
   footer,
+  commitQuery,
+  query,
+  setQuery,
   onPicked,
-}: ComboboxProps & { onPicked: () => void }) {
+}: ComboboxProps & { query: string; setQuery: (next: string) => void; onPicked: () => void }) {
   const { setOpen } = usePopover();
-  const [query, setQuery] = React.useState("");
   const listId = React.useId();
-  const rows = React.useMemo(() => {
-    const filtered = options.filter((o) => matches(o, query.trim()));
-    return clearLabel && !query.trim() ? [{ value: "", label: clearLabel } as ComboboxOption, ...filtered] : filtered;
-  }, [options, query, clearLabel]);
+  const rows = React.useMemo(() => visibleRows(options, query, clearLabel), [options, query, clearLabel]);
   const initialIndex = Math.max(0, rows.findIndex((r) => r.value === (value ?? "")));
   const [active, setActive] = React.useState(initialIndex);
   const activeIndex = Math.min(active, Math.max(rows.length - 1, 0));
   const listRef = React.useRef<HTMLUListElement>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const trimmed = query.trim();
+  // Nothing matches and the footer can take the query: the footer row is the default (Enter / Tab pick it).
+  const footerIsDefault = rows.length === 0 && trimmed.length > 0 && Boolean(commitQuery);
 
   React.useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)?.scrollIntoView({ block: "nearest" });
   }, [activeIndex]);
 
+  // Focus the search box the moment it exists (the popover's own focus runs a frame later) and put the caret
+  // after any text typed on the trigger while the panel was mounting.
+  const focusInput = React.useCallback((el: HTMLInputElement | null) => {
+    inputRef.current = el;
+    if (el && document.activeElement !== el) {
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    }
+  }, []);
+
   const pick = (row: ComboboxOption | undefined) => {
     if (!row || row.disabled) return;
     onChange(row.value === "" ? null : row.value);
     onPicked();
+  };
+
+  const takeQuery = (): boolean => {
+    if (!footerIsDefault || !commitQuery) return false;
+    const taken = commitQuery(trimmed);
+    if (taken) onPicked();
+    return taken;
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -149,8 +219,9 @@ function ComboboxPanel({
       setActive(rows.length - 1);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      pick(rows[activeIndex]);
+      if (!takeQuery()) pick(rows[activeIndex]);
     } else if (event.key === "Tab") {
+      // Let focus move on; the close handler in Combobox commits a non-matching query.
       setOpen(false);
     }
   };
@@ -162,12 +233,13 @@ function ComboboxPanel({
       <div className="flex items-center gap-2 border-b border-border px-3">
         <Search aria-hidden="true" className="size-4 shrink-0 text-ink-subtle" />
         <input
+          ref={focusInput}
           type="text"
           role="combobox"
           aria-expanded="true"
           aria-controls={listId}
           aria-autocomplete="list"
-          aria-activedescendant={rows.length > 0 ? optionId(activeIndex) : undefined}
+          aria-activedescendant={rows.length > 0 ? optionId(activeIndex) : footerIsDefault ? `${listId}-footer` : undefined}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
@@ -175,7 +247,7 @@ function ComboboxPanel({
           }}
           onKeyDown={onKeyDown}
           placeholder={searchPlaceholder}
-          className="h-10 w-full min-w-0 bg-transparent text-base text-ink outline-none placeholder:text-ink-subtle"
+          className="h-10 w-full min-w-0 bg-transparent text-base text-ink outline-none placeholder:text-ink-subtle pointer-coarse:text-touch max-sm:text-touch"
         />
         {loading ? <Spinner size="xs" /> : null}
       </div>
@@ -217,15 +289,19 @@ function ComboboxPanel({
           })
         )}
       </ul>
-      <ComboboxFooter footer={footer} query={query.trim()} close={() => setOpen(false)} />
+      <ComboboxFooter footer={footer} query={trimmed} highlighted={footerIsDefault} id={`${listId}-footer`} close={() => setOpen(false)} />
     </div>
   );
 }
 
 /** Footer slot; renders nothing (no divider) when the footer has nothing to show for this query. */
-function ComboboxFooter({ footer, query, close }: { footer: ComboboxProps["footer"]; query: string; close: () => void }) {
+function ComboboxFooter({ footer, query, highlighted, id, close }: { footer: ComboboxProps["footer"]; query: string; highlighted: boolean; id: string; close: () => void }) {
   if (!footer) return null;
-  const node = footer(query, close);
+  const node = footer(query, close, highlighted);
   if (node === null || node === undefined || node === false) return null;
-  return <div className="border-t border-border p-1">{node}</div>;
+  return (
+    <div id={id} className="border-t border-border p-1" data-highlighted={highlighted || undefined}>
+      {node}
+    </div>
+  );
 }

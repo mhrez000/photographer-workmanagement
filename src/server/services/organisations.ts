@@ -32,7 +32,7 @@ import {
 } from "@/lib/constants";
 import { slugify } from "@/lib/utils";
 import type { AuthContext } from "@/lib/types";
-import { SignUpInput } from "@/lib/validation/auth";
+import { EmailSchema, SignUpInput } from "@/lib/validation/auth";
 import { recordEvent } from "@/server/audit";
 import { hashPassword } from "@/server/auth/password";
 import { checkSignupAttempt, recordSignupAttempt } from "@/server/auth/rate-limit";
@@ -264,6 +264,30 @@ function emailInUse(): ValidationError {
   return new ValidationError(EMAIL_IN_USE_MESSAGE, { formErrors: [], fieldErrors: { email: [EMAIL_IN_USE_MESSAGE] } });
 }
 
+/** Is this (normalised) address already a user of any studio, in any role? */
+async function emailTaken(db: DbLike, email: string): Promise<boolean> {
+  return (await first(db.select({ id: users.id }).from(users).where(eq(users.email, email)))) !== undefined;
+}
+
+/**
+ * Zod first; when it fails, the email is still checked so a taken address and a short password come back in
+ * the ONE 400 (two submits to learn two things was the front door's most-reported snag). The success path
+ * keeps its uniqueness check inside the transaction, where it matters for a race.
+ */
+async function parseSignUp(db: DbLike, raw: unknown): Promise<SignUpInput> {
+  try {
+    return parseInput(SignUpInput, raw);
+  } catch (err) {
+    if (!(err instanceof ValidationError)) throw err;
+    const details = err.details as { formErrors: string[]; fieldErrors: Record<string, string[]> };
+    const email = raw && typeof raw === "object" ? EmailSchema.safeParse((raw as Record<string, unknown>).email) : null;
+    if (email?.success && !details.fieldErrors.email && (await emailTaken(db, email.data))) {
+      throw new ValidationError(EMAIL_IN_USE_MESSAGE, { formErrors: details.formErrors, fieldErrors: { ...details.fieldErrors, email: [EMAIL_IN_USE_MESSAGE] } });
+    }
+    throw err;
+  }
+}
+
 /**
  * Public "Create your studio" (no context): Zod (password ≥ 10, email, studio name 2–80) → 5 sign-ups / hour / IP
  * (429) → bcrypt the password BEFORE the uniqueness check, so a taken address answers in the same time → in one
@@ -272,7 +296,7 @@ function emailInUse(): ValidationError {
  * from the unique index, so a race gets the same answer). No session is created here (see `signUpAndSignIn`).
  */
 export async function signUp(db: Db, raw: unknown, opts: { requestId?: string } = {}): Promise<SignUpResult> {
-  const input = parseInput(SignUpInput, raw);
+  const input = await parseSignUp(db, raw);
   const limit = checkSignupAttempt(input.ip, input.email);
   if (!limit.allowed) throw new RateLimitedError(limit.retryAfterSeconds);
   recordSignupAttempt(input.ip, input.email);
@@ -281,8 +305,7 @@ export async function signUp(db: Db, raw: unknown, opts: { requestId?: string } 
   try {
     return await withTx(
       async (tx) => {
-        const taken = await first(tx.select({ id: users.id }).from(users).where(eq(users.email, input.email)));
-        if (taken) throw emailInUse();
+        if (await emailTaken(tx, input.email)) throw emailInUse();
         const created = await createOrganisationWithOwner(tx, {
           name: input.studioName,
           timezone: input.timezone,
@@ -291,6 +314,8 @@ export async function signUp(db: Db, raw: unknown, opts: { requestId?: string } 
           requestId: opts.requestId,
         });
         await bootstrapOrganisation(tx, { organisationId: created.organisationId, ownerUserId: created.ownerId, ctx: created.ctx });
+        // Sign-up signs the owner in, so People's "Last signed in" never reads "Never" for them.
+        await tx.update(users).set({ lastLoginAt: created.ctx.now() }).where(eq(users.id, created.ownerId));
         const row = await one(tx.select({ sessionVersion: users.sessionVersion }).from(users).where(eq(users.id, created.ownerId)), "owner");
         return {
           organisationId: created.organisationId,

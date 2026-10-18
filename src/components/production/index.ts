@@ -12,6 +12,7 @@ export { UrlSearchInput, type UrlSearchInputProps } from "./url-search";
 export { ArchiveControl, type ArchiveControlProps } from "./archive-control";
 export { ClientFields, NewClientForm, NewClientDialog, EditClientDialog, EMPTY_CLIENT, clientColourFor, type ClientFormValues, type EditClientDialogProps } from "./client-form";
 export { ClientJobsByAddress, groupJobsByAddress, type AddressGroup, type ClientJobsByAddressProps } from "./client-jobs";
-export { ClientOnlineAccess, type ClientOnlineAccessProps } from "./client-online-access";
+export { ClientOnlineAccess, type ClientOnlineAccessProps, type ClientUserInvite } from "./client-online-access";
+export { ClientInviteDialog, type ClientInviteDialogProps } from "./client-invite-dialog";
 export { ProjectFields, NewProjectForm, EditProjectDialog, type ProjectFormValues, type EditProjectDialogProps } from "./project-form";
 export { RouteError, type RouteErrorProps } from "@/components/common/route-error";

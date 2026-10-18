@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, Camera, CheckCircle2, Eye, Keyboard, MessageSquareWarning, Settings2, Store, Wand2 } from "lucide-react";
+import { ArrowRight, Camera, CheckCircle2, Eye, Keyboard, KeyRound, MessageSquareWarning, Settings2, Store, Wand2 } from "lucide-react";
 import { SectionCard } from "@/components/common/section-card";
 import { RoundBadge, StageDot, StagePill } from "@/components/jobs/stage-pill";
 import { PageContainer } from "@/components/shell/page-container";
@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { SIMPLE_CHANGE_CHIPS } from "@/lib/constants";
 import { STAGE_META, STAGE_TABS, type Stage } from "@/lib/stages";
 import { advancedEnabled, allowed, pageContext } from "@/server/page";
+import { loadIsPreSimplificationStudio } from "@/server/queries/simpleColumns";
 
 export const metadata: Metadata = { title: "Help" };
 
@@ -45,10 +46,12 @@ const ROLES: { icon: typeof Camera; title: string; does: string; sees: string }[
 
 /** One page (docs/SIMPLIFICATION-PLAN.md §6): the five stages, the three roles and how to check work. */
 export default async function HelpPage() {
-  const { ctx } = await pageContext();
+  const { ctx, db } = await pageContext();
   const editor = ctx.role === "editor";
   const advanced = advancedEnabled(ctx);
   const canManage = allowed(ctx, "settings.view");
+  // Only a studio that used the old screens has "old bookmarks"; a new sign-up never saw All Work or Team Work.
+  const preSimplification = await loadIsPreSimplificationStudio(db, ctx);
 
   return (
     <PageContainer width="narrow">
@@ -222,7 +225,30 @@ export default async function HelpPage() {
         </>
       )}
 
-      <SectionCard id="where" title="Where things are" description={editor ? "Two pages and your account; that is all there is." : "Everything else moved, rather than disappeared."}>
+      <SectionCard id="invites" title="Invites and passwords" description={canManage ? "How people get in, and what to do when a password is lost." : "What to do when a password is lost."}>
+        <p className="flex items-start gap-2 text-sm text-ink-secondary">
+          <KeyRound aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-subtle" />
+          <span>
+            {canManage ? (
+              <>
+                Invite someone from{" "}
+                <Link href="/settings/people?invite=1" className="font-medium text-accent-ink hover:underline">
+                  Settings → People
+                </Link>{" "}
+                (or a client’s page for portal logins). They get a link to choose their own password: it is emailed when your studio has email set up, and always shown to you to copy. A link works for 7 days; until it is opened the person shows as “Invite pending”, and their page lets you send a new link or revoke it. You can also set a temporary password instead.{" "}
+              </>
+            ) : null}
+            Forgot a password? Use <span className="font-medium text-ink">Forgot your password?</span> on the sign-in page: the reset link works for 60 minutes and signs out every other session when used.
+            {canManage ? " An owner can also set a temporary password from a person’s page." : " Signed in? Change it any time under My account."}
+          </span>
+        </p>
+      </SectionCard>
+
+      <SectionCard
+        id="where"
+        title="Where things are"
+        description={editor ? "Two pages and your account; that is all there is." : preSimplification ? "Everything else moved, rather than disappeared." : "Five menu items; everything else lives under Settings."}
+      >
         <ul className="space-y-2 text-sm text-ink-secondary">
           <li className="flex items-start gap-2">
             <Keyboard aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-subtle" />
@@ -255,10 +281,12 @@ export default async function HelpPage() {
                   ) : null}
                 </span>
               </li>
-              <li className="flex items-start gap-2">
-                <ArrowRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-subtle" />
-                <span>Old bookmarks still work: All Work, Team Work and the board open Jobs; the team pages open Editors; Activity opens Settings → History.</span>
-              </li>
+              {preSimplification ? (
+                <li className="flex items-start gap-2" data-old-bookmarks="">
+                  <ArrowRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-subtle" />
+                  <span>Old bookmarks still work: All Work, Team Work and the board open Jobs; the team pages open Editors; Activity opens Settings → History.</span>
+                </li>
+              ) : null}
             </>
           )}
         </ul>
