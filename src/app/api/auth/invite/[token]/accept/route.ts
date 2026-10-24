@@ -6,7 +6,9 @@ import { acceptInviteAndSignIn } from "@/server/services/invites";
 /**
  * POST /api/auth/invite/:token/accept `{ password, name? }` (public, CSRF) → `{ data: { user: { id, name, email,
  * role }, redirectTo } }` + session cookie (photographers → /home, editors → /my-jobs, clients → /portal).
- * Any invalid link → 400 `validation` "This invite link is no longer valid".
+ * Any invalid link → 400 `validation` "This invite link is no longer valid". Accounts: the email counts as confirmed
+ * only when the inviter's own email is confirmed and email is set up (SEC-05); otherwise "Confirm your email" is sent
+ * (`sendEmailConfirmation` reason "invite", never failing the join).
  */
 export const POST = handle<RouteParams<{ token: string }>>(async (req, { params }, meta) => {
   const { token } = await params;
@@ -14,7 +16,7 @@ export const POST = handle<RouteParams<{ token: string }>>(async (req, { params 
   const fields = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
   const result = await acceptInviteAndSignIn(
     { token, password: fields.password, ...(fields.name !== undefined ? { name: fields.name } : {}), ip: clientIp(req.headers), userAgent: req.headers.get("user-agent") },
-    { requestId: meta.requestId },
+    { requestId: meta.requestId, req },
   );
   return {
     user: { id: result.userId, name: result.name, email: result.email, role: result.role },

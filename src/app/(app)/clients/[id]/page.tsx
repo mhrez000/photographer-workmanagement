@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { formatDate } from "@/lib/dates";
+import { isDemoPersonaClient } from "@/server/auth/demo";
 import { getViewer } from "@/server/auth/session";
 import { allowed, guard, load, pageContext } from "@/server/page";
 import { getClientDetail, listClientJobsSimple } from "@/server/queries/clients";
@@ -35,7 +36,8 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
   const { client, counts } = detail;
   const resource = { organisationId: ctx.organisationId, createdByUserId: client.createdByUserId ?? undefined };
   const canEdit = allowed(ctx, "client.edit", resource);
-  const canArchive = allowed(ctx, "client.archive", resource);
+  // Demo studio: the Client persona's client can't be archived (SEC-07 / DEMO-01: it would lock that persona out).
+  const canArchive = allowed(ctx, "client.archive", resource) && !(await isDemoPersonaClient(db, ctx, client.id));
   const canCreateJob = allowed(ctx, "job.create") && !client.archivedAt;
   const canManagePortal = allowed(ctx, "client.manage_portal", { organisationId: ctx.organisationId });
   const access = canManagePortal ? await load(() => getClientPortalAccess(db, ctx, client.id)) : null;
@@ -132,7 +134,7 @@ export default async function ClientDetailPage({ params }: PageProps<"/clients/[
         </SectionCard>
 
         <div className="flex min-w-0 flex-col gap-6">
-          {access ? <ClientOnlineAccess access={access} studioName={studioName} timeZone={tz} invites={invites} /> : null}
+          {access ? <ClientOnlineAccess access={access} studioName={studioName} timeZone={tz} invites={invites} demo={ctx.isDemo === true} /> : null}
 
           {ctx.role !== "editor" && detail.notes ? (
             <SectionCard title="Private notes" description="Only you and your photographers see this.">

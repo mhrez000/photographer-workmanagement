@@ -112,7 +112,7 @@ function DeactivateDialog({
         ? mode === "reassign"
           ? `${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} handed over.`
           : `${editorJobs.length} job${editorJobs.length === 1 ? "" : "s"} back to Needs editor.`
-        : "They've been signed out everywhere.",
+        : "They've been logged out everywhere.",
       onConflict: (err) => {
         onOpenChange(false);
         onConflict(err);
@@ -131,7 +131,7 @@ function DeactivateDialog({
         </div>
         <DialogTitle>Deactivate {profile.name}?</DialogTitle>
         <DialogDescription>
-          They are signed out straight away and cannot sign in again. Their history, messages and finished work stay exactly as they are.
+          They are logged out straight away and cannot sign in again. Their history, messages and finished work stay exactly as they are.
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-5 pb-4">
@@ -316,7 +316,14 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
       </SectionCard>
     );
   }
-  const anyControl = access.resetPassword || access.deactivate || access.reactivate || access.anonymise;
+  // Only the rows that would actually show (DEMO-07: a demo persona could be "reactivated" in theory — it is active, so
+  // nothing showed and the card was empty; now it carries the locked reason instead).
+  const anyControl =
+    anonymised ||
+    (!anonymised && access.resetPassword) ||
+    (profile.isActive && access.deactivate) ||
+    (!profile.isActive && !anonymised && access.reactivate) ||
+    (!anonymised && access.anonymise);
   if (!anyControl) {
     return (
       <SectionCard title="Account">
@@ -341,7 +348,7 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
           <div className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-base font-medium text-ink">Reset password</p>
-              <p className="text-sm text-ink-muted">Gives them a temporary password and signs them out everywhere.</p>
+              <p className="text-sm text-ink-muted">Gives them a temporary password and logs them out everywhere.</p>
             </div>
             <Button variant="outline" size="sm" leadingIcon={<KeyRound aria-hidden="true" />} onClick={() => setResetOpen(true)}>
               Reset password
@@ -398,7 +405,7 @@ export function UserLifecycleCard({ profile, access, isSelf, targetIsAdmin = fal
           if (!o) setTempPassword(null);
         }}
         title={tempPassword ? "New temporary password" : `Reset ${profile.name}'s password?`}
-        description={tempPassword ? undefined : "Their current password stops working and every session is signed out."}
+        description={tempPassword ? undefined : "Their current password stops working and they are logged out everywhere."}
         confirmLabel={tempPassword ? "Done" : "Reset password"}
         onConfirm={tempPassword ? () => true : reset}
       >

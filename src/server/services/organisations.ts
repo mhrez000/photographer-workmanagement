@@ -9,8 +9,9 @@
  *                                       default edge + a cancel edge per open status), DEFAULT_JOB_TYPES bound
  *                                       to it with "usual days to edit"; settings keep their defaults
  *                                       (Advanced tools OFF, time tracking OFF)
- *   signUp(db, …)                       public: Zod → rate limit → bcrypt (always, so a taken email costs the
- *                                       same time) → both steps above in ONE transaction, cause "signup"
+ *   signUp(db, …)                       public: honeypot → Zod → rate limit (Postgres) → bcrypt (always, so a
+ *                                       taken email costs the same time) → both steps above in ONE transaction,
+ *                                       cause "signup"; a pending invitee's address is told to use the invite link
  *
  * The demo seed (src/db/seed/org.ts) and sign-up call the same two functions, so a real studio and the demo
  * studio are built the same way.
@@ -25,6 +26,7 @@ import {
   DEFAULT_TIMEZONE,
   DEFAULT_USUAL_DAYS_BY_JOB_TYPE,
   DEFAULT_WORKFLOW_NAME,
+  SIGNUP_HONEYPOT_FIELD,
   SLUG_FALLBACK,
   SLUG_MAX_LENGTH,
   type EventCause,
@@ -35,16 +37,27 @@ import type { AuthContext } from "@/lib/types";
 import { EmailSchema, SignUpInput } from "@/lib/validation/auth";
 import { recordEvent } from "@/server/audit";
 import { hashPassword } from "@/server/auth/password";
-import { checkSignupAttempt, recordSignupAttempt } from "@/server/auth/rate-limit";
-import { buildContextFromDb, createSession } from "@/server/auth/session";
+import { signupKey } from "@/server/auth/db-rate-limit";
+import { buildContextFromDb } from "@/server/auth/session";
+import { issueSessionCookie } from "@/server/auth/sign-in";
 import { nowIso } from "@/server/clock";
-import { RateLimitedError, ValidationError } from "@/server/errors";
+import { ValidationError } from "@/server/errors";
+import { enforceLimit } from "./authLimits";
 import { createJobType } from "./jobTypes";
 import { createWorkflow, type WorkflowGraph } from "./workflows";
 import { parseInput, withTx } from "./_shared";
 
 /** One message for a taken address (names neither the studio nor the role; same timing as a fresh one). */
 export const EMAIL_IN_USE_MESSAGE = "That email is already in use. Try signing in.";
+
+/**
+ * The address belongs to someone who was invited but has not opened their link yet: signing in cannot work for
+ * them, so say what will. Never names the studio.
+ */
+export const PENDING_INVITE_MESSAGE = "This email has been invited to a studio. Use the invite link in your email, or ask the studio to send it again.";
+
+/** The one answer a filled-in honeypot gets (a bot learns nothing from it; a person never sees it). */
+export const SIGNUP_REFUSED_MESSAGE = "Something went wrong. Please try again.";
 
 /* ------------------------------------------------------------------ */
 /*  Slugs                                                              */
@@ -76,10 +89,17 @@ export async function uniqueSlug(db: DbLike, requested: string): Promise<string>
 export interface OwnerDef {
   name: string;
   email: string;
-  /** bcrypt hash of the owner's password (computed outside the transaction). */
+  /** bcrypt hash of the owner's password (computed outside the transaction); Google sign-up: `unusablePasswordHash()`. */
   passwordHash: string;
   title?: string | null;
   avatarColour?: string;
+  /** Accounts: false for a Google-only owner (no password). Default true. */
+  hasPassword?: boolean;
+  /** Accounts: when the owner's email was confirmed (Google sign-up: now). Default null (not confirmed). */
+  emailVerifiedAt?: string | null;
+  /** Accounts: the Google account the owner signs in with (Google sign-up). Set both or neither. */
+  googleSub?: string | null;
+  googleEmail?: string | null;
 }
 
 export interface CreateOrganisationWithOwnerInput {
@@ -90,6 +110,8 @@ export interface CreateOrganisationWithOwnerInput {
   owner: OwnerDef;
   /** `metadata.cause` of the two events (sign-up: "signup"; seed: "seed"). Default "user". */
   cause?: EventCause;
+  /** Accounts: the seeded demo studio (`organisations.is_demo`). Only the seed sets it. Default false. */
+  isDemo?: boolean;
   requestId?: string;
   /** Clock (defaults to the injectable clock through the owner's context). */
   now?: () => string;
@@ -118,7 +140,10 @@ export async function createOrganisationWithOwner(tx: Tx, input: CreateOrganisat
   const at = (input.now ?? nowIso)();
 
   const org = await one(
-    tx.insert(organisations).values({ name: input.name, slug, createdAt: at, updatedAt: at }).returning({ id: organisations.id, slug: organisations.slug }),
+    tx
+      .insert(organisations)
+      .values({ name: input.name, slug, isDemo: input.isDemo ?? false, createdAt: at, updatedAt: at })
+      .returning({ id: organisations.id, slug: organisations.slug }),
     "organisation",
   );
   await tx.insert(organisationSettings).values({ organisationId: org.id, timezone, updatedAt: at });
@@ -143,6 +168,10 @@ export async function createOrganisationWithOwner(tx: Tx, input: CreateOrganisat
         avatarColour: input.owner.avatarColour ?? AVATAR_PALETTE[Math.floor(Date.parse(at) / 1000) % AVATAR_PALETTE.length],
         isActive: true,
         acceptedAt: at,
+        hasPassword: input.owner.hasPassword ?? true,
+        emailVerifiedAt: input.owner.emailVerifiedAt ?? null,
+        googleSub: input.owner.googleSub ?? null,
+        googleEmail: input.owner.googleEmail ?? null,
         createdAt: at,
         updatedAt: at,
       })
@@ -159,8 +188,8 @@ export async function createOrganisationWithOwner(tx: Tx, input: CreateOrganisat
     eventType: "org.created",
     action: "created",
     previousValue: null,
-    newValue: { name: input.name, slug: org.slug, timezone },
-    metadata: { organisationId: org.id, ownerUserId: owner.id },
+    newValue: { name: input.name, slug: org.slug, timezone, ...(input.isDemo ? { isDemo: true } : {}) },
+    metadata: { organisationId: org.id, ownerUserId: owner.id, ...(input.owner.googleSub ? { via: "google" } : {}) },
     visibility: "management",
   });
   await recordEvent(tx, ctx, {
@@ -264,48 +293,108 @@ function emailInUse(): ValidationError {
   return new ValidationError(EMAIL_IN_USE_MESSAGE, { formErrors: [], fieldErrors: { email: [EMAIL_IN_USE_MESSAGE] } });
 }
 
-/** Is this (normalised) address already a user of any studio, in any role? */
-async function emailTaken(db: DbLike, email: string): Promise<boolean> {
+function pendingInvite(): ValidationError {
+  return new ValidationError(PENDING_INVITE_MESSAGE, { formErrors: [], fieldErrors: { email: [PENDING_INVITE_MESSAGE] } });
+}
+
+/** The generic 400 a filled-in honeypot gets: no field errors, nothing that says why. */
+function signupRefused(): ValidationError {
+  return new ValidationError(SIGNUP_REFUSED_MESSAGE, { formErrors: [SIGNUP_REFUSED_MESSAGE], fieldErrors: {} });
+}
+
+/** Is this (normalised) address already a user of any studio, in any role? (Google sign-up re-uses it.) */
+export async function emailTaken(db: DbLike, email: string): Promise<boolean> {
   return (await first(db.select({ id: users.id }).from(users).where(eq(users.email, email)))) !== undefined;
+}
+
+/** How an address is used: free, an invite nobody has opened yet (active, not accepted, not anonymised), or taken. */
+export type EmailUse = "free" | "pending_invite" | "taken";
+
+export async function emailUse(db: DbLike, email: string): Promise<EmailUse> {
+  const row = await first(
+    db.select({ isActive: users.isActive, acceptedAt: users.acceptedAt, anonymisedAt: users.anonymisedAt }).from(users).where(eq(users.email, email)),
+  );
+  if (!row) return "free";
+  return row.isActive && row.acceptedAt === null && row.anonymisedAt === null ? "pending_invite" : "taken";
+}
+
+/** The 400 for an address that is not free (the pending-invitee copy, or the usual "already in use"). */
+export function emailUseMessage(use: Exclude<EmailUse, "free">): string {
+  return use === "pending_invite" ? PENDING_INVITE_MESSAGE : EMAIL_IN_USE_MESSAGE;
+}
+
+/**
+ * The sign-up honeypot (`SIGNUP_HONEYPOT_FIELD` = "website", a field people never see): filled when it carries
+ * anything but an empty / blank string. Read from the RAW body, before validation, so a bot never gets field
+ * errors to learn from.
+ */
+export function honeypotFilled(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const value = (raw as Record<string, unknown>)[SIGNUP_HONEYPOT_FIELD];
+  if (value === undefined || value === null) return false;
+  return typeof value !== "string" || value.trim().length > 0;
+}
+
+function rawString(raw: unknown, key: string): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = (raw as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
 }
 
 /**
  * Zod first; when it fails, the email is still checked so a taken address and a short password come back in
- * the ONE 400 (two submits to learn two things was the front door's most-reported snag). The success path
+ * the ONE 400 (two submits to learn two things was the front door's most-reported snag). That lookup answers
+ * whether an address has an account, so it only runs AFTER `beforeLookup` (the sign-up rate limit, which counts the
+ * attempt — SEC-04: without it the 400 was an unthrottled "is this address registered?" oracle). The success path
  * keeps its uniqueness check inside the transaction, where it matters for a race.
  */
-async function parseSignUp(db: DbLike, raw: unknown): Promise<SignUpInput> {
+async function parseSignUp(db: DbLike, raw: unknown, beforeLookup: (email: string) => Promise<unknown>): Promise<SignUpInput> {
   try {
     return parseInput(SignUpInput, raw);
   } catch (err) {
     if (!(err instanceof ValidationError)) throw err;
     const details = err.details as { formErrors: string[]; fieldErrors: Record<string, string[]> };
     const email = raw && typeof raw === "object" ? EmailSchema.safeParse((raw as Record<string, unknown>).email) : null;
-    if (email?.success && !details.fieldErrors.email && (await emailTaken(db, email.data))) {
-      throw new ValidationError(EMAIL_IN_USE_MESSAGE, { formErrors: details.formErrors, fieldErrors: { ...details.fieldErrors, email: [EMAIL_IN_USE_MESSAGE] } });
+    if (email?.success && !details.fieldErrors.email) {
+      await beforeLookup(email.data);
+      const use = await emailUse(db, email.data);
+      if (use !== "free") {
+        const message = emailUseMessage(use);
+        throw new ValidationError(message, { formErrors: details.formErrors, fieldErrors: { ...details.fieldErrors, email: [message] } });
+      }
     }
     throw err;
   }
 }
 
 /**
- * Public "Create your studio" (no context): Zod (password ≥ 10, email, studio name 2–80) → 5 sign-ups / hour / IP
- * (429) → bcrypt the password BEFORE the uniqueness check, so a taken address answers in the same time → in one
- * transaction: organisation + settings + owner + structure bootstrap, every event with cause "signup".
- * A taken email → 400 `validation` with `fieldErrors.email` = EMAIL_IN_USE_MESSAGE (checked up front AND mapped
- * from the unique index, so a race gets the same answer). No session is created here (see `signUpAndSignIn`).
+ * Public "Create your studio" (no context): honeypot (filled → the generic 400, and the attempt still counts) → Zod
+ * (password ≥ 10, email, studio name 2–80) → 5 sign-ups / hour / IP (Postgres-backed; every valid attempt counts;
+ * 429 "Too many new studios from this network. Try again in N minutes.") → bcrypt the password BEFORE the
+ * uniqueness check, so a taken address answers in the same time → in one transaction: organisation + settings +
+ * owner + structure bootstrap, every event with cause "signup".
+ * A taken email → 400 `validation` with `fieldErrors.email` = EMAIL_IN_USE_MESSAGE, or PENDING_INVITE_MESSAGE when it
+ * belongs to an invite nobody has opened yet (checked up front AND mapped from the unique index, so a race gets the
+ * same answer). No session is created here (see `signUpAndSignIn`).
  */
 export async function signUp(db: Db, raw: unknown, opts: { requestId?: string } = {}): Promise<SignUpResult> {
-  const input = await parseSignUp(db, raw);
-  const limit = checkSignupAttempt(input.ip, input.email);
-  if (!limit.allowed) throw new RateLimitedError(limit.retryAfterSeconds);
-  recordSignupAttempt(input.ip, input.email);
+  if (honeypotFilled(raw)) {
+    // A bot: counted like any attempt (so it is throttled too), then the one generic answer.
+    await enforceLimit(db, "signup", signupKey(rawString(raw, "ip"), rawString(raw, "email") ?? ""), "signup");
+    throw signupRefused();
+  }
+  // A form with mistakes still learns whether its address is taken, but only within the sign-up limit (the attempt
+  // counts, exactly like a valid one).
+  const input = await parseSignUp(db, raw, (email) => enforceLimit(db, "signup", signupKey(rawString(raw, "ip"), email), "signup"));
+  await enforceLimit(db, "signup", signupKey(input.ip, input.email), "signup");
 
   const passwordHash = await hashPassword(input.password);
   try {
     return await withTx(
       async (tx) => {
-        if (await emailTaken(tx, input.email)) throw emailInUse();
+        const use = await emailUse(tx, input.email);
+        if (use === "pending_invite") throw pendingInvite();
+        if (use === "taken") throw emailInUse();
         const created = await createOrganisationWithOwner(tx, {
           name: input.studioName,
           timezone: input.timezone,
@@ -338,6 +427,6 @@ export async function signUp(db: Db, raw: unknown, opts: { requestId?: string } 
 /** Sign-up + the session cookie (route handlers). The owner lands on /home. */
 export async function signUpAndSignIn(raw: unknown, opts: { requestId?: string; db?: Db } = {}): Promise<SignUpResult> {
   const result = await signUp(opts.db ?? getDb(), raw, opts);
-  await createSession(result.userId, result.sessionVersion, "staff", result.role);
+  await issueSessionCookie({ id: result.userId, role: result.role, sessionVersion: result.sessionVersion, email: result.email });
   return result;
 }

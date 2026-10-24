@@ -13,6 +13,7 @@ import { CATEGORY_GROUPS, type Action } from "@/lib/constants";
 import type { AuthContext, Client } from "@/lib/types";
 import { ArchiveClientInput, CreateClientInput, UpdateClientInput } from "@/lib/validation/clients";
 import { recordEvent } from "@/server/audit";
+import { assertNotDemoPersonaClient } from "@/server/auth/demo";
 import { assertCan, roleCanEver, type OrgResourceRef } from "@/server/auth/permissions";
 import { ForbiddenError } from "@/server/errors";
 import { first, loadClientInOrg, one, parseInput, type DbLike, type Tx } from "./_shared";
@@ -108,6 +109,8 @@ export async function archiveClient(tx: Tx, ctx: AuthContext, input: unknown): P
   assertCan(ctx, "client.archive", clientResourceRef(client));
   checkVersion(client, data.expectedVersion, client);
   if (client.archivedAt) throw ruleViolation("This client is already archived");
+  // Demo studio: the Client persona's client stays (SEC-07) — archiving it would lock every visitor out of that persona.
+  await assertNotDemoPersonaClient(tx, ctx, client.id);
   const active = await activeJobCountForClient(tx, ctx, client.id);
   if (active > 0) {
     throw ruleViolation(`This client has ${active} active job${active === 1 ? "" : "s"}. Complete or cancel them before archiving.`, {

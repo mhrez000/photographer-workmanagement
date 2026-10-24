@@ -1,9 +1,11 @@
 import * as React from "react";
 import type { Metadata } from "next";
+import { AccountBanners } from "@/components/account/account-banners";
 import { PortalHeader } from "@/components/portal/portal-header";
 import { Toaster } from "@/components/ui/toast";
 import { getViewer } from "@/server/auth/session";
 import { portalPageContext } from "@/server/page";
+import { accountBannerState } from "@/server/queries/accountSecurity";
 import { portalUnreadCount } from "@/server/queries/portal";
 
 export const metadata: Metadata = {
@@ -14,7 +16,7 @@ export const metadata: Metadata = {
  * Client portal chrome (docs/ROLES.md §7.7) — NOT under (app): no sidebar, no
  * search, no ⌘K. Staff are redirected to /dashboard and signed-out visitors to
  * /login by `portalPageContext()`; every /api/portal/** route re-checks with
- * `requirePortalContext()`.
+ * `requirePortalContext()`. Accounts: `<AccountBanners />` above the content (demo studio / confirm your email).
  */
 export default async function PortalLayout({ children }: { children: React.ReactNode }) {
   const { ctx, db } = await portalPageContext();
@@ -32,6 +34,7 @@ export default async function PortalLayout({ children }: { children: React.React
         user={{ name: viewer?.name ?? "", email: viewer?.email ?? "", avatarColour: viewer?.avatarColour ?? "#64748b" }}
         unreadCount={unread}
       />
+      {viewer ? <AccountBanners state={accountBannerState(viewer)} /> : null}
       <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 pt-6 pb-16 sm:px-6 sm:pt-10">
         {children}
       </main>

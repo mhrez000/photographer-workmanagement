@@ -240,17 +240,21 @@ test("a dead invite link shows a plain explanation, not a form", async ({ pageWi
   await expect(page.getByRole("heading", { level: 1 })).toContainText(INVITE_INVALID_MESSAGE);
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
   await expect(page.locator('a[href^="/login"]').first()).toBeVisible();
-  // The copy is neutral (a pasted-wrong link is the common case) and names no owner-side menu.
-  const card = page.getByRole("alert").filter({ hasText: /didn.t open/i });
+  // The copy is neutral (a pasted-wrong link is the common case) and names no owner-side menu. Signed out, joining
+  // before is the likeliest reason, so "Already joined? Sign in below." leads (UX-06); one heading, one sign-in (UX-14).
+  const card = page.locator("[data-invalid-link]").getByRole("alert");
+  await expect(card).toContainText(/^Already joined\? Sign in below\./);
   await expect(card).toContainText(/check you copied the whole link/i);
-  await expect(card).not.toContainText(/settings/i);
+  await expect(card).not.toContainText(/settings|didn.t open/i);
+  await expect(page.getByRole("main").locator('a[href^="/login"]')).toHaveCount(1);
   // So does a token nobody ever issued, a truncated one, and /invite with no token at all (never the app's 404).
   await page.goto("/invite/this-link-was-never-issued-by-anyone-at-all", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { level: 1 })).toContainText(INVITE_INVALID_MESSAGE);
   await page.goto(`/invite/${invite.token.slice(0, 12)}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { level: 1 })).toContainText(INVITE_INVALID_MESSAGE);
   await page.goto("/invite", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(/didn.t open/i);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(INVITE_INVALID_MESSAGE);
+  await expect(page.getByText("The link is missing its last part.")).toBeVisible();
   await expect(page.getByText(/browse jobs|error 404/i)).toHaveCount(0);
   await expect(page.locator('a[href^="/login"]').first()).toBeVisible();
 });
@@ -275,7 +279,7 @@ test("a live link with a trailing %20 opens the form; a pending invitee gets a k
 
   // The same person tries to sign in or reset instead: the generic message, plus the one hint that helps them.
   await page.goto("/login?from=invite", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("[data-demo-accounts]"), "no demo accounts for an invitee").toHaveCount(0);
+  await expect(page.locator("[data-demo-panel]"), "no demo panel for an invitee").toHaveCount(0);
   const login = publicForm(page);
   await login.getByRole("textbox", { name: /email/i }).fill(invite.email);
   await login.locator('input[type="password"]').fill("guessing-a-password-1");
@@ -289,8 +293,8 @@ test("a live link with a trailing %20 opens the form; a pending invitee gets a k
   await expect(page.locator('section[aria-labelledby="dev-only-link"]'), "a pending account gets no reset link").toHaveCount(0);
 });
 
-test("an invite link opened while SOMEONE ELSE is signed in shows who that is and no form; signing out from there comes back to the invite", async ({ pageWithState, api }) => {
-  // A throwaway studio's owner is signed in on `page` (signing out bumps their session_version, so never the shared demo owner).
+test("an invite link opened while SOMEONE ELSE is signed in shows who that is and no form; logging out from there comes back to the invite", async ({ pageWithState, api }) => {
+  // A throwaway studio's owner is signed in on `page` (logging out bumps their session_version, so never the shared demo owner).
   // Opening the demo studio's editor invite there must not quietly replace that session.
   const studio = await signUpStudio("Guard");
   const invite = await api.inviteByLink("editor", "Signed-in guard");
@@ -299,16 +303,19 @@ test("an invite link opened while SOMEONE ELSE is signed in shows who that is an
   await page.goto(`/invite/${invite.token}`, { waitUntil: "domcontentloaded" });
   const notice = page.locator("[data-signed-in-notice]");
   await expect(notice).toBeVisible();
-  await expect(notice).toContainText(/signed in as/i);
-  await expect(notice).toContainText(owner.name);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await expect(page.getByText("This invite is waiting, but this browser is already signed in.")).toBeVisible();
+  await expect(notice.getByRole("heading", { name: owner.name })).toBeVisible();
   await expect(notice).toContainText(invite.email);
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
   await expect(page.getByRole("link", { name: /stay signed in/i })).toHaveAttribute("href", /\/home$/);
   // Still that owner, and the link is still live: nothing happened.
   expect((await studio.api.me()).user.email).toBe(owner.email);
   expect((await api.inviteLookup(invite.token)).valid).toBe(true);
-  // Sign out from the notice: back on the same invite, now with the form (and the session really is gone).
-  await notice.getByRole("button", { name: /sign out to accept this invite/i }).click();
+  // UX-03: the notice says logging out reaches every device.
+  await expect(notice).toContainText("Logging out also logs you out on your other devices.");
+  // Log out from the notice: back on the same invite, now with the form (and the session really is gone).
+  await notice.getByRole("button", { name: /log out to accept this invite/i }).click();
   await expect(page).toHaveURL(new RegExp(`/invite/${invite.token}$`), { timeout: 30_000 });
   await expect(publicForm(page).locator('input[type="password"]')).toHaveCount(1);
   await expect(page.locator("[data-signed-in-notice]")).toHaveCount(0);

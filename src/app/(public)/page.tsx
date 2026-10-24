@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
+import { homeLabelFor } from "@/components/auth/auth-helpers";
 import { ClosingCta, Faq, Hero, HowItWorks, NotStorage, Screenshots, WhoItsFor } from "@/components/marketing";
+import { getDb } from "@/db/index";
+import { demoSignInAvailable } from "@/server/auth/demo";
+import { getViewer } from "@/server/auth/session";
 import { appOrigin } from "@/server/origin";
+import { homePathFor } from "@/server/page";
 
 const TITLE = "Proofline — the production desk for photography studios";
 const DESCRIPTION =
@@ -28,17 +33,25 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
 };
 
-/** The landing page. Anonymous visitors only; the (public) layout sends a signed-in person to their home. */
-export default function LandingPage() {
+/**
+ * The landing page — for everyone. A signed-in visitor sees it too (docs/ACCOUNTS.md §1); the (public) layout's header
+ * then offers one button back to their own home instead of "Sign in" / "Create your studio" — and so do the hero, the
+ * FAQ, the footer and the closing call to action, in words that fit them ("Go to your studio" / "Go to my jobs" /
+ * "See your work", UX-11 / UX-21). The demo is only offered where it is open (UX-07: `demoSignInAvailable`).
+ */
+export default async function LandingPage() {
+  const viewer = await getViewer();
+  const home = viewer ? { href: homePathFor({ role: viewer.role }), label: homeLabelFor(viewer.role) } : null;
+  const demoOpen = home ? false : await demoSignInAvailable(getDb());
   return (
     <>
-      <Hero />
+      <Hero home={home} demoOpen={demoOpen} />
       <HowItWorks />
       <WhoItsFor />
       <Screenshots />
       <NotStorage />
-      <Faq />
-      <ClosingCta />
+      <Faq home={home} demoOpen={demoOpen} />
+      <ClosingCta home={home} />
     </>
   );
 }

@@ -2,10 +2,14 @@ import * as React from "react";
 import { CheckCircle2 } from "lucide-react";
 import { BrandMark } from "@/components/shell";
 
+/**
+ * One line for each kind of person who lands here (UX-13): an owner signing in, an editor or a client opening their
+ * invite — the panel is true for all of them, never an owner-only pitch.
+ */
 const HIGHLIGHTS = [
-  "One list of jobs, five plain stages, one next button",
-  "Every job says who it is waiting on",
-  "Five plain numbers per editor, and a permanent record of every change",
+  "Studios: one list of jobs, five plain stages, one next button",
+  "Editors: the jobs given to you, with everything you need to start",
+  "Clients: follow your shoot and get the finished photos in one place",
 ];
 
 /** Public auth chrome: brand panel (desktop) + centred form column. */
@@ -19,7 +23,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         </div>
         <div className="max-w-md">
           <h2 className="text-2xl font-semibold leading-tight tracking-tight text-ink">
-            Shoot. Give it to an editor. Check it. Done.
+            Where a photography studio, its editors and its clients keep every job.
           </h2>
           <ul className="mt-6 flex flex-col gap-3">
             {HIGHLIGHTS.map((item) => (

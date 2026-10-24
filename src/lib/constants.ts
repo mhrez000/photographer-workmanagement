@@ -505,6 +505,8 @@ export const EVENT_ACTIONS = [
   "logged_in", "login_failed", "logged_out", "migrated",
   // front door (sign-up, invite links, password reset)
   "invited", "revoked",
+  // accounts (email confirmation, Google sign-in)
+  "confirmed", "connected", "disconnected",
   // job milestones (§5: the action matches the milestone name)
   "accepted", "declined", "submitted", "approved", "delivered", "completed", "cancelled", "reopened",
 ] as const;
@@ -558,6 +560,9 @@ export const EVENT_TYPES = [
   "saved_view.created", "saved_view.updated", "saved_view.deleted", "dashboard.updated",
   // front door: sign-up, invite links, password reset (src/server/services/{organisations,invites,passwordReset}.ts)
   "org.created", "user.invite_sent", "user.invite_revoked", "user.accepted_invite", "auth.password_reset_requested",
+  // accounts: email confirmation, email change, sessions, Google sign-in (docs/ACCOUNTS-PLAN.md §5)
+  "user.email_confirmation_sent", "user.email_confirmed", "user.email_change_requested", "user.email_change_cancelled",
+  "user.email_changed", "auth.other_sessions_revoked", "user.google_connected", "user.google_disconnected",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -885,13 +890,33 @@ export const DEFAULT_USUAL_DAYS_BY_JOB_TYPE: Readonly<Record<string, number>> = 
 /*  Front door: sign-up, invite links, password reset                  */
 /* ------------------------------------------------------------------ */
 
-/** `auth_tokens.kind` (one-time links; the plain token is never stored). */
-export const AUTH_TOKEN_KINDS = ["invite", "password_reset"] as const;
+/**
+ * `auth_tokens.kind` (one-time links; the plain token is never stored). CHECK `auth_tokens_kind_ck`
+ * (drizzle/0007_accounts_data.sql). Accounts (docs/ACCOUNTS.md): `email_verify` = "Confirm your email",
+ * `email_change` = "Confirm your new email" (the row's `target_email` is the new address).
+ */
+export const AUTH_TOKEN_KINDS = ["invite", "password_reset", "email_verify", "email_change"] as const;
 export type AuthTokenKind = (typeof AUTH_TOKEN_KINDS)[number];
 /** Invite links stay valid for 7 days. */
 export const INVITE_TTL_HOURS = 168;
 /** Password-reset links stay valid for an hour. */
 export const RESET_TTL_MINUTES = 60;
+/** "Confirm your email" links stay valid for a day. */
+export const EMAIL_VERIFY_TTL_HOURS = 24;
+/** "Confirm your new email" links stay valid for a day. */
+export const EMAIL_CHANGE_TTL_HOURS = 24;
+/** Lifetime of each kind of one-time link, in minutes (`tokenExpiry`). */
+export const AUTH_TOKEN_TTL_MINUTES: Readonly<Record<AuthTokenKind, number>> = {
+  invite: INVITE_TTL_HOURS * 60,
+  password_reset: RESET_TTL_MINUTES,
+  email_verify: EMAIL_VERIFY_TTL_HOURS * 60,
+  email_change: EMAIL_CHANGE_TTL_HOURS * 60,
+};
+/** Kinds whose row stores the address the link was sent to (`auth_tokens.target_email`; CHECK in 0007). */
+export const TARGET_EMAIL_TOKEN_KINDS = ["email_verify", "email_change"] as const satisfies readonly AuthTokenKind[];
+export function tokenKindNeedsTargetEmail(kind: AuthTokenKind): boolean {
+  return (TARGET_EMAIL_TOKEN_KINDS as readonly AuthTokenKind[]).includes(kind);
+}
 /** How a new person gets in: a link they open to set their own password (default), or a temp password read out to them. */
 export const INVITE_METHODS = ["link", "temp_password"] as const;
 export type InviteMethod = (typeof INVITE_METHODS)[number];
@@ -901,6 +926,76 @@ export const SLUG_MAX_LENGTH = 48;
 export const SLUG_FALLBACK = "studio";
 export const STUDIO_NAME_MIN_LENGTH = 2;
 export const STUDIO_NAME_MAX_LENGTH = 80;
+
+/* ------------------------------------------------------------------ */
+/*  Accounts (docs/ACCOUNTS.md, contract docs/ACCOUNTS-PLAN.md)        */
+/* ------------------------------------------------------------------ */
+
+/** Hidden sign-up field a person never fills in; a bot that fills it gets a generic 400. */
+export const SIGNUP_HONEYPOT_FIELD = "website";
+
+/** How an email address got confirmed (`user.email_confirmed` metadata.via). */
+export const EMAIL_CONFIRMATION_VIA = ["link", "invite", "reset", "google", "email_change"] as const;
+export type EmailConfirmationVia = (typeof EMAIL_CONFIRMATION_VIA)[number];
+
+/** How a session started (`auth.logged_in` metadata.method). */
+export const SIGN_IN_METHODS = ["password", "invite", "reset", "signup", "demo", "google"] as const;
+export type SignInMethod = (typeof SIGN_IN_METHODS)[number];
+
+/** Where account pages live: the staff app (Settings → My account) or the client portal. */
+export const ACCOUNT_SURFACES = ["staff", "portal"] as const;
+export type AccountSurface = (typeof ACCOUNT_SURFACES)[number];
+
+/** `GET /api/auth/google/start?intent=` — what the person was doing when they pressed "Continue with Google". */
+export const GOOGLE_INTENTS = ["signin", "signup", "invite", "connect"] as const;
+export type GoogleIntent = (typeof GOOGLE_INTENTS)[number];
+/**
+ * `?google=<result>` a Google round trip lands on (the `ContinueWithGoogle` slot / the Google card render the
+ * plain-words message). `refused` is deliberately vague: it never says why (no account oracle). `use_password`: the
+ * Google address already has a Proofline account WITH a password — Google never takes that account over (SEC-01: it
+ * may have been set up by somebody else); the person signs in with the password, then connects Google on My account.
+ * Only the verified owner of that Google address ever sees it, so it reveals nothing to a stranger.
+ */
+export const GOOGLE_RESULTS = [
+  "cancelled",
+  "expired",
+  "failed",
+  "refused",
+  "use_password",
+  "unverified_email",
+  "linked_elsewhere",
+  "no_account",
+  "disabled",
+  "connected",
+  "disconnected",
+] as const;
+export type GoogleResult = (typeof GOOGLE_RESULTS)[number];
+/** Signed, httpOnly cookie carrying state / nonce / PKCE verifier between /start and /callback. */
+export const GOOGLE_OAUTH_COOKIE = "pl_google_oauth";
+export const GOOGLE_OAUTH_TTL_MINUTES = 10;
+/** Signed, httpOnly cookie carrying the verified Google identity to the /signup/google finish page. */
+export const GOOGLE_SIGNUP_COOKIE = "pl_google_signup";
+export const GOOGLE_SIGNUP_TTL_MINUTES = 15;
+
+/**
+ * "This browser has signed in to this address before" (src/server/auth/known-device.ts): a signed, httpOnly cookie
+ * set on every real sign-in. Its holder gets its own failed-sign-in count instead of the per-email backstop, so
+ * strangers guessing at an address can never lock its owner out of a browser they already use (SEC-06).
+ */
+export const KNOWN_DEVICE_COOKIE = "pl_known_device";
+/** How long (days) a browser stays "known" without signing in again. */
+export const KNOWN_DEVICE_TTL_DAYS = 180;
+
+/** The persona buttons of the "Look around the demo" panel (POST /api/auth/demo `{ persona }`). */
+export const DEMO_PERSONAS = ["owner", "photographer", "editor", "client"] as const;
+export type DemoPersona = (typeof DEMO_PERSONAS)[number];
+/** Slugs of the seeded demo studios (the small demo Northlight + the isolation org; the full fixture uses the same two). */
+export const DEMO_ORG_SLUGS = ["northlight", "other-studio"] as const;
+/**
+ * `DEMO_SIGN_IN=off` closes the demo studio: the panel is hidden, POST /api/auth/demo answers 404, and its people
+ * cannot sign in with a password or Google either (their seeded password is public — DEMO-02).
+ */
+export const DEMO_SIGN_IN_ENV = "DEMO_SIGN_IN";
 
 /* ------------------------------------------------------------------ */
 /*  Permissions: action → personas that can EVER perform it            */
@@ -1087,16 +1182,24 @@ export const PRIMARY_OWNER_PROTECTED_ACTIONS = [
 /* ------------------------------------------------------------------ */
 
 /**
- * The four accounts the login page offers (SIMPLIFICATION-PLAN §8 demo, seed profile "small"). The same
- * four exist in the "full" fixture seed, so the box is right for either profile.
+ * The four demo personas (SIMPLIFICATION-PLAN §8 demo, seed profile "small"). The same four exist in the "full"
+ * fixture seed. Accounts (docs/ACCOUNTS.md): the sign-in page NEVER shows these emails or the password any more;
+ * the "Look around the demo" panel signs in by persona (POST /api/auth/demo), and only into an `is_demo` studio.
  */
-export const DEMO_ACCOUNTS: readonly { email: string; shownAs: string; note: string }[] = [
-  { email: "owner@studio.test", shownAs: "Owner", note: "runs the studio, shoots, checks edits" },
-  { email: "photographer01@studio.test", shownAs: "Photographer", note: "only their own shoots" },
-  { email: "editor01@studio.test", shownAs: "Editor", note: "edits the jobs given to them" },
-  { email: "client@studio.test", shownAs: "Client", note: "Harbourline Realty portal" },
+export const DEMO_ACCOUNTS: readonly { persona: DemoPersona; email: string; shownAs: string; note: string }[] = [
+  { persona: "owner", email: "owner@studio.test", shownAs: "Owner", note: "runs the studio, shoots, checks edits" },
+  { persona: "photographer", email: "photographer01@studio.test", shownAs: "Photographer", note: "only their own shoots" },
+  { persona: "editor", email: "editor01@studio.test", shownAs: "Editor", note: "edits the jobs given to them" },
+  { persona: "client", email: "client@studio.test", shownAs: "Client", note: "Harbourline Realty portal" },
 ];
+/** The seeded demo password (e2e and local scripts sign in with it). Never displayed in the UI. */
 export const DEMO_PASSWORD = "Password123!";
+
+/** Is this one of the four demo persona addresses? Pure (client components use it to hide what the demo refuses). */
+export function isDemoAccountEmail(email: string | null | undefined): boolean {
+  const normalised = email?.trim().toLowerCase();
+  return Boolean(normalised) && DEMO_ACCOUNTS.some((a) => a.email === normalised);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Keyboard shortcuts (spec §26)                                      */
@@ -1132,12 +1235,62 @@ export const DEFAULT_TIMEZONE = "Australia/Sydney";
 export const DEFAULT_JOB_NUMBER_PREFIX = "PJ";
 export const JOB_NUMBER_PAD = 4;
 export const SESSION_COOKIE_NAME = "pwm_session";
-export const SESSION_TTL_DAYS = 7;
-export const LOGIN_RATE_LIMIT = { attempts: 5, windowMinutes: 15 } as const;
-/** Public sign-up: 5 studios per hour per IP (per email when no client IP is known, see src/server/auth/rate-limit.ts). */
-export const SIGNUP_RATE_LIMIT = { attempts: 5, windowMinutes: 60 } as const;
+/** Sliding sessions (docs/ACCOUNTS.md): a session lasts 30 days from the last renewal… */
+export const SESSION_TTL_DAYS = 30;
+/** …and the proxy re-issues the cookie once it is older than a day (src/server/auth/session-token.ts `renewSessionToken`). */
+export const SESSION_RENEW_AFTER_HOURS = 24;
+
+export interface RateLimitPolicy {
+  /** Counted attempts allowed inside the window. */
+  attempts: number;
+  windowMinutes: number;
+}
+/**
+ * Every Postgres-backed limiter (src/server/auth/db-rate-limit.ts, table auth_rate_limits). docs/ACCOUNTS-PLAN.md §2
+ * says what each one is keyed on and what it counts.
+ */
+export const RATE_LIMITS = {
+  /** Failed sign-ins per email + IP. */
+  login: { attempts: 5, windowMinutes: 15 },
+  /**
+   * Failed sign-ins per email, whatever the IP (the backstop against rotating addresses). Never applied to a browser
+   * that has signed in to that address before (KNOWN_DEVICE_COOKIE), which counts its own failures instead (SEC-06).
+   */
+  loginEmail: { attempts: 20, windowMinutes: 15 },
+  /** Failed sign-ins from one browser that has signed in to that address before (its own key, so nobody else can fill it). */
+  loginDevice: { attempts: 5, windowMinutes: 15 },
+  /** Failed sign-ins per client IP, any address (only counted when the IP is known: TRUSTED_PROXY_COUNT) — SEC-09. */
+  loginIp: { attempts: 100, windowMinutes: 15 },
+  /** Studio sign-ups per IP (per email when no client IP is known) — email AND Google sign-up. */
+  signup: { attempts: 5, windowMinutes: 60 },
+  /** Forgot-password requests per email + IP. */
+  passwordReset: { attempts: 5, windowMinutes: 15 },
+  /** "Send again" for the confirm-your-email link, per user. */
+  verifyResend: { attempts: 5, windowMinutes: 60 },
+  /** Email-change requests per user. */
+  emailChange: { attempts: 5, windowMinutes: 60 },
+  /** Wrong current password (change password / change email), per user. */
+  passwordCheck: { attempts: 10, windowMinutes: 15 },
+  /** Google sign-in callbacks per IP. */
+  googleCallback: { attempts: 30, windowMinutes: 15 },
+  /** Demo persona sign-ins per IP. */
+  demoSignIn: { attempts: 30, windowMinutes: 10 },
+  /**
+   * Reset-password submits with a link that no longer works, per client IP (only counted when the IP is known; checked
+   * before the new password is hashed, so a stranger can't keep the server hashing).
+   */
+  resetLink: { attempts: 10, windowMinutes: 15 },
+} as const satisfies Record<string, RateLimitPolicy>;
+export type RateLimiterName = keyof typeof RATE_LIMITS;
+export const RATE_LIMITER_NAMES = Object.keys(RATE_LIMITS) as RateLimiterName[];
+
+export const LOGIN_RATE_LIMIT = RATE_LIMITS.login;
+/** IP-independent backstop: failures per email, whatever address they come from. */
+export const LOGIN_EMAIL_RATE_LIMIT = RATE_LIMITS.loginEmail;
+/** Public sign-up: 5 studios per hour per IP (per email when no client IP is known). */
+export const SIGNUP_RATE_LIMIT = RATE_LIMITS.signup;
 /** Forgot-password requests per email + IP. */
-export const PASSWORD_RESET_RATE_LIMIT = { attempts: 5, windowMinutes: 15 } as const;
+export const PASSWORD_RESET_RATE_LIMIT = RATE_LIMITS.passwordReset;
 export const SWEEP_MIN_INTERVAL_MINUTES = 5;
 export const BCRYPT_COST = 12;
 export const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#8b5cf6", "#64748b", "#d97706", "#0891b2"] as const;

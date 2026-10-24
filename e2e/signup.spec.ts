@@ -1,4 +1,4 @@
-import { EMAIL_TAKEN_MESSAGE, PASSWORD_TOO_SHORT_MESSAGE, ROLE_EMAILS, fieldErrorsOf, newApi, signUpStudio, uniqPassword, type UserProfile } from "./api";
+import { EMAIL_TAKEN_MESSAGE, PASSWORD_TOO_SHORT_MESSAGE, fieldErrorsOf, newApi, signUpStudio, uniqPassword, type UserProfile } from "./api";
 import { UI_TEST_TIMEOUT, emailBox, expect, expectPlainWords, fillPasswords, publicForm, sectionNamed, sessionCookie, submitButton, test } from "./fixtures";
 
 /**
@@ -40,8 +40,12 @@ test("API contract: one studio, one owner, signed in; a taken email and a weak p
     expect(feed.items.map((e) => e.eventType)).toEqual(expect.arrayContaining(["org.created", "user.created"]));
     expect(JSON.stringify(feed)).not.toContain(studio.password);
 
-    // A taken email: the one generic message, whichever studio or role owns it.
-    for (const taken of [studio.email, ROLE_EMAILS.editor, ROLE_EMAILS.client, studio.email.toUpperCase()]) {
+    // A taken email: the one generic message, whichever studio or role owns it. Fresh people only: sign-up
+    // attempts are counted per address (SEC-04), so probing the seeded logins on every run would use up their budget.
+    const editor = await studio.api.inviteUser("editor", "Signup taken");
+    const { clientId } = await studio.api.createClient("Signup taken", { portal: true });
+    const client = await studio.api.inviteUser("client", { label: "Signup taken", clientId });
+    for (const taken of [studio.email, editor.email, client.email, studio.email.toUpperCase()]) {
       const dup = await anon.signup({ ownerName: "Someone Else", email: taken, password: uniqPassword(), studioName: `Another Studio ${stamp()}` });
       expect(dup.status, taken).toBe(400);
       expect(dup.error?.code, taken).toBe("validation");
@@ -94,13 +98,24 @@ test("Create your studio: the form lands on /home with the Get set up checklist,
   await expect(page.getByText(/proofline got simpler/i)).toHaveCount(0);
   await expect(checklist.getByRole("button", { name: /dismiss/i })).toHaveCount(1);
   await expectPlainWords(page, "/home");
-  // The sign-in page on THIS browser (a real studio was created here) no longer offers the demo accounts.
+  // Signed in, the sign-in and sign-up pages say who you are instead of showing a form (docs/ACCOUNTS.md §1).
+  for (const path of ["/login", "/signup"]) {
+    await page.goto(path, { waitUntil: "domcontentloaded" });
+    const notice = page.locator("[data-signed-in-notice]");
+    await expect(notice.getByRole("heading", { name: ownerName }), path).toBeVisible();
+    await expect(notice.getByRole("link", { name: /go to your studio/i }), path).toHaveAttribute("href", "/home");
+    await expect(page.locator('input[type="password"]'), path).toHaveCount(0);
+  }
+  // The sign-in page on THIS browser (a real studio was created here) never offers the demo panel...
   await page.context().clearCookies({ name: "pwm_session" });
   await page.goto("/login", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("[data-demo-accounts]")).toHaveCount(0);
-  // ...unless they ask for the demo on purpose.
+  await expect(page.locator('input[type="password"]')).toHaveCount(1);
+  await expect(page.locator("[data-demo-panel]")).toHaveCount(0);
+  // ...unless they ask for the demo on purpose — where this deployment has a demo studio (the e2e one is not).
   await page.goto("/login?demo=1", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("[data-demo-accounts]")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  if ((await page.locator("[data-demo-panel]").count()) === 0) await expect(page.getByText(/demo studio isn.t open right now/i)).toBeVisible();
+  else await expect(page.locator("[data-demo-panel]")).toBeVisible();
   // The Help page has no "old bookmarks" paragraph for a studio that never had them.
   await page.goto("/login", { waitUntil: "domcontentloaded" });
   await emailBox(publicForm(page)).fill(email);
@@ -120,14 +135,18 @@ test("Create your studio: the form lands on /home with the Get set up checklist,
 });
 
 test("API contract: a taken email and a short password come back in the ONE 400", async () => {
+  // A fresh taken address each run: the "is it taken?" answer counts toward that address's sign-up limit (SEC-04),
+  // so a fixed seeded address would run out after a few runs within the hour.
+  const studio = await signUpStudio("Both");
   const anon = await newApi();
   try {
-    const both = await anon.signup({ ownerName: "Someone", email: ROLE_EMAILS.editor, password: "short", studioName: `Both ${stamp()}` });
+    const both = await anon.signup({ ownerName: "Someone", email: studio.email, password: "short", studioName: `Both ${stamp()}` });
     expect(both.status).toBe(400);
     expect(fieldErrorsOf(both).email?.[0]).toBe(EMAIL_TAKEN_MESSAGE);
     expect(fieldErrorsOf(both).password?.[0]).toBe(PASSWORD_TOO_SHORT_MESSAGE);
   } finally {
     await anon.dispose();
+    await studio.api.dispose();
   }
 });
 

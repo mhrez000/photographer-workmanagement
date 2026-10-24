@@ -67,6 +67,11 @@ interface RequestOptions {
   body?: unknown;
   signal?: AbortSignal;
   headers?: HeadersInit;
+  /**
+   * A 401 normally means "your session ended" and sends the page to /login?expired=1. Public front-door calls whose 401
+   * means something else (the demo panel: that person can't be opened right now) pass false and handle it themselves.
+   */
+  redirectOn401?: boolean;
 }
 
 async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
@@ -102,7 +107,7 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
 
   if (!res.ok) {
     const error = (payload as { error?: { code?: ApiErrorCode; message?: string; details?: unknown; current?: unknown } } | null)?.error;
-    if (res.status === 401 && typeof window !== "undefined") {
+    if (res.status === 401 && typeof window !== "undefined" && opts.redirectOn401 !== false) {
       // Session expired or revoked: bounce to login, preserving where we were.
       const next = encodeURIComponent(window.location.pathname + window.location.search);
       // A full page load (not router.push) is deliberate: it drops all client state of the dead session.

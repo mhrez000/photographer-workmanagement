@@ -16,6 +16,7 @@ import { CATEGORY_GROUPS, PHOTOGRAPHER_PRESET_META, photographerPresetOf } from 
 import { formatDate, formatDateTime, formatRelative } from "@/lib/dates";
 import { STAGE_META, stageOf } from "@/lib/stages";
 import type { ActivityFeedItem, JobRow, ReducedUser, UserProfile } from "@/lib/types";
+import { DEMO_BLOCKED_MESSAGES, isDemoPersonaEmail } from "@/server/auth/demo";
 import type { UserPermissionRef } from "@/server/auth/permissions";
 import { listActivity } from "@/server/queries/activity";
 import { listClients } from "@/server/queries/clients";
@@ -94,11 +95,20 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
     isAdmin: profile.isAdmin,
     isPrimaryOwner,
   };
-  const lockedReason =
-    isPrimaryOwner && !isSelf ? `Only ${profile.name} can change their own account: they are the owner.` : isSelf ? "This is you. Some changes need another owner." : null;
+  // Accounts (docs/ACCOUNTS.md §7): in the demo studio the four persona accounts are fixed, nobody's email or password
+  // changes and invites are off — the services refuse it (403), so the controls are not offered at all.
+  const demo = ctx.isDemo === true;
+  const demoPersona = demo && isDemoPersonaEmail(profile.email);
+  const lockedReason = demoPersona
+    ? DEMO_BLOCKED_MESSAGES.demo_accounts
+    : isPrimaryOwner && !isSelf
+      ? `Only ${profile.name} can change their own account: they are the owner.`
+      : isSelf
+        ? "This is you. Some changes need another owner."
+        : null;
   const profileAccess: UserAdminAccess = {
     edit: allowed(ctx, "user.edit", target),
-    changeEmail: allowed(ctx, "user.change_email", target),
+    changeEmail: !demo && allowed(ctx, "user.change_email", target),
     changeRole: false,
     grantAdmin: false,
     revokeAdmin: false,
@@ -107,21 +117,21 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
     lockedReason,
   };
   const access: PersonAccess = {
-    grantAdmin: allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: true }),
-    revokeAdmin: allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: false }),
-    setPermissions: allowed(ctx, "user.set_permissions", target),
+    grantAdmin: !demoPersona && allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: true }),
+    revokeAdmin: !demoPersona && allowed(ctx, "user.set_admin", { ...target, nextIsAdmin: false }),
+    setPermissions: !demoPersona && allowed(ctx, "user.set_permissions", target),
     setCapacity: allowed(ctx, "user.set_capacity", target),
     lockedReason,
   };
   // Front door: not joined yet (accepted_at null) → the Invite card (Send a new link / Revoke) replaces "Active".
   const invitePending = profile.acceptedAt === null && profile.isActive && !profile.anonymisedAt;
   const liveInvite = invitePending ? await load(() => pendingInviteFor(db, profile.id, ctx.now())) : null;
-  const canInvite = invitePending && allowed(ctx, "user.invite", { ...target, nextRole: profile.role });
+  const canInvite = !demo && invitePending && allowed(ctx, "user.invite", { ...target, nextRole: profile.role });
   const lifecycle: LifecycleAccess = {
-    resetPassword: !isSelf && allowed(ctx, "user.reset_password", target),
-    deactivate: allowed(ctx, "user.deactivate", target),
+    resetPassword: !demo && !isSelf && allowed(ctx, "user.reset_password", target),
+    deactivate: !demoPersona && allowed(ctx, "user.deactivate", target),
     reactivate: allowed(ctx, "user.reactivate", target),
-    anonymise: allowed(ctx, "user.anonymise", target),
+    anonymise: !demoPersona && allowed(ctx, "user.anonymise", target),
     lockedReason,
   };
 
@@ -133,7 +143,7 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
   // Transfer ownership: only on the primary owner's own page.
   const isProfileRow = (u: UserProfile | ReducedUser): u is UserProfile => "email" in u;
   const transferCandidates =
-    isSelf && isPrimaryOwner && allowed(ctx, "org.transfer_primary_owner")
+    !demo && isSelf && isPrimaryOwner && allowed(ctx, "org.transfer_primary_owner")
       ? (await load(() => listUsers(db, ctx, { role: "photographer", active: "1" })))
           .filter(isProfileRow)
           .filter((u) => u.isAdmin && u.id !== profile.id)
@@ -198,7 +208,17 @@ export default async function PersonPage({ params }: PageProps<"/settings/people
         }
       />
 
-      {invitePending ? <InviteStatusCard userId={profile.id} name={profile.name} email={profile.email} pending={liveInvite} canInvite={canInvite} timeZone={tz} /> : null}
+      {invitePending ? (
+        <InviteStatusCard
+          userId={profile.id}
+          name={profile.name}
+          email={profile.email}
+          pending={liveInvite}
+          canInvite={canInvite}
+          blockedReason={demo ? `${DEMO_BLOCKED_MESSAGES.invite}.` : null}
+          timeZone={tz}
+        />
+      ) : null}
 
       {profile.role === "client" ? (
         <SectionCard title="Client portal" description="Client users only see the work shared with their client." actions={<Store aria-hidden="true" className="size-4 text-ink-subtle" />}>

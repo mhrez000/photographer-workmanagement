@@ -67,8 +67,23 @@ function originOf(value: string | null | undefined): string | null {
  */
 export function trustedProxyCount(env: Readonly<Record<string, string | undefined>> = process.env): number {
   const raw = env.TRUSTED_PROXY_COUNT?.trim();
-  if (!raw || !/^\d+$/.test(raw)) return 0;
+  if (!raw || !/^\d+$/.test(raw)) {
+    warnUnknownClientIps(env);
+    return 0;
+  }
   return Math.min(Number(raw), 32);
+}
+
+let warnedUnknownClientIps = false;
+
+/**
+ * Behind Vercel without TRUSTED_PROXY_COUNT nothing knows a visitor's network: per-network limits are then skipped or
+ * counted per email (docs/ACCOUNTS.md §6). Say so once per server process in production, so it is noticed.
+ */
+function warnUnknownClientIps(env: Readonly<Record<string, string | undefined>>): void {
+  if (warnedUnknownClientIps || env.NODE_ENV !== "production" || !env.VERCEL) return;
+  warnedUnknownClientIps = true;
+  console.warn("[http] TRUSTED_PROXY_COUNT is not set on Vercel: client IPs are unknown, so per-network rate limits are skipped. Set TRUSTED_PROXY_COUNT=1.");
 }
 
 /**

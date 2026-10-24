@@ -6,6 +6,7 @@ import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { PASSWORD_MIN_LENGTH } from "@/lib/validation/auth";
 import { cn } from "@/lib/utils";
+import { CapsLockHint, useCapsLock } from "./caps-lock";
 
 export interface PasswordFieldProps {
   label?: React.ReactNode;
@@ -38,7 +39,10 @@ export function passwordStrength(value: string): { level: 0 | 1 | 2 | 3; label: 
 
 const BAR_TONES = ["bg-border", "bg-danger", "bg-attention", "bg-success"] as const;
 
-/** Password input with a show / hide toggle and (optionally) the strength hint. */
+/**
+ * Password input with a show / hide toggle, a quiet "Caps Lock is on" line while Caps Lock is on (docs/ACCOUNTS.md:
+ * the most common reason a correct password "doesn't work"), and (optionally) the strength hint.
+ */
 export function PasswordField({
   label = "Password",
   value,
@@ -55,6 +59,8 @@ export function PasswordField({
   const [shown, setShown] = React.useState(false);
   const meter = strength ? passwordStrength(value) : null;
   const meterId = React.useId();
+  const capsId = React.useId();
+  const caps = useCapsLock();
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -63,7 +69,7 @@ export function PasswordField({
           <div className="relative w-full">
             <Input
               {...field}
-              aria-describedby={[field["aria-describedby"], meter ? meterId : null].filter(Boolean).join(" ") || undefined}
+              aria-describedby={[field["aria-describedby"], meter ? meterId : null, caps.capsLock ? capsId : null].filter(Boolean).join(" ") || undefined}
               name={name}
               type={shown ? "text" : "password"}
               autoComplete={autoComplete}
@@ -72,6 +78,9 @@ export function PasswordField({
               leading={<KeyRound aria-hidden="true" />}
               value={value}
               onChange={(e) => onChange(e.target.value)}
+              onKeyDown={caps.onKeyEvent}
+              onKeyUp={caps.onKeyEvent}
+              onBlur={caps.reset}
               invalid={Boolean(error)}
               disabled={disabled}
               className="pr-11"
@@ -89,6 +98,7 @@ export function PasswordField({
           </div>
         )}
       </FormField>
+      <CapsLockHint show={caps.capsLock} id={capsId} />
       {meter && !error ? (
         <div id={meterId} className="flex flex-col gap-1.5" aria-live="polite">
           <div className="flex gap-1" aria-hidden="true">

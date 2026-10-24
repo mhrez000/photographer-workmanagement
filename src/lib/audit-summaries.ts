@@ -1,5 +1,5 @@
 /**
- * Frozen, actor-less audit summaries (ARCHITECTURE.md §5).
+ * Frozen, actor-less audit summaries (ARCHITECTURE.md §5). 
  *
  * `summarise()` is called exactly once per event, by `recordEvent()`, and the
  * result is stored in `activity_events.summary`. It never contains the actor:
@@ -402,6 +402,7 @@ export function summarise(
     case "user.reactivated":
       return `reactivated ${targetName(prev, next, meta)}`;
     case "user.password_changed":
+      if (str(meta, "via") === "set") return "added a password to their account";
       return bool(meta, "self") ? "changed their password" : `reset the password for ${targetName(prev, next, meta)}`;
     case "user.capacity_changed": {
       const from = num(prev, "capacityHoursPerWeek");
@@ -431,7 +432,7 @@ export function summarise(
       return email ? `failed sign-in attempt for ${email}` : "failed sign-in attempt";
     }
     case "auth.logged_out":
-      return "signed out";
+      return "logged out";
 
     /* ---------------- teams ---------------- */
     case "team.created":
@@ -565,6 +566,41 @@ export function summarise(
       const email = str(next, "email");
       return email ? `requested a password reset link for ${email}` : "requested a password reset link";
     }
+
+    /* ---------------- accounts: email confirmation / change, sessions, Google ---------------- */
+    case "user.email_confirmation_sent": {
+      const email = str(next, "email");
+      const to = email ? ` to ${email}` : "";
+      return str(meta, "reason") === "resend" ? `asked for a new email confirmation link${to}` : `was sent an email confirmation link${to}`;
+    }
+    case "user.email_confirmed": {
+      const email = str(next, "email");
+      const via = str(meta, "via");
+      const how = via === "google" ? " with Google" : via === "invite" ? " by accepting their invite" : via === "reset" ? " with a password reset link" : "";
+      return `confirmed their email${email ? ` ${email}` : ""}${how}`;
+    }
+    case "user.email_change_requested": {
+      const email = str(next, "pendingEmail");
+      return email ? `asked to change their email to ${email}` : "asked to change their email";
+    }
+    case "user.email_change_cancelled": {
+      const email = str(next, "pendingEmail") ?? str(prev, "pendingEmail");
+      return email ? `cancelled the change of their email to ${email}` : "cancelled an email change";
+    }
+    case "user.email_changed": {
+      const from = str(prev, "email");
+      const to = str(next, "email");
+      if (from && to) return `changed their email from ${from} to ${to}`;
+      return to ? `changed their email to ${to}` : "changed their email";
+    }
+    case "auth.other_sessions_revoked":
+      return "logged out of every other device";
+    case "user.google_connected": {
+      const email = str(next, "googleEmail");
+      return email ? `connected Google sign-in (${email})` : "connected Google sign-in";
+    }
+    case "user.google_disconnected":
+      return "disconnected Google sign-in";
 
     default:
       return assertNever(eventType);

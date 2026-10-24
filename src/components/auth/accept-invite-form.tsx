@@ -29,6 +29,11 @@ export interface AcceptInviteFormProps {
   initialName: string;
   /** The page heading (server-rendered). Swapped for "This invite link is no longer valid" when the link dies mid-visit. */
   header: React.ReactNode;
+  /**
+   * Another way to join, rendered under the password card (the invite page passes `<ContinueWithGoogle intent="invite" />`,
+   * a server component, as an element). Hidden with the form when the link dies mid-visit.
+   */
+  alternative?: React.ReactNode;
 }
 
 /**
@@ -37,7 +42,7 @@ export interface AcceptInviteFormProps {
  * error rather than a silent keep. Join is disabled until the password is long enough (no round trip for a
  * known failure). A link that died in the meantime swaps the whole screen for the friendly dead-link card.
  */
-export function AcceptInviteForm({ token, studioName, email, initialName, header }: AcceptInviteFormProps) {
+export function AcceptInviteForm({ token, studioName, email, initialName, header, alternative }: AcceptInviteFormProps) {
   const router = useRouter();
   const [name, setName] = React.useState(initialName);
   const [password, setPassword] = React.useState("");
@@ -51,7 +56,7 @@ export function AcceptInviteForm({ token, studioName, email, initialName, header
     return (
       <div className="flex flex-col gap-8">
         <AuthPageHeader title="This invite link is no longer valid" />
-        <InvalidLinkCard title="We couldn’t open this invite" body={invalidInviteBody(studioName)} actionHref="/login?from=invite" actionLabel="Go to sign in" />
+        <InvalidLinkCard body={invalidInviteBody(studioName)} actionHref="/login?from=invite" actionLabel="Sign in" />
       </div>
     );
   }
@@ -135,6 +140,8 @@ export function AcceptInviteForm({ token, studioName, email, initialName, header
             </form>
           </CardContent>
         </Card>
+
+        {alternative}
 
         <p className="text-center text-sm text-ink-muted">
           Already joined?{" "}

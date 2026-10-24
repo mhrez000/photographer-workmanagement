@@ -1,20 +1,23 @@
 /**
- * One-time link tokens (invite acceptance, password reset) over the `auth_tokens` ledger.
+ * One-time link tokens (invite acceptance, password reset, email confirmation, email change) over the
+ * `auth_tokens` ledger.
  *
  * - the plain token (32 random bytes, base64url) is returned ONCE to the caller and never stored, logged or
  *   audited; only `sha256(token)` (hex) is kept, so a database read cannot be replayed as a link
  * - a token is LIVE while `used_at IS NULL AND expires_at > now`; `used_at` is fill-once (trigger `at_fill_once`)
  *   and means "consumed": accepted / reset, or superseded by a newer token / revoked by an admin
  * - one live token per (user, kind): issuing a new one consumes the older ones in the same transaction
+ * - `email_verify` / `email_change` rows carry `target_email` (the address the link went to; CHECK
+ *   auth_tokens_target_email_ck): a confirm link only works for that address
  *
  * Pure DB helpers: permission checks and audit events belong to the services that call them
- * (src/server/services/{invites,passwordReset,users}.ts).
+ * (src/server/services/{invites,passwordReset,users,emailVerification,account}.ts).
  */
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import { first, type DbLike, type Tx } from "@/db/index";
 import { authTokens } from "@/db/schema";
-import { INVITE_TTL_HOURS, RESET_TTL_MINUTES, type AuthTokenKind } from "@/lib/constants";
+import { AUTH_TOKEN_TTL_MINUTES, tokenKindNeedsTargetEmail, type AuthTokenKind } from "@/lib/constants";
 import type { AuthToken } from "@/lib/types";
 
 /** URL-safe random token (43 chars). */
@@ -27,10 +30,9 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-/** ISO expiry for a kind, from `now`. */
+/** ISO expiry for a kind, from `now` (AUTH_TOKEN_TTL_MINUTES: invite 7 days, reset 60 min, verify / change 24 h). */
 export function tokenExpiry(kind: AuthTokenKind, nowIso: string): string {
-  const ms = kind === "invite" ? INVITE_TTL_HOURS * 60 * 60_000 : RESET_TTL_MINUTES * 60_000;
-  return new Date(Date.parse(nowIso) + ms).toISOString();
+  return new Date(Date.parse(nowIso) + AUTH_TOKEN_TTL_MINUTES[kind] * 60_000).toISOString();
 }
 
 export interface IssuedToken {
@@ -44,12 +46,17 @@ export interface IssuedToken {
 
 /**
  * Consumes every live token of `kind` for the user (fill-once `used_at = now`) and inserts a fresh one.
- * Returns the plain token once.
+ * Returns the plain token once. `targetEmail` is REQUIRED for `email_verify` / `email_change` (the address the
+ * link is sent to; for an email change, the NEW address) and must be omitted for the other kinds.
  */
 export async function issueToken(
   tx: Tx,
-  input: { organisationId: string; userId: string; kind: AuthTokenKind; createdByUserId: string | null; now: string },
+  input: { organisationId: string; userId: string; kind: AuthTokenKind; createdByUserId: string | null; now: string; targetEmail?: string | null },
 ): Promise<IssuedToken> {
+  const targetEmail = input.targetEmail?.trim().toLowerCase() || null;
+  if (tokenKindNeedsTargetEmail(input.kind) !== (targetEmail !== null)) {
+    throw new Error(`issueToken: target_email is ${tokenKindNeedsTargetEmail(input.kind) ? "required" : "not allowed"} for kind "${input.kind}"`);
+  }
   const superseded = await consumeLiveTokens(tx, input.userId, input.kind, input.now);
   const token = generateToken();
   const expiresAt = tokenExpiry(input.kind, input.now);
@@ -61,6 +68,7 @@ export async function issueToken(
       kind: input.kind,
       tokenHash: hashToken(token),
       createdByUserId: input.createdByUserId,
+      targetEmail,
       expiresAt,
       createdAt: input.now,
     })
@@ -97,6 +105,19 @@ export async function markTokenUsed(tx: Tx, tokenId: string, now: string): Promi
     .where(and(eq(authTokens.id, tokenId), isNull(authTokens.usedAt)))
     .returning({ id: authTokens.id });
   return rows.length === 1;
+}
+
+/** The newest live token of a kind for a user (e.g. the pending email change on My account), or null. */
+export async function latestLiveToken(db: DbLike, userId: string, kind: AuthTokenKind, now: string): Promise<AuthToken | null> {
+  const row = await first(
+    db
+      .select()
+      .from(authTokens)
+      .where(and(eq(authTokens.userId, userId), eq(authTokens.kind, kind), isNull(authTokens.usedAt), gt(authTokens.expiresAt, now)))
+      .orderBy(desc(authTokens.createdAt))
+      .limit(1),
+  );
+  return row ?? null;
 }
 
 /** Live tokens of a kind for a user (admin screens: "invite pending, expires …"). */

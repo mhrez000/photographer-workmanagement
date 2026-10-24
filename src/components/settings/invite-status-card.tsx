@@ -9,13 +9,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/dates";
-import { InviteLinkPanel } from "./invite-link-panel";
+import { InviteLinkPanel, type InviteNotSentReason } from "./invite-link-panel";
 
 /** `POST /api/users/:id/invite/resend` */
 interface ResendResult {
   inviteUrl: string;
   emailed: boolean;
   expiresAt: string;
+  /** Why it was not emailed (e.g. "unconfirmed_sender": the owner's own email is not confirmed yet). */
+  notSentReason?: InviteNotSentReason | null;
 }
 
 export interface PendingInvite {
@@ -31,6 +33,8 @@ export interface InviteStatusCardProps {
   pending: PendingInvite | null;
   /** `user.invite` on this person. */
   canInvite: boolean;
+  /** Plain reason shown instead of "Only an owner can send a new link." when sending is off (e.g. the demo studio). */
+  blockedReason?: string | null;
   timeZone: string;
 }
 
@@ -40,7 +44,7 @@ export interface InviteStatusCardProps {
  * (POST resend → the older links stop working, the fresh link shows once with Copy link) and
  * [Revoke invite] (POST revoke → no way in until a new link is sent). Copying never invalidates anything.
  */
-export function InviteStatusCard({ userId, name, email, pending, canInvite, timeZone }: InviteStatusCardProps) {
+export function InviteStatusCard({ userId, name, email, pending, canInvite, blockedReason = null, timeZone }: InviteStatusCardProps) {
   const run = useMutationRunner();
   const [fresh, setFresh] = React.useState<ResendResult | null>(null);
   const [resendOpen, setResendOpen] = React.useState(false);
@@ -79,7 +83,15 @@ export function InviteStatusCard({ userId, name, email, pending, canInvite, time
     >
       <div className="flex flex-col gap-4">
         {fresh ? (
-          <InviteLinkPanel name={name} email={email} inviteUrl={fresh.inviteUrl} emailed={fresh.emailed} expiresAt={fresh.expiresAt} timeZone={timeZone} />
+          <InviteLinkPanel
+            name={name}
+            email={email}
+            inviteUrl={fresh.inviteUrl}
+            emailed={fresh.emailed}
+            expiresAt={fresh.expiresAt}
+            timeZone={timeZone}
+            notSentReason={fresh.notSentReason ?? null}
+          />
         ) : (
           <p className="flex items-start gap-2 text-sm text-ink-secondary">
             <MailQuestion aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ink-subtle" />
@@ -88,7 +100,7 @@ export function InviteStatusCard({ userId, name, email, pending, canInvite, time
                 ? `The link was shown once when it was created${canInvite ? "; if it is lost, send a new one — the old one stops working" : ""}.`
                 : canInvite
                   ? "Sending a new link is the only way back in for them."
-                  : "Only an owner can send a new link."}
+                  : (blockedReason ?? "Only an owner can send a new link.")}
             </span>
           </p>
         )}

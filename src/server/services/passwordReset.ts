@@ -7,9 +7,21 @@
  *                                            (one live token per user: older ones are superseded); audited
  *                                            `auth.password_reset_requested` (management visibility, actor null);
  *                                            emailed when email is configured; 5 requests / 15 min per email+IP
- *   resetPassword(db, { token, password })   public; generic 400 for anything invalid; sets the password, bumps
+ *                                            (Postgres-backed, plain-words 429); never a token for a person of
+ *                                            the demo studio
+ *   resetPassword(db, { token, password })   public; generic 400 for anything invalid (also: the demo studio); dead
+ *                                            links are capped per client IP (`resetLinkLimiter`, checked before
+ *                                            bcrypt); sets the password, bumps
  *                                            `session_version` (every other session dies), marks the token used,
- *                                            audits `user.password_changed` with cause "reset"
+ *                                            audits `user.password_changed` with cause "reset"; accounts: the
+ *                                            email counts as confirmed (the link reached it), `has_password` = true,
+ *                                            a pending email change is closed, the wrong passwords typed for the
+ *                                            address are forgotten (UX-01: the new password works at once), and "Your
+ *                                            password was changed" goes out after commit (`resetPasswordAndSignIn`,
+ *                                            which also remembers this browser for the address)
+ *
+ * The reset email goes through `sendAccountEmail` (never from a demo studio; the dev-only `resetUrl` only outside
+ * production when email is not configured or failed).
  */
 import { eq } from "drizzle-orm";
 import { first, getDb, type Db } from "@/db/index";
@@ -18,15 +30,20 @@ import type { Role } from "@/lib/constants";
 import { ForgotPasswordInput, ResetPasswordInput } from "@/lib/validation/auth";
 import { recordEvent } from "@/server/audit";
 import { hashPassword } from "@/server/auth/password";
-import { checkPasswordResetRequest, recordPasswordResetRequest } from "@/server/auth/rate-limit";
-import { buildContextFromDb, createSession, sessionKindForRole, systemContext } from "@/server/auth/session";
-import { findLiveToken, issueToken, markTokenUsed } from "@/server/auth/tokens";
+import { clearLoginLockout, emailIpKey } from "@/server/auth/db-rate-limit";
+import { markEmailConfirmed } from "@/server/auth/email-confirmation";
+import { buildContextFromDb, systemContext } from "@/server/auth/session";
+import { issueSessionCookie } from "@/server/auth/sign-in";
+import { consumeLiveTokens, findLiveToken, issueToken, markTokenUsed } from "@/server/auth/tokens";
 import { nowIso } from "@/server/clock";
-import { emailConfigured, sendEmail } from "@/server/email";
+import { emailConfigured } from "@/server/email";
+import { sendAccountEmail } from "@/server/email/account";
 import { passwordResetEmail } from "@/server/email/templates";
-import { RateLimitedError, ValidationError } from "@/server/errors";
+import { ValidationError } from "@/server/errors";
 import { passwordResetUrl } from "@/server/origin";
 import { currentRequestId, newRequestId } from "@/server/request-scope";
+import { sendPasswordChangedNotice } from "./accountNotices";
+import { enforceLimit, limiterNow, plainRateLimited, resetLinkKey, resetLinkLimiter } from "./authLimits";
 import { parseInput, withTx } from "./_shared";
 
 export const RESET_INVALID_MESSAGE = "This reset link is no longer valid";
@@ -57,12 +74,14 @@ function resettable(user: { isActive: boolean; acceptedAt: string | null; anonym
  */
 export async function requestPasswordReset(db: Db, raw: unknown, opts: { req?: Request | null; requestId?: string } = {}): Promise<RequestPasswordResetResult> {
   const input = parseInput(ForgotPasswordInput, raw);
-  const limit = checkPasswordResetRequest(input.email, input.ip);
-  if (!limit.allowed) throw new RateLimitedError(limit.retryAfterSeconds);
-  recordPasswordResetRequest(input.email, input.ip);
+  await enforceLimit(db, "passwordReset", emailIpKey(input.email, input.ip), "forgot_password");
 
-  const user = await first(db.select().from(users).where(eq(users.email, input.email)));
-  if (!user || !resettable(user)) return { ok: true, emailed: false };
+  const row = await first(
+    db.select({ user: users, isDemo: organisations.isDemo }).from(users).innerJoin(organisations, eq(organisations.id, users.organisationId)).where(eq(users.email, input.email)),
+  );
+  // The demo studio's people share one password nobody may change: no token at all (same answer as anyone else).
+  if (!row || row.isDemo || !resettable(row.user)) return { ok: true, emailed: false };
+  const user = row.user;
 
   const requestId = opts.requestId ?? currentRequestId() ?? newRequestId();
   const configured = emailConfigured();
@@ -87,17 +106,22 @@ export async function requestPasswordReset(db: Db, raw: unknown, opts: { req?: R
   );
 
   const url = passwordResetUrl(issued.token, opts.req);
-  if (!configured) {
-    return process.env.NODE_ENV === "production" ? { ok: true, emailed: false } : { ok: true, emailed: false, resetUrl: url };
-  }
   const org = await first(db.select({ name: organisations.name }).from(organisations).where(eq(organisations.id, user.organisationId)));
-  const sent = await sendEmail({ to: user.email, ...passwordResetEmail({ resetUrl: url, expiresAt: issued.expiresAt, studioName: org?.name ?? null }) });
-  return { ok: true, emailed: sent.ok };
+  const sent = await sendAccountEmail(db, {
+    userId: user.id,
+    to: user.email,
+    content: passwordResetEmail({ resetUrl: url, expiresAt: issued.expiresAt, studioName: org?.name ?? null }),
+    link: url,
+  });
+  // The dev-only link: local development without a working mail provider (never in production, never for a demo).
+  return sent.devLink ? { ok: true, emailed: false, resetUrl: sent.devLink } : { ok: true, emailed: sent.sent };
 }
 
 export interface ResetPasswordResult {
   userId: string;
   organisationId: string;
+  /** The account's address (the reset link reached it). */
+  email: string;
   role: Role;
   sessionVersion: number;
 }
@@ -109,7 +133,29 @@ export interface ResetPasswordResult {
  */
 export async function resetPassword(db: Db, raw: unknown, opts: { requestId?: string } = {}): Promise<ResetPasswordResult> {
   const input = parseInput(ResetPasswordInput, raw);
+  // Dead links per client IP (authLimits.ts): checked BEFORE the bcrypt below, so a stranger posting made-up links
+  // cannot keep the server hashing; only dead links count, never a successful reset.
+  const limitKey = resetLinkKey(input.ip);
+  const nowMs = limiterNow();
+  if (limitKey) {
+    const gate = await resetLinkLimiter.check(db, limitKey, nowMs);
+    if (!gate.allowed) throw plainRateLimited("reset_link", gate.retryAfterSeconds);
+  }
   const passwordHash = await hashPassword(input.password);
+  let result: ResetPasswordResult;
+  try {
+    result = await applyReset(db, input, passwordHash, opts);
+  } catch (err) {
+    if (limitKey && err instanceof ValidationError && err.message === RESET_INVALID_MESSAGE) await resetLinkLimiter.hit(db, limitKey, nowMs);
+    throw err;
+  }
+  // UX-01: the person just proved they own this address — wrong passwords typed for it before (theirs or anyone's)
+  // must not refuse the new one with "Too many sign-in attempts".
+  await clearLoginLockout(db, result.email, input.ip);
+  return result;
+}
+
+async function applyReset(db: Db, input: ResetPasswordInput, passwordHash: string, opts: { requestId?: string }): Promise<ResetPasswordResult> {
   return withTx(
     async (tx) => {
       const now = nowIso();
@@ -118,13 +164,16 @@ export async function resetPassword(db: Db, raw: unknown, opts: { requestId?: st
       const user = await first(tx.select().from(users).where(eq(users.id, token.userId)));
       if (!user || !resettable(user)) throw invalidReset();
       const ctx = await buildContextFromDb(tx, user.id, { cause: "reset", requestId: opts.requestId ?? currentRequestId() ?? newRequestId() });
-      if (!ctx) throw invalidReset();
+      // The demo studio's shared passwords never change (a link issued before the studio became the demo is dead too).
+      if (!ctx || ctx.isDemo) throw invalidReset();
       if (!(await markTokenUsed(tx, token.id, now))) throw invalidReset();
       const nextSession = user.sessionVersion + 1;
       await tx
         .update(users)
-        .set({ passwordHash, sessionVersion: nextSession, updatedAt: now, version: user.version + 1 })
+        .set({ passwordHash, hasPassword: true, sessionVersion: nextSession, updatedAt: now, version: user.version + 1 })
         .where(eq(users.id, user.id));
+      // A new password closes a pending email change ("change your password now: that cancels the change").
+      const emailChangesClosed = await consumeLiveTokens(tx, user.id, "email_change", now);
       await recordEvent(tx, ctx, {
         entityType: "user",
         entityId: user.id,
@@ -132,18 +181,30 @@ export async function resetPassword(db: Db, raw: unknown, opts: { requestId?: st
         action: "updated",
         previousValue: { sessionVersion: user.sessionVersion },
         newValue: { sessionVersion: nextSession, name: user.name },
-        metadata: { targetUserId: user.id, self: true, reset: true, via: "reset_link", ip: input.ip ?? null, userAgent: input.userAgent ?? null },
+        metadata: {
+          targetUserId: user.id,
+          self: true,
+          reset: true,
+          via: "reset_link",
+          ip: input.ip ?? null,
+          userAgent: input.userAgent ?? null,
+          ...(emailChangesClosed > 0 ? { emailChangesClosed } : {}),
+        },
         visibility: "management",
       });
-      return { userId: user.id, organisationId: user.organisationId, role: user.role, sessionVersion: nextSession };
+      // The reset link reached this address: it is confirmed (accounts).
+      await markEmailConfirmed(tx, ctx, { userId: user.id, via: "reset" });
+      return { userId: user.id, organisationId: user.organisationId, email: user.email, role: user.role, sessionVersion: nextSession };
     },
     { db },
   );
 }
 
-/** Reset + sign the person in on this browser (route handlers). */
+/** Reset + sign the person in on this browser (route handlers), then "Your password was changed". */
 export async function resetPasswordAndSignIn(raw: unknown, opts: { requestId?: string; db?: Db } = {}): Promise<ResetPasswordResult> {
-  const result = await resetPassword(opts.db ?? getDb(), raw, opts);
-  await createSession(result.userId, result.sessionVersion, sessionKindForRole(result.role), result.role);
+  const db = opts.db ?? getDb();
+  const result = await resetPassword(db, raw, opts);
+  await issueSessionCookie({ id: result.userId, role: result.role, sessionVersion: result.sessionVersion, email: result.email });
+  await sendPasswordChangedNotice(db, { userId: result.userId, via: "reset" });
   return result;
 }

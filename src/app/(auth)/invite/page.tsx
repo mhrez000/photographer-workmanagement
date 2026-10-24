@@ -3,7 +3,7 @@ import { invalidInviteBody } from "@/components/auth/auth-helpers";
 import { AuthPageHeader } from "@/components/auth/auth-page-header";
 import { InvalidLinkCard } from "@/components/auth/invalid-link-card";
 
-export const metadata: Metadata = { title: "You’re invited" };
+export const metadata: Metadata = { title: "Invite link no longer valid" };
 
 /**
  * /invite with no token (a link cut off before the token, or typed by hand): the same friendly dead-link
@@ -13,8 +13,8 @@ export const metadata: Metadata = { title: "You’re invited" };
 export default function InviteWithoutTokenPage() {
   return (
     <div className="flex flex-col gap-8">
-      <AuthPageHeader title="This invite link didn’t open" />
-      <InvalidLinkCard title="The link is missing its last part" body={invalidInviteBody(null)} actionHref="/login?from=invite" actionLabel="Go to sign in" />
+      <AuthPageHeader title="This invite link is no longer valid" lede="The link is missing its last part." />
+      <InvalidLinkCard body={invalidInviteBody(null)} actionHref="/login?from=invite" actionLabel="Sign in" />
     </div>
   );
 }
