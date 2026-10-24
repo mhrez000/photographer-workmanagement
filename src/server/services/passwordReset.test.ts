@@ -10,7 +10,6 @@ import { activityEvents, authTokens, users } from "@/db/schema";
 import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { PASSWORD_RESET_RATE_LIMIT, RESET_TTL_MINUTES } from "@/lib/constants";
 import { verifyPassword } from "@/server/auth/password";
-import { clearAllRateLimits } from "@/server/auth/rate-limit";
 import { buildContextFromDb } from "@/server/auth/session";
 import { hashToken } from "@/server/auth/tokens";
 import { RateLimitedError, UnauthorizedError, ValidationError } from "@/server/errors";
@@ -26,7 +25,6 @@ const NEW_PASSWORD = "ResetMePlease77!";
 
 beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  clearAllRateLimits();
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
 });
@@ -140,7 +138,7 @@ describe("resetPassword", () => {
 
     fakeClock.advanceMinutes(10);
     const result = await resetPassword(db, { token, password: NEW_PASSWORD, ip: "3.3.3.3", userAgent: "vitest" }, { requestId: "req-reset" });
-    expect(result).toEqual({ userId: ids.users.editor1, organisationId: ids.organisationId, role: "editor", sessionVersion: (before?.sessionVersion ?? 1) + 1 });
+    expect(result).toEqual({ userId: ids.users.editor1, organisationId: ids.organisationId, email: ids.emails.editor1, role: "editor", sessionVersion: (before?.sessionVersion ?? 1) + 1 });
 
     const after = await userRow(ids.users.editor1);
     expect(after).toMatchObject({ sessionVersion: (before?.sessionVersion ?? 1) + 1, version: (before?.version ?? 1) + 1, updatedAt: fakeClock.now() });
@@ -190,6 +188,35 @@ describe("resetPassword", () => {
     const pending = await withTx((tx) => inviteUser(tx, ownerCtx, { email: "pending@studio.test", name: "Pen Ding", role: "editor" }), { db });
     await invalid(resetPassword(db, { token: pending.invite?.token ?? "", password: NEW_PASSWORD }));
     expect((await userRow(pending.user.id))?.acceptedAt).toBeNull();
+  });
+
+  it("UX-01: after five wrong passwords, a successful reset lets the NEW password in straight away (no 'Too many sign-in attempts')", async () => {
+    for (let i = 0; i < 5; i += 1) await authenticate(db, { email: ids.emails.editor1, password: `wrong-${i}`, ip: "7.7.7.7" }).catch(() => undefined);
+    const locked = await authenticate(db, { email: ids.emails.editor1, password: ids.password, ip: "7.7.7.7" }).catch((e: unknown) => e);
+    expect(locked).toBeInstanceOf(RateLimitedError);
+    const token = await requestToken(ids.emails.editor1, "7.7.7.7");
+    await resetPassword(db, { token, password: NEW_PASSWORD, ip: "7.7.7.7" });
+    await expect(authenticate(db, { email: ids.emails.editor1, password: NEW_PASSWORD, ip: "7.7.7.7" })).resolves.toMatchObject({ id: ids.users.editor1 });
+  });
+
+  it("UX-01: the per-email backstop strangers filled from many networks is forgotten too", async () => {
+    for (let i = 0; i < 20; i += 1) await authenticate(db, { email: ids.emails.editor1, password: "guess", ip: `10.1.${i}.1` }).catch(() => undefined);
+    expect(await authenticate(db, { email: ids.emails.editor1, password: ids.password, ip: "7.7.7.8" }).catch((e: unknown) => e)).toBeInstanceOf(RateLimitedError);
+    const token = await requestToken(ids.emails.editor1, "7.7.7.8");
+    await resetPassword(db, { token, password: NEW_PASSWORD, ip: "7.7.7.8" });
+    await expect(authenticate(db, { email: ids.emails.editor1, password: NEW_PASSWORD, ip: "7.7.7.8" })).resolves.toMatchObject({ id: ids.users.editor1 });
+  });
+
+  it("SEC-08: a reset link sent to the OLD address dies when the email changes (admin edit), and never confirms the new address", async () => {
+    const token = await requestToken(ids.emails.editor1);
+    const ownerCtx = await contextFor(db, ids.users.owner);
+    const { updateUser } = await import("./users");
+    const before = await userRow(ids.users.editor1);
+    await withTx((tx) => updateUser(tx, ownerCtx, { userId: ids.users.editor1, email: "editor1.new@studio.test", expectedVersion: before?.version }), { db });
+    await invalid(resetPassword(db, { token, password: NEW_PASSWORD }));
+    const after = await userRow(ids.users.editor1);
+    expect(after).toMatchObject({ email: "editor1.new@studio.test", emailVerifiedAt: null });
+    expect(await verifyPassword(ids.password, after?.passwordHash ?? "")).toBe(true);
   });
 
   it("client users reset through the same flow", async () => {

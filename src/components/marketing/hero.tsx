@@ -5,7 +5,18 @@ import { Button } from "@/components/ui/button";
 import { DesktopFrame } from "./device-frame";
 import { Container } from "./section";
 
-export function Hero() {
+export interface HeroProps {
+  /**
+   * A signed-in visitor's own landing page and the words for it (docs/ACCOUNTS.md §1, UX-11): the buttons then become
+   * one — they already have an account, so "Create your studio", "Sign in" and the demo would only lead to a
+   * "you're already signed in" notice.
+   */
+  home?: { href: string; label: string } | null;
+  /** The demo studio is open here (UX-07): only then is "See the demo studio" offered. */
+  demoOpen?: boolean;
+}
+
+export function Hero({ home = null, demoOpen = false }: HeroProps = {}) {
   return (
     <section aria-labelledby="hero-heading" className="relative overflow-hidden pt-14 pb-10 sm:pt-20 sm:pb-16">
       <div
@@ -24,20 +35,32 @@ export function Hero() {
           Shoot, give it to an editor, check it, done. One list of jobs, five plain stages, and every job says who it is
           waiting on.
         </p>
-        <div className="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
-          <Button href="/signup" size="lg" trailingIcon={<ArrowRight aria-hidden="true" />}>
-            Create your studio
-          </Button>
-          <Button href="/login" size="lg" variant="outline" leadingIcon={<LogIn aria-hidden="true" />}>
-            Sign in
-          </Button>
-        </div>
-        <Link
-          href="/login?demo=1"
-          className="mt-4 rounded-sm text-sm text-ink-muted underline-offset-4 hover:text-ink hover:underline focus-ring"
-        >
-          See the demo studio
-        </Link>
+        {home ? (
+          <div className="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
+            <Button href={home.href} size="lg" trailingIcon={<ArrowRight aria-hidden="true" />} data-hero-home="">
+              {home.label}
+            </Button>
+          </div>
+        ) : (
+          <>
+            <div className="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
+              <Button href="/signup" size="lg" trailingIcon={<ArrowRight aria-hidden="true" />}>
+                Create your studio
+              </Button>
+              <Button href="/login" size="lg" variant="outline" leadingIcon={<LogIn aria-hidden="true" />}>
+                Sign in
+              </Button>
+            </div>
+            {demoOpen ? (
+              <Link
+                href="/login?demo=1"
+                className="mt-4 rounded-sm text-sm text-ink-muted underline-offset-4 hover:text-ink hover:underline focus-ring"
+              >
+                See the demo studio
+              </Link>
+            ) : null}
+          </>
+        )}
         <p className="mt-3 text-xs text-ink-subtle">Free while in early access · No card needed</p>
 
         <DesktopFrame

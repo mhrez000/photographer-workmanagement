@@ -45,7 +45,7 @@ export function ClientPortalCard({ access, studioName, timeZone }: ClientPortalC
         which === "portal"
           ? value
             ? `Portal on for ${access.clientName}`
-            : `Portal off — ${access.clientName}'s users are signed out`
+            : `Portal off — ${access.clientName}'s users are logged out`
           : value
             ? "Client feedback on"
             : "Client feedback off",
@@ -92,7 +92,7 @@ export function ClientPortalCard({ access, studioName, timeZone }: ClientPortalC
             disabled={saving !== null || access.archived}
             onCheckedChange={(v) => void setSwitch("portal", v)}
             label="Portal access"
-            description="Their users can sign in and see shared jobs, milestones and delivered links. Turning it off signs them out."
+            description="Their users can sign in and see shared jobs, milestones and delivered links. Turning it off logs them out."
           />
           <Switch
             checked={access.feedbackEnabled}
@@ -182,8 +182,8 @@ export function ClientPortalCard({ access, studioName, timeZone }: ClientPortalC
         title={action?.kind === "deactivate" ? `Deactivate ${action.user.name}?` : `Reset ${action?.user.name ?? ""}'s password?`}
         description={
           action?.kind === "deactivate"
-            ? "They are signed out and can't sign in until you reactivate them. Their feedback stays on the jobs."
-            : "They are signed out everywhere. You'll get a temporary password to send them."
+            ? "They are logged out and can't sign in until you reactivate them. Their feedback stays on the jobs."
+            : "They are logged out everywhere. You'll get a temporary password to send them."
         }
         confirmLabel={action?.kind === "deactivate" ? "Deactivate" : "Reset password"}
         destructive={action?.kind === "deactivate"}

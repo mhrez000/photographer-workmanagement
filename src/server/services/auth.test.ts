@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { activityEvents, clients, users } from "@/db/schema";
 import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { buildContextFromDb } from "@/server/auth/session";
-import { LOGIN_EMAIL_RATE_LIMIT, clearLoginRateLimits } from "@/server/auth/rate-limit";
+import { LOGIN_EMAIL_RATE_LIMIT } from "@/lib/constants";
 import { clientIp } from "@/server/http";
 import { verifyPassword } from "@/server/auth/password";
 import { RateLimitedError, UnauthorizedError, ValidationError } from "@/server/errors";
@@ -16,7 +16,6 @@ let ids: SeedIds;
 
 beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  clearLoginRateLimits();
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
 });
@@ -82,6 +81,11 @@ describe("authenticate", () => {
     expect(blocked).toBeInstanceOf(RateLimitedError);
     expect((blocked as RateLimitedError).retryAfterSeconds).toBeGreaterThan(0);
     await expect(attempt("8.8.8.8", ids.password)).resolves.toMatchObject({ id: ids.users.coAdmin });
+    // Plain words with the wait in minutes (the forms and the API show it as-is).
+    expect((blocked as Error).message).toMatch(/^Too many sign-in attempts\. Try again in (a minute|\d+ minutes)\.$/);
+    // The window drains with the services' clock; a success clears the email+IP key.
+    fakeClock.advanceMinutes(16);
+    await expect(attempt("9.9.9.9", ids.password)).resolves.toMatchObject({ id: ids.users.coAdmin });
   });
 
   it("rotating X-Forwarded-For buys nothing: XFF is ignored without trusted proxies, so 5 failures → 429 (even for the right password)", async () => {
@@ -130,8 +134,19 @@ describe("change password / logout", () => {
 
   it("rejects a wrong current password and a too-short new one", async () => {
     const ctx = await contextFor(db, ids.users.editor1);
-    await expect(preparePasswordChange(db, ctx, { current: "nope", next: "a-much-better-passphrase" })).rejects.toThrow(/incorrect/);
+    await expect(preparePasswordChange(db, ctx, { current: "nope", next: "a-much-better-passphrase" })).rejects.toThrow(/That password isn’t right/);
     await expect(preparePasswordChange(db, ctx, { current: ids.password, next: "short" })).rejects.toThrow(ValidationError);
+  });
+
+  it("caps wrong current passwords per person (passwordCheck): the 10th is a 429 in plain words, then even the right one waits", async () => {
+    const ctx = await contextFor(db, ids.users.editor1);
+    for (let i = 0; i < 9; i += 1) await expect(preparePasswordChange(db, ctx, { current: "nope", next: "a-much-better-passphrase" })).rejects.toThrow(/That password isn’t right/);
+    const tenth = await preparePasswordChange(db, ctx, { current: "nope", next: "a-much-better-passphrase" }).catch((e: unknown) => e);
+    expect(tenth).toBeInstanceOf(RateLimitedError);
+    expect((tenth as Error).message).toMatch(/^Too many wrong passwords\. Try again in \d+ minutes\.$/);
+    await expect(preparePasswordChange(db, ctx, { current: ids.password, next: "a-much-better-passphrase" })).rejects.toThrow(RateLimitedError);
+    fakeClock.advanceMinutes(16);
+    await expect(preparePasswordChange(db, ctx, { current: ids.password, next: "a-much-better-passphrase" })).resolves.toMatchObject({ userId: ids.users.editor1 });
   });
 
   it("recordLogout audits auth.logged_out", async () => {

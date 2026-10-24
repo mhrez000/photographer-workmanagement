@@ -4,12 +4,12 @@
  * The organisation, its settings row, the first owner and the structure every studio starts with (default
  * workflow, types of shoot) come from the SAME two service functions sign-up uses
  * (`createOrganisationWithOwner` + `bootstrapOrganisation` in src/server/services/organisations.ts), so the
- * demo studio is built exactly like a real one. Everything else (users, extra workflows, teams, clients,
+ * demo studio is built exactly like a real one; `markDemoStudios` flags it as the demo studio as the LAST step. Everything else (users, extra workflows, teams, clients,
  * projects, automations, saved views, dashboards) goes through the admin services as the owner.
  */
-import { eq } from "drizzle-orm";
-import { first } from "@/db/index";
-import { jobTypes as jobTypesTable } from "@/db/schema";
+import { eq, inArray } from "drizzle-orm";
+import { first, type Db } from "@/db/index";
+import { jobTypes as jobTypesTable, organisations } from "@/db/schema";
 import { DEFAULT_JOB_TYPES, EDITOR_FLAGS, MEMBER_FLAGS, type PermissionFlag, type TransitionRole } from "@/lib/constants";
 import type { WorkflowStatus } from "@/lib/types";
 import { bootstrapOrganisation as bootstrapStructure, createOrganisationWithOwner } from "@/server/services/organisations";
@@ -73,6 +73,25 @@ export async function bootstrapOrganisation(
       jobTypes: structure.jobTypes as Record<JobTypeName, string>,
     };
   });
+}
+
+/**
+ * Accounts (docs/ACCOUNTS.md "Demo studio"): `SEED_DEMO=off` seeds ordinary studios instead of demo studios (the
+ * e2e database does this: its specs invite people and reset passwords in the seeded studio, which a demo studio
+ * refuses). Default on.
+ */
+export function seedDemoEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  const raw = env.SEED_DEMO?.trim().toLowerCase();
+  return !(raw === "off" || raw === "false" || raw === "0" || raw === "no");
+}
+
+/**
+ * Flags the seeded studios as demo studios (`organisations.is_demo = true`). Runs as the LAST seed step: the seed
+ * builds the studio through the real services (invites, temp passwords, deactivations), which a demo studio refuses.
+ */
+export async function markDemoStudios(db: Db, organisationIds: readonly string[]): Promise<void> {
+  if (organisationIds.length === 0) return;
+  await db.update(organisations).set({ isDemo: true }).where(inArray(organisations.id, [...organisationIds]));
 }
 
 /**

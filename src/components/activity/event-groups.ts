@@ -51,7 +51,7 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
   {
     key: "people",
     label: "People & sign-ins",
-    description: "Invites, roles, people settings, sign-ins",
+    description: "Invites, roles, people settings, sign-ins, email and sign-in changes",
     management: true,
     types: [
       "user.created", "user.updated", "user.role_changed", "user.deactivated", "user.reactivated", "user.password_changed",
@@ -59,6 +59,8 @@ export const ACTIVITY_EVENT_GROUPS: readonly ActivityEventGroup[] = [
       "team.created", "team.updated", "team.archived", "team.member_added", "team.member_removed",
       "auth.logged_in", "auth.login_failed", "auth.logged_out",
       "user.invite_sent", "user.invite_revoked", "user.accepted_invite", "auth.password_reset_requested",
+      "user.email_confirmation_sent", "user.email_confirmed", "user.email_change_requested", "user.email_change_cancelled",
+      "user.email_changed", "auth.other_sessions_revoked", "user.google_connected", "user.google_disconnected",
     ],
   },
   {

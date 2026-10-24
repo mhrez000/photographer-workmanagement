@@ -57,17 +57,19 @@ test("/dashboard → /home, and signing in lands owners on Home, editors on My j
   }
 });
 
-test("/workspace/my goes to Jobs for photographers and to My jobs for editors; the proxy sends a signed-in visitor on /login home", async ({ api, apiAs }) => {
+test("/workspace/my goes to Jobs for photographers and to My jobs for editors; /login and / stay put for a signed-in visitor", async ({ api, apiAs }) => {
   expect((await api.pageStatus("/workspace/my")).location).toMatch(/\/jobs$/);
   const editor = await apiAs("editor");
   expect((await editor.pageStatus("/workspace/my")).location).toMatch(/\/my-jobs$/);
   const photographer = await apiAs("photographer");
   expect((await photographer.pageStatus("/workspace/my")).location).toMatch(/\/jobs$/);
 
-  expect((await api.pageStatus("/login")).location).toMatch(/\/home$/);
-  expect((await editor.pageStatus("/login")).location).toMatch(/\/my-jobs$/);
+  // Accounts (docs/ACCOUNTS.md §1): /login, /signup and / render for a signed-in person (a "You're signed in" notice /
+  // the landing page with "Go to your studio") instead of redirecting.
   const client = await apiAs("client");
-  expect((await client.pageStatus("/login")).location).toMatch(/\/portal$/);
+  for (const who of [api, editor, client]) {
+    for (const path of ["/login", "/signup", "/"]) expect((await who.pageStatus(path)).status, path).toBe(200);
+  }
   // A client on a staff page goes to the portal; staff on /portal go home.
   expect((await client.pageStatus("/home")).location).toMatch(/\/portal$/);
   expect((await api.pageStatus("/portal")).location).toMatch(/\/home$/);

@@ -14,7 +14,7 @@ import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
 import { PHOTOGRAPHER_PRESETS, PHOTOGRAPHER_PRESET_META, type InviteMethod, type PhotographerPreset, type Role } from "@/lib/constants";
 import { cn } from "@/lib/utils";
-import { InviteLinkPanel } from "./invite-link-panel";
+import { InviteLinkPanel, type InviteNotSentReason } from "./invite-link-panel";
 import { inviteLinkMessage, inviteMessage } from "./permission-copy";
 import { TempPasswordPanel } from "./temp-password-panel";
 
@@ -52,7 +52,7 @@ interface InvitedUser {
 
 /** `POST /api/users` — the shape depends on `method` (src/app/api/README.md → Users). */
 export type InviteResult =
-  | { method: "link"; user: InvitedUser; inviteUrl: string; emailed: boolean; expiresAt: string }
+  | { method: "link"; user: InvitedUser; inviteUrl: string; emailed: boolean; expiresAt: string; notSentReason?: InviteNotSentReason | null }
   | { method: "temp_password"; user: InvitedUser; tempPassword: string };
 
 /**
@@ -148,7 +148,15 @@ export function InvitePersonDialog({ open, onOpenChange, studioName, portalClien
           </DialogHeader>
           <DialogBody className="flex flex-col gap-4 pb-4">
             {result.method === "link" ? (
-              <InviteLinkPanel name={result.user.name} email={result.user.email} inviteUrl={result.inviteUrl} emailed={result.emailed} expiresAt={result.expiresAt} timeZone={timeZone} />
+              <InviteLinkPanel
+                name={result.user.name}
+                email={result.user.email}
+                inviteUrl={result.inviteUrl}
+                emailed={result.emailed}
+                notSentReason={result.notSentReason}
+                expiresAt={result.expiresAt}
+                timeZone={timeZone}
+              />
             ) : (
               <TempPasswordPanel name={result.user.name} email={result.user.email} password={result.tempPassword} />
             )}

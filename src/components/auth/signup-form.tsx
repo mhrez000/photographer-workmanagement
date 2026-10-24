@@ -9,10 +9,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api-client";
-import { STUDIO_NAME_MAX_LENGTH } from "@/lib/constants";
+import { SIGNUP_HONEYPOT_FIELD, STUDIO_NAME_MAX_LENGTH } from "@/lib/constants";
 import { PASSWORD_MIN_LENGTH } from "@/lib/validation/auth";
 import { browserTimezone, describeTimezone, firstErrors, minutesLeft, retryAfterOf } from "./auth-helpers";
 import { FormAlert } from "./form-alert";
+import { useFocusFirstInvalid } from "./use-focus-first-invalid";
 import { PasswordField } from "./password-field";
 
 interface SignUpResult {
@@ -35,7 +36,11 @@ const noTimezone = () => null;
  * "Create your studio" (POST /api/auth/signup): name, email, password, studio name; the timezone is
  * detected from the browser and sent along. Field errors appear inline and clear as the field is edited;
  * the button stays disabled until the password is long enough (the meter says how many to go); a taken
- * email offers "Sign in instead"; a 429 says how long to wait. Success → the new owner's Home.
+ * email offers "Sign in instead"; an address with an unopened invite is told to use the invite link (as-is from the
+ * server); a 429 says how long to wait; the password field says when Caps Lock is on. Success → the new owner's Home.
+ *
+ * Bots: a hidden "website" field (`SIGNUP_HONEYPOT_FIELD`) people never see or reach — off-screen, `aria-hidden`,
+ * out of the tab order, no autofill. Anything typed there gets the server's one generic "Something went wrong".
  */
 export function SignUpForm() {
   const router = useRouter();
@@ -43,6 +48,7 @@ export function SignUpForm() {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [studioName, setStudioName] = React.useState("");
+  const [website, setWebsite] = React.useState("");
   // Browser-only (Intl); the server snapshot is null so the first paint matches.
   const detectedTimezone = React.useSyncExternalStore(subscribeNever, browserTimezone, noTimezone);
   const [timezoneRejected, setTimezoneRejected] = React.useState(false);
@@ -52,6 +58,7 @@ export function SignUpForm() {
   const [pending, setPending] = React.useState(false);
   const [done, setDone] = React.useState(false);
 
+  const { ref: formRef, focusFirstInvalid } = useFocusFirstInvalid();
   const tooShort = password.length < PASSWORD_MIN_LENGTH;
   const clearError = (key: ErrorKey) => {
     if (errors[key]) setErrors((prev) => ({ ...prev, [key]: undefined }));
@@ -69,6 +76,7 @@ export function SignUpForm() {
         email,
         password,
         studioName,
+        [SIGNUP_HONEYPOT_FIELD]: website,
         ...(timezone ? { timezone } : {}),
       });
       setDone(true);
@@ -86,6 +94,8 @@ export function SignUpForm() {
         setFormError({ tone: "danger", text: err instanceof ApiError ? err.message : "Something went wrong. Please try again." });
       }
       setPending(false);
+      // UX-09: back to the first field with a problem (the fields were disabled while sending).
+      focusFirstInvalid();
     }
   };
 
@@ -94,8 +104,24 @@ export function SignUpForm() {
   return (
     <div className="flex flex-col gap-5">
       <Card className="shadow-md">
-        <CardContent className="p-6 first:pt-6 last:pb-6">
-          <form onSubmit={submit} className="flex flex-col gap-4" noValidate aria-busy={busy || undefined}>
+        <CardContent className="relative p-6 first:pt-6 last:pb-6">
+          {/*
+            Honeypot: invisible to people and screen readers, unreachable by keyboard, never autofilled. It sits beside
+            the <form> (its value is sent with the rest), so the form's own fields stay exactly the ones a person sees.
+          */}
+          <div aria-hidden="true" className="pointer-events-none absolute -left-[10000px] top-0 size-px overflow-hidden opacity-0" data-honeypot="">
+            <label htmlFor="signup-website">Website</label>
+            <input
+              id="signup-website"
+              name={SIGNUP_HONEYPOT_FIELD}
+              type="text"
+              tabIndex={-1}
+              autoComplete="off"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+            />
+          </div>
+          <form ref={formRef} onSubmit={submit} className="flex flex-col gap-4" noValidate aria-busy={busy || undefined}>
             {formError ? <FormAlert tone={formError.tone}>{formError.text}</FormAlert> : null}
 
             <FormField label="Your name" error={errors.ownerName} required>
@@ -189,12 +215,15 @@ export function SignUpForm() {
         </CardContent>
       </Card>
 
-      <p className="text-center text-sm text-ink-muted">
-        Already have a studio?{" "}
-        <Link href="/login" className="font-medium text-accent-ink underline-offset-4 hover:underline">
-          Sign in
-        </Link>
-      </p>
+      <div className="flex flex-col gap-2 text-center text-sm text-ink-muted">
+        <p>
+          Already have a studio?{" "}
+          <Link href="/login" className="font-medium text-accent-ink underline-offset-4 hover:underline">
+            Sign in
+          </Link>
+        </p>
+        <p data-invitee-hint="">Editing for a studio, or a client? Use the invite link your studio sent you.</p>
+      </div>
     </div>
   );
 }

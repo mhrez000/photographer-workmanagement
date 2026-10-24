@@ -50,6 +50,8 @@ import {
   enableAdvancedTools,
   enableTimeTracking,
   inviteSeedUser,
+  markDemoStudios,
+  seedDemoEnabled,
 } from "./org";
 import { NorthlightSeeder, buildSpecs } from "./northlight";
 import { DAY, HOUR, MINUTE, SeedRuntime } from "./runtime";
@@ -69,6 +71,8 @@ export interface SeedOptions {
    * (./small.ts); "full" = this file's 160-job, 25-person fixture the e2e suite and the §39 checks use.
    */
   profile?: SeedProfile;
+  /** Accounts: flag the seeded studios as demo studios (default: `SEED_DEMO` env, on unless "off"). */
+  demo?: boolean;
 }
 
 export interface SeedResult {
@@ -264,6 +268,8 @@ export async function runFullSeed(db: Db, options: SeedOptions = {}): Promise<Se
     const finalSweeps = [await runSweep(db, nl), await runSweep(db, otherStudioId)];
     for (const r of finalSweeps) if (r.errors.length > 0) throw new Error(`final sweep errors: ${JSON.stringify(r.errors)}`);
     lap("final sweep");
+
+    if (options.demo ?? seedDemoEnabled()) await markDemoStudios(db, [nl, otherStudioId]);
 
     return {
       northlightId: nl,

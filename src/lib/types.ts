@@ -9,6 +9,7 @@
 import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
 import type * as s from "@/db/schema";
 import type {
+  AccountSurface,
   Action,
   BottleneckKind,
   ClientMilestone,
@@ -44,6 +45,7 @@ export type NewUser = InferInsertModel<typeof s.users>;
 export type UserNotificationPref = InferSelectModel<typeof s.userNotificationPrefs>;
 export type AuthToken = InferSelectModel<typeof s.authTokens>;
 export type NewAuthToken = InferInsertModel<typeof s.authTokens>;
+export type AuthRateLimit = InferSelectModel<typeof s.authRateLimits>;
 export type NewUserNotificationPref = InferInsertModel<typeof s.userNotificationPrefs>;
 export type Team = InferSelectModel<typeof s.teams>;
 export type NewTeam = InferInsertModel<typeof s.teams>;
@@ -120,6 +122,12 @@ export interface SessionPayload {
    * /my-jobs. Unverified in the proxy; a missing claim = photographer. Never a permission input.
    */
   r?: Role;
+  /**
+   * When this browser last really signed in (epoch seconds: a password, Google, a reset, joining, creating a studio,
+   * changing the password). Kept across sliding renewals and "Log out of other devices"; absent on cookies issued before
+   * it existed. A few account changes ask for a RECENT sign-in (SEC-03: adding a password to a Google-only account).
+   */
+  at?: number;
 }
 
 /**
@@ -188,6 +196,59 @@ export interface AuthContext {
   cause?: EventCause;
   /** Set by the automation runner: stamped on events (activity_events.automation_run_id). */
   automationRunId?: string | null;
+  /**
+   * Accounts: the organisation is the demo studio (`organisations.is_demo`). Set by every context builder in
+   * src/server/auth/session.ts; absent (hand-built test contexts) = false. Guard with `assertNotDemo(ctx, …)`.
+   */
+  isDemo?: boolean;
+  /**
+   * Accounts: when this browser last really signed in (epoch seconds, the session cookie's `at` claim). Only contexts
+   * built from the request's cookie carry it; absent = unknown (treated as "not recent").
+   */
+  signedInAt?: number | null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Accounts (docs/ACCOUNTS-PLAN.md §3) — src/server/queries/accountSecurity.ts */
+/* ------------------------------------------------------------------ */
+
+/** What the "Sign-in & security" cards on Settings → My account and /portal/account show. */
+export interface AccountSecurityOverview {
+  userId: string;
+  name: string;
+  email: string;
+  /** ISO; null = the email is not confirmed yet. */
+  emailVerifiedAt: string | null;
+  /** RESEND_API_KEY + EMAIL_FROM are set: confirmation links and notices go out by email. */
+  emailConfigured: boolean;
+  /** The demo studio: every sign-in setting is read-only (the section shows one notice instead). */
+  isDemo: boolean;
+  /** The account has a usable password (false: Google-only). */
+  hasPassword: boolean;
+  google: {
+    /** GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET are set ("Continue with Google" is offered). */
+    configured: boolean;
+    connected: boolean;
+    /** The connected Google address (null when not connected). */
+    email: string | null;
+  };
+  /** A live email-change link: the new address waits to be confirmed. */
+  pendingEmailChange: { newEmail: string; expiresAt: string } | null;
+  surface: AccountSurface;
+  /** "/settings/account" (staff) or "/portal/account" (clients). */
+  accountPath: string;
+  timezone: string;
+}
+
+/** The quiet banners above every signed-in page (staff shell and portal). */
+export interface AccountBannerState {
+  /** The demo studio banner ("You're looking at the demo studio…"). */
+  demo: boolean;
+  /** Set when the person still has to confirm their email (email configured, not the demo studio). */
+  unconfirmedEmail: string | null;
+  /** Where "Change email" goes: `${accountPath}#email`. */
+  accountHref: string;
+  surface: AccountSurface;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1004,7 +1065,7 @@ export interface SessionTotals {
 /* ------------------------------------------------------------------ */
 
 /** A user row without secrets (same shape as services/_shared SafeUser). */
-export type UserProfile = Omit<User, "passwordHash" | "sessionVersion">;
+export type UserProfile = Omit<User, "passwordHash" | "sessionVersion" | "googleSub" | "googleEmail">;
 
 /** Mean closed-stage duration per category (stage averages). */
 export interface StageAverage {

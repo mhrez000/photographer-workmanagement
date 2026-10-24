@@ -24,15 +24,19 @@
  *   defaults, and refuse to strand open assignments (reassign first);
  * - deactivating an admin clears admin (audited); reactivation returns a team member.
  *
+ * Demo studio (docs/ACCOUNTS.md §7, `assertNotDemo`): no invites, no admin password resets, no email changes,
+ * no primary-owner transfer, and the four persona accounts (DEMO_ACCOUNTS) cannot be deactivated, re-roled,
+ * promoted / demoted, re-switched or anonymised — each a 403 with plain copy.
+ *
  * `session_version` is bumped on deactivation, password reset, role change
  * and admin grant/revoke: every cookie issued before is revoked, so the person
  * signs in again under the new role. Permission switches (`setPermissions`)
  * do NOT sign the person out: the context is rebuilt from the user row on every
  * request, so a switch applies on their next request (integration decision).
  */
-import { and, asc, count, eq, inArray, ne, or } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { isGuardViolation, isUniqueViolation, rootErrorMessage } from "@/db/errors";
-import { clients, jobs, organisationSettings, userNotificationPrefs, users } from "@/db/schema";
+import { authTokens, clients, jobs, organisationSettings, userNotificationPrefs, users } from "@/db/schema";
 import {
   AVATAR_PALETTE,
   BCRYPT_COST,
@@ -70,6 +74,8 @@ import {
 import { recordEvent } from "@/server/audit";
 import { generateTempPassword, hashPassword } from "@/server/auth/password";
 import { assertCan, inviteSwitchesFor, isAdmin, personaOf, type UserPermissionRef } from "@/server/auth/permissions";
+import { assertNotDemo, isDemoPersonaEmail } from "@/server/auth/demo";
+import { clearEmailConfirmation } from "@/server/auth/email-confirmation";
 import { consumeLiveTokens, issueToken, unusablePasswordHash } from "@/server/auth/tokens";
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from "@/server/errors";
 import { first, loadUserInOrg, one, parseInput, safeUser, withTx, type Db, type DbLike, type SafeUser, type Tx } from "./_shared";
@@ -133,6 +139,14 @@ function assertMayEver(ctx: AuthContext, action: Action): void {
 function requireHuman(ctx: AuthContext, action: string): string {
   if (!ctx.userId || ctx.isSystem) throw new ForbiddenError(action);
   return ctx.userId;
+}
+
+/**
+ * The demo studio (docs/ACCOUNTS.md §7): the four persona accounts (`DEMO_ACCOUNTS`) ARE the demo — nobody can
+ * deactivate, re-role, promote / demote, re-switch or anonymise them (403 `demo.demo_accounts`, plain copy).
+ */
+function assertNotDemoPersona(ctx: AuthContext, target: Pick<User, "email">): void {
+  if (ctx.isDemo && isDemoPersonaEmail(target.email)) assertNotDemo(ctx, "demo_accounts");
 }
 
 /** organisation_settings.primary_owner_user_id of the actor's organisation. */
@@ -325,6 +339,8 @@ function definedOnly<T extends object>(value: T | undefined): Partial<T> {
  */
 export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
+  // Accounts: invites are off in the demo studio (the seed builds it before it is flagged as the demo).
+  assertNotDemo(ctx, "invite");
   const actorId = requireHuman(ctx, "user.invite");
   const parsed = parseInput(InviteUserInput, input);
   // SIMPLIFICATION-PLAN §2: one preset ("Only their own shoots" / "Everything (co-owner)") pre-fills the
@@ -353,6 +369,8 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
           organisationId: ctx.organisationId,
           email: data.email,
           passwordHash: prepared ? prepared.passwordHash : unusablePasswordHash(),
+          // Accounts: a link-invitee has no usable password until they accept (with a password, or with Google).
+          hasPassword: prepared !== null,
           name: data.name,
           role: data.role,
           title: data.role === "client" ? null : (data.title ?? null),
@@ -408,6 +426,7 @@ export async function inviteUser(tx: Tx, ctx: AuthContext, input: unknown, secre
 /** Async convenience: hashes outside the transaction, then runs `inviteUser` with method "temp_password". */
 export async function inviteUserWithTempPassword(ctx: AuthContext, input: unknown, db?: Db): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
+  assertNotDemo(ctx, "invite");
   const secret = await prepareTempPassword();
   return withTx((tx) => inviteUser(tx, ctx, input, secret), { db });
 }
@@ -418,6 +437,7 @@ export async function inviteUserWithTempPassword(ctx: AuthContext, input: unknow
  */
 export async function inviteUserByMethod(ctx: AuthContext, input: unknown, db?: Db): Promise<InviteResult> {
   assertMayEver(ctx, "user.invite");
+  assertNotDemo(ctx, "invite");
   const method = input && typeof input === "object" && !Array.isArray(input) ? (input as { method?: unknown }).method : undefined;
   if (method === "temp_password") return inviteUserWithTempPassword(ctx, input, db);
   return withTx((tx) => inviteUser(tx, ctx, input), { db });
@@ -454,7 +474,14 @@ export async function updateUser(tx: Tx, ctx: AuthContext, input: unknown): Prom
   const fields = isAdmin(ctx) ? PROFILE_FIELDS : ctx.role === "client" ? CLIENT_SELF_FIELDS : SELF_FIELDS;
   const diff = diffFields(target, data, fields);
   if (diff.changed.length === 0) return safeUser(target);
+  // Accounts: email addresses are fixed in the demo studio (sending the unchanged address along is fine).
+  if (diff.set.email !== undefined) assertNotDemo(ctx, "email");
   if (diff.set.email && (await isEmailTaken(tx, diff.set.email, target.id))) throw new ConflictError(EMAIL_UNAVAILABLE_MESSAGE);
+  // Accounts: a new address is not confirmed yet (and any confirm / change / reset link for the old one stops working).
+  if (diff.set.email) await clearEmailConfirmation(tx, { userId: target.id, now: ctx.now() });
+  // SEC-08: an invite link that went to the OLD address of someone who has not joined yet stops working too (whoever
+  // reads that mailbox must not join as them); the People page then offers "Send a new link".
+  const invitesClosed = diff.set.email && target.acceptedAt === null ? await consumeLiveTokens(tx, target.id, "invite", ctx.now()) : 0;
   const row = await guarded(
     one(
       tx
@@ -471,7 +498,7 @@ export async function updateUser(tx: Tx, ctx: AuthContext, input: unknown): Prom
     action: "updated",
     previousValue: diff.previous,
     newValue: diff.next,
-    metadata: { targetUserId: target.id, targetName: row.name, self: target.id === actorId },
+    metadata: { targetUserId: target.id, targetName: row.name, self: target.id === actorId, ...(invitesClosed > 0 ? { invitesClosed } : {}) },
   });
   return safeUser(row);
 }
@@ -499,6 +526,7 @@ export async function changeRole(tx: Tx, ctx: AuthContext, input: unknown): Prom
     );
   }
   assertCan(ctx, "user.change_role", userPermissionRef(target, { primaryOwnerId, nextRole: data.role }));
+  assertNotDemoPersona(ctx, target);
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.role === data.role) return safeUser(target);
@@ -584,6 +612,7 @@ export async function setAdmin(tx: Tx, ctx: AuthContext, input: unknown): Promis
   const data = parseInput(SetAdminInput, input);
   const { target, primaryOwnerId } = await loadTarget(tx, ctx, data.userId);
   assertCan(ctx, "user.set_admin", userPermissionRef(target, { primaryOwnerId, nextIsAdmin: data.isAdmin }));
+  assertNotDemoPersona(ctx, target);
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.isAdmin === data.isAdmin) return safeUser(target);
@@ -635,6 +664,7 @@ export async function setPermissions(tx: Tx, ctx: AuthContext, input: unknown): 
     throw new UserRuleError("flag_not_for_role", `These switches don't apply to ${who}: ${outside.join(", ")}`, outside[0]);
   }
   assertCan(ctx, "user.set_permissions", userPermissionRef(target, { primaryOwnerId }));
+  assertNotDemoPersona(ctx, target);
   assertNotAnonymised(target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   const diff = diffFields(target, data, allowed);
@@ -674,6 +704,8 @@ export interface PrimaryOwnerResult {
 export async function transferPrimaryOwner(tx: Tx, ctx: AuthContext, input: unknown): Promise<PrimaryOwnerResult> {
   assertMayEver(ctx, "org.transfer_primary_owner");
   requireHuman(ctx, "org.transfer_primary_owner");
+  // Accounts: the demo's Owner persona stays its primary owner.
+  assertNotDemo(ctx, "demo_accounts");
   const data = parseInput(TransferPrimaryOwnerInput, input);
   const { target, primaryOwnerId } = await loadTarget(tx, ctx, data.userId);
   assertCan(ctx, "org.transfer_primary_owner", userPermissionRef(target, { primaryOwnerId }));
@@ -730,6 +762,7 @@ export async function deactivateUser(tx: Tx, ctx: AuthContext, input: unknown): 
   const data = parseInput(DeactivateUserInput, input);
   const { target, primaryOwnerId } = await loadTarget(tx, ctx, data.userId);
   assertCan(ctx, "user.deactivate", userPermissionRef(target, { primaryOwnerId }));
+  assertNotDemoPersona(ctx, target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (!target.isActive) throw ruleViolation(`${target.name} is already deactivated`);
   const wasAdmin = target.role === "photographer" && target.isAdmin;
@@ -861,6 +894,8 @@ export interface ResetPasswordResult {
  */
 export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, secret?: PreparedSecret): Promise<ResetPasswordResult> {
   assertMayEver(ctx, "user.reset_password");
+  // Accounts: nobody's password changes in the demo studio (the personas share one).
+  assertNotDemo(ctx, "reset_password");
   const actorId = requireHuman(ctx, "user.reset_password");
   const data = parseInput(UserIdInput, input);
   const { target, primaryOwnerId } = await loadTarget(tx, ctx, data.userId);
@@ -876,7 +911,7 @@ export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, se
   const superseded = pendingInvite ? await consumeLiveTokens(tx, target.id, "invite", now) : 0;
   await tx
     .update(users)
-    .set({ passwordHash, sessionVersion: nextSession, updatedAt: now, version: target.version + 1, ...(pendingInvite ? { acceptedAt: now } : {}) })
+    .set({ passwordHash, hasPassword: true, sessionVersion: nextSession, updatedAt: now, version: target.version + 1, ...(pendingInvite ? { acceptedAt: now } : {}) })
     .where(eq(users.id, target.id));
   await recordEvent(tx, ctx, {
     entityType: "user",
@@ -899,6 +934,7 @@ export async function resetPassword(tx: Tx, ctx: AuthContext, input: unknown, se
 /** Async convenience: hashes outside the transaction, then runs `resetPassword`. */
 export async function resetPasswordWithTempPassword(ctx: AuthContext, input: unknown, db?: Db): Promise<ResetPasswordResult> {
   assertMayEver(ctx, "user.reset_password");
+  assertNotDemo(ctx, "reset_password");
   const secret = await prepareTempPassword();
   return withTx((tx) => resetPassword(tx, ctx, input, secret), { db });
 }
@@ -995,6 +1031,7 @@ export async function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): P
   const { target, primaryOwnerId } = await loadTarget(tx, ctx, data.userId);
   if (target.isActive) throw ruleViolation("Deactivate this user before anonymising them");
   assertCan(ctx, "user.anonymise", userPermissionRef(target, { primaryOwnerId }));
+  assertNotDemoPersona(ctx, target);
   checkVersion(target, data.expectedVersion, safeUser(target));
   if (target.anonymisedAt) throw ruleViolation("This user is already anonymised");
   const now = ctx.now();
@@ -1006,6 +1043,10 @@ export async function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): P
         email: `anon-${target.id}@invalid`,
         // Not a bcrypt hash: verifyPassword() returns false for it, so nobody can log in.
         passwordHash: `!anonymised!${newId()}${newId()}`,
+        // Accounts: no way in at all — no password, no Google account (PII too).
+        hasPassword: false,
+        googleSub: null,
+        googleEmail: null,
         avatarColour: ANONYMISED_AVATAR,
         title: null,
         anonymisedAt: now,
@@ -1016,6 +1057,7 @@ export async function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): P
       .where(eq(users.id, target.id))
       .returning(),
   );
+  const linksClosed = await closeLinksOnAnonymise(tx, target.id, now);
   await recordEvent(tx, ctx, {
     entityType: "user",
     entityId: target.id,
@@ -1023,9 +1065,35 @@ export async function anonymiseUser(tx: Tx, ctx: AuthContext, input: unknown): P
     action: "anonymised",
     previousValue: { anonymisedAt: null },
     newValue: { anonymisedAt: now, name: ANONYMISED_NAME },
-    metadata: { targetUserId: target.id },
+    metadata: { targetUserId: target.id, ...(linksClosed > 0 ? { linksClosed } : {}) },
   });
   return safeUser(row);
+}
+
+/**
+ * DATA-02: anonymising leaves no way in and no address behind in the link ledger. Every link of the person that still
+ * works (invite, reset, confirm, email change) is used up (fill-once), and the address an email link was sent to
+ * (`auth_tokens.target_email`, e.g. a private address they were moving to) is scrubbed to NULL — the one change the
+ * fill-once guard allows on a used row (migration 0008). Rows are never deleted. Returns how many links still worked.
+ * (The append-only history keeps its frozen sentences, as for every other event — ARCHITECTURE.md §5.)
+ */
+async function closeLinksOnAnonymise(tx: Tx, userId: string, now: string): Promise<number> {
+  const closed = await tx
+    .update(authTokens)
+    .set({ usedAt: now })
+    .where(and(eq(authTokens.userId, userId), isNull(authTokens.usedAt), isNull(authTokens.targetEmail), gt(authTokens.expiresAt, now)))
+    .returning({ id: authTokens.id });
+  const live = await tx
+    .select({ id: authTokens.id })
+    .from(authTokens)
+    .where(and(eq(authTokens.userId, userId), isNull(authTokens.usedAt), isNotNull(authTokens.targetEmail), gt(authTokens.expiresAt, now)));
+  // Only rows that still carry an address are touched here (an older database without 0008 never sees this UPDATE
+  // for someone who has none).
+  await tx
+    .update(authTokens)
+    .set({ usedAt: sql`coalesce(${authTokens.usedAt}, ${now})`, targetEmail: null })
+    .where(and(eq(authTokens.userId, userId), isNotNull(authTokens.targetEmail)));
+  return closed.length + live.length;
 }
 
 /* ------------------------------------------------------------------ */

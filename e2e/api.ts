@@ -301,6 +301,8 @@ export interface SignUpResponse {
   slug: string;
   user: { id: string; name: string; email: string; role: "photographer" };
   redirectTo: string;
+  /** "Confirm your email" (src/server/services/emailVerification.ts); `devLink` only outside production without a mail provider. */
+  emailConfirmation?: { sent: boolean; reason: string | null; devLink?: string; expiresAt?: string };
 }
 /** `GET /api/settings/onboarding` (src/server/queries/onboarding.ts). */
 export interface OnboardingState {

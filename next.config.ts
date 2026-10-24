@@ -49,6 +49,8 @@ export const LEGACY_FALLBACK_REDIRECTS: readonly { source: string; destination: 
 ];
 
 const nextConfig: NextConfig = {
+  // Do not advertise the framework (review finding DEMO-06).
+  poweredByHeader: false,
   // Authenticated, per-request data on every page: keep the classic dynamic
   // rendering model (no Cache Components / PPR) so DB reads are always fresh.
   cacheComponents: false,

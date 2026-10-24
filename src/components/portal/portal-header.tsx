@@ -18,7 +18,7 @@ export interface PortalHeaderProps {
 
 const WORK = { href: "/portal", label: "Shared work", exact: false } as const;
 
-/** Portal chrome: brand + studio/client, Shared work, bell, account menu (Account, Log out). No sidebar, no search. */
+/** Portal chrome: brand + studio/client, Shared work, bell, account menu (My account, Log out). No sidebar, no search. */
 export function PortalHeader({ studioName, clientName, user, unreadCount }: PortalHeaderProps) {
   const pathname = usePathname() ?? "/portal";
   const workActive =
@@ -97,7 +97,7 @@ export function PortalHeader({ studioName, clientName, user, unreadCount }: Port
                 Notifications
               </DropdownMenuItem>
               <DropdownMenuItem href="/portal/account" icon={<CircleUser aria-hidden="true" />}>
-                Profile & password
+                My account
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <form action={LOGOUT_ACTION} method="post" className="contents">

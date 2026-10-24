@@ -92,3 +92,13 @@ export function inviteUrl(token: string, req?: Request | null): string {
 export function passwordResetUrl(token: string, req?: Request | null): string {
   return `${appOrigin(req)}/reset-password?token=${encodeURIComponent(token)}`;
 }
+
+/** `${origin}/verify-email?token=…` — "Confirm your email" (confirmed on a button press, never on GET). */
+export function verifyEmailUrl(token: string, req?: Request | null): string {
+  return `${appOrigin(req)}/verify-email?token=${encodeURIComponent(token)}`;
+}
+
+/** `${origin}/change-email?token=…` — "Confirm your new email" (the link goes to the NEW address). */
+export function confirmEmailChangeUrl(token: string, req?: Request | null): string {
+  return `${appOrigin(req)}/change-email?token=${encodeURIComponent(token)}`;
+}

@@ -2,15 +2,19 @@ import Link from "next/link";
 import { BrandMark } from "@/components/shell/brand-mark";
 import { Container } from "./section";
 
-const LINKS: readonly { href: string; label: string }[] = [
+const PAGE_LINKS: readonly { href: string; label: string }[] = [
   { href: "/#how-it-works", label: "How it works" },
   { href: "/#who-its-for", label: "Who it's for" },
   { href: "/#faq", label: "Questions" },
+];
+const VISITOR_LINKS: readonly { href: string; label: string }[] = [
   { href: "/login", label: "Sign in" },
   { href: "/signup", label: "Create your studio" },
 ];
 
-export function PublicFooter() {
+/** `home` = the signed-in person's own home and its words (UX-21): it replaces "Sign in" / "Create your studio". */
+export function PublicFooter({ home = null }: { home?: { href: string; label: string } | null } = {}) {
+  const links = [...PAGE_LINKS, ...(home ? [home] : VISITOR_LINKS)];
   return (
     <footer className="border-t border-border bg-surface-sunken">
       <Container className="flex flex-col gap-6 py-10 sm:flex-row sm:items-start sm:justify-between">
@@ -23,7 +27,7 @@ export function PublicFooter() {
         </div>
         <nav aria-label="Footer">
           <ul className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
-            {LINKS.map((link) => (
+            {links.map((link) => (
               <li key={link.href}>
                 <Link href={link.href} className="rounded-sm text-ink-secondary hover:text-ink focus-ring">
                   {link.label}

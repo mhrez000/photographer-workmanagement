@@ -23,7 +23,6 @@ vi.mock("next/headers", () => ({
 vi.resetModules();
 const { setDbOverride } = await import("@/db/index");
 const { closeTestDbs, contextFor, fakeClock, makeTestDb, seedMinimalOrg } = await import("@/db/test-db");
-const { clearAllRateLimits } = await import("@/server/auth/rate-limit");
 const { requireAnyContext, requireContext, requirePortalContext, verifySessionToken } = await import("@/server/auth/session");
 const { ValidationError } = await import("@/server/errors");
 const { withTx } = await import("./_shared");
@@ -40,7 +39,6 @@ const NEW_PASSWORD = "BrandNewPass42!";
 
 beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  clearAllRateLimits();
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
   setDbOverride(db);
@@ -57,7 +55,7 @@ describe("signUpAndSignIn", () => {
     const result = await signUpAndSignIn(GOOD, { db, requestId: "req-cookie" });
     const token = jar.get(SESSION_COOKIE_NAME);
     expect(token).toBeTruthy();
-    expect(await verifySessionToken(token)).toEqual({ sub: result.userId, sv: 1, k: "staff", r: "photographer" });
+    expect(await verifySessionToken(token)).toEqual({ sub: result.userId, sv: 1, k: "staff", r: "photographer", at: expect.any(Number) });
     await expect(requireContext()).resolves.toMatchObject({ userId: result.userId, organisationId: result.organisationId, isAdmin: true, isPrimaryOwner: true });
   });
 
@@ -72,7 +70,7 @@ describe("acceptInviteAndSignIn", () => {
     const ownerCtx = await contextFor(db, ids.users.owner);
     const invited = await withTx((tx) => inviteUser(tx, ownerCtx, { email: "sam@studio.test", name: "Sam", role: "editor" }), { db });
     const result = await acceptInviteAndSignIn({ token: invited.invite?.token, password: NEW_PASSWORD }, { db });
-    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: result.userId, sv: 2, k: "staff", r: "editor" });
+    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: result.userId, sv: 2, k: "staff", r: "editor", at: expect.any(Number) });
     await expect(requireContext()).resolves.toMatchObject({ userId: result.userId, role: "editor" });
   });
 
@@ -80,7 +78,7 @@ describe("acceptInviteAndSignIn", () => {
     const ownerCtx = await contextFor(db, ids.users.owner);
     const invited = await withTx((tx) => inviteUser(tx, ownerCtx, { email: "harbour@client.test", name: "Harriet", role: "client", clientId: ids.clientId }), { db });
     const result = await acceptInviteAndSignIn({ token: invited.invite?.token, password: NEW_PASSWORD }, { db });
-    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: result.userId, sv: 2, k: "client", r: "client" });
+    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: result.userId, sv: 2, k: "client", r: "client", at: expect.any(Number) });
     await expect(requirePortalContext()).resolves.toMatchObject({ userId: result.userId, role: "client" });
     await expect(requireContext()).rejects.toThrow();
   });
@@ -98,7 +96,7 @@ describe("resetPasswordAndSignIn", () => {
 
     const result = await resetPasswordAndSignIn({ token, password: NEW_PASSWORD }, { db });
     expect(result.sessionVersion).toBe(2); // fixture users start at session_version 1
-    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: ids.users.editor1, sv: result.sessionVersion, k: "staff", r: "editor" });
+    expect(await verifySessionToken(jar.get(SESSION_COOKIE_NAME))).toEqual({ sub: ids.users.editor1, sv: result.sessionVersion, k: "staff", r: "editor", at: expect.any(Number) });
     await expect(requireAnyContext()).resolves.toMatchObject({ userId: ids.users.editor1 });
   });
 });

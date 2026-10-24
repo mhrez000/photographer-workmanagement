@@ -159,12 +159,12 @@ DIRECT_URL=postgresql://…pooler.supabase.com:5432/postgres     # session poole
 
 ## Deploying to Vercel
 
-Set these Vercel environment variables (Production, and Preview if previews should have a database):
+Set these Vercel environment variables (Production; Preview only if previews have a database of their OWN — there is one live database, and a preview must never migrate it):
 
 - `DATABASE_URL` — Supabase **transaction pooler** (port 6543); the app connects with `prepare: false`.
-- `DIRECT_URL` — Supabase **session pooler** (port 5432); `vercel-build` runs `drizzle-kit migrate` against it before `next build` (skipped when unset).
+- `DIRECT_URL` — Supabase **session pooler** (port 5432); `vercel-build` runs `drizzle-kit migrate` against it before `next build` — on **Production** deploys only (`VERCEL_ENV`; skipped when unset; a preview with its own database sets `MIGRATE_ON_BUILD=1`). Never edit a migration an environment has applied: fix forward with a new one.
 - `SESSION_SECRET` (≥ 32 chars, required), optional `CRON_SECRET`.
-- `APP_URL` — the public origin for invite / reset links (e.g. `https://studio.example.com`); `RESEND_API_KEY` + `EMAIL_FROM` to email them (otherwise they are shown on screen to copy); `TRUSTED_PROXY_COUNT=1` so the sign-up / reset rate limits see the real client IP behind Vercel's proxy. See [Getting started for a real studio](#getting-started-for-a-real-studio).
+- `APP_URL` — the public origin for invite / reset links (e.g. `https://studio.example.com`); `RESEND_API_KEY` + `EMAIL_FROM` to email them (otherwise they are shown on screen to copy); `TRUSTED_PROXY_COUNT=1` so the per-network rate limits see the real client IP behind Vercel's proxy (the server logs a warning while it is missing). See [Getting started for a real studio](#getting-started-for-a-real-studio).
 
 - **Overdue alerts on a schedule (optional):** set `CRON_SECRET` and point a scheduler at `GET /api/system/cron/sweep` with `Authorization: Bearer <CRON_SECRET>`.
 - **Region:** pick the Vercel region closest to your Supabase project (for Australia, Sydney `syd1`).

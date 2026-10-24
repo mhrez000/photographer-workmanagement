@@ -27,24 +27,30 @@ export interface ForgotPasswordFormProps {
   initialEmail?: string;
 }
 
-/** POST /api/auth/forgot-password: one field, one calm confirmation. */
+/**
+ * POST /api/auth/forgot-password: one field, one calm confirmation. "Send it again" really sends again (UX-18: same
+ * address, same 5-per-15-minutes limit); "Use a different email" goes back to the form.
+ */
 export function ForgotPasswordForm({ initialEmail = "" }: ForgotPasswordFormProps) {
   const [email, setEmail] = React.useState(initialEmail);
   const [error, setError] = React.useState<string | undefined>();
   const [formError, setFormError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
   const [sent, setSent] = React.useState<ForgotPasswordResult | null>(null);
+  const [sentAgain, setSentAgain] = React.useState(false);
 
-  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const send = async (): Promise<void> => {
     if (pending) return;
     setPending(true);
     setError(undefined);
     setFormError(null);
     try {
       const result = await api.post<ForgotPasswordResult>("/api/auth/forgot-password", { email });
+      setSentAgain(sent !== null);
       setSent(result);
     } catch (err) {
+      // A problem while re-sending is shown on the form, where it can be fixed.
+      setSent(null);
       if (err instanceof ApiError && err.status === 429) {
         setFormError(`Too many requests for that email. Try again in ${minutesLeft(retryAfterOf(err))}.`);
       } else if (err instanceof ApiError && err.code === "validation") {
@@ -59,12 +65,18 @@ export function ForgotPasswordForm({ initialEmail = "" }: ForgotPasswordFormProp
     }
   };
 
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void send();
+  };
+
   if (sent) {
     return (
       <div className="flex flex-col gap-5">
         <Card className="shadow-md">
           <CardContent className="flex flex-col gap-4 p-6 first:pt-6 last:pb-6">
             <FormAlert tone="success">
+              {sentAgain ? <span className="mb-1 block font-medium">Sent again.</span> : null}
               {RESET_SENT_MESSAGE}
               {/* Constant, whatever the address: a pending invitee has no password to reset, only a link to open. */}
               <span className="mt-1 block text-xs text-ink-muted">{INVITED_HINT}</span>
@@ -73,13 +85,24 @@ export function ForgotPasswordForm({ initialEmail = "" }: ForgotPasswordFormProp
               Check <span className="font-medium text-ink">{email.trim().toLowerCase()}</span>, including the junk folder. Didn’t get it?{" "}
               <button
                 type="button"
+                onClick={() => void send()}
+                disabled={pending}
+                className="font-medium text-accent-ink underline-offset-4 hover:underline focus-ring rounded-xs disabled:cursor-progress"
+                data-send-again=""
+              >
+                {pending ? "Sending…" : "Send it again"}
+              </button>{" "}
+              or{" "}
+              <button
+                type="button"
                 onClick={() => {
                   setSent(null);
+                  setSentAgain(false);
                   setFormError(null);
                 }}
                 className="font-medium text-accent-ink underline-offset-4 hover:underline focus-ring rounded-xs"
               >
-                Send it again
+                use a different email
               </button>
               .
             </p>

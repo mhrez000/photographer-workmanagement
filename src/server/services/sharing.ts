@@ -30,6 +30,7 @@ import type { AuthContext, Client, Job, JobLink, JobNote, JobPermissionRef, Proj
 import { ShareJobInput, type DeliveryInputValue } from "@/lib/validation/jobs";
 import { ShareLinkInput } from "@/lib/validation/links";
 import { SetClientPortalInput, ShareProjectInput } from "@/lib/validation/sharing";
+import { assertNotDemoPersonaClient } from "@/server/auth/demo";
 import { assertCan, can } from "@/server/auth/permissions";
 import { recordEvent } from "@/server/audit";
 import { ConflictError, ValidationError } from "@/server/errors";
@@ -326,6 +327,8 @@ export async function setClientPortal(tx: Tx, ctx: AuthContext, input: unknown):
   const client = await loadClientInOrg(tx, ctx, p.clientId);
   assertCan(ctx, "client.manage_portal", { organisationId: client.organisationId, createdByUserId: client.createdByUserId ?? undefined });
   assertVersion(client, p.expectedVersion);
+  // Demo studio: the Client persona's portal stays on (SEC-07) — switching it off would lock every visitor out of it.
+  if (p.portalEnabled === false && client.portalEnabled) await assertNotDemoPersonaClient(tx, ctx, client.id);
   const patch: Partial<Pick<Client, "portalEnabled" | "feedbackEnabled">> = {};
   if (p.portalEnabled !== undefined && p.portalEnabled !== client.portalEnabled) patch.portalEnabled = p.portalEnabled;
   if (p.feedbackEnabled !== undefined && p.feedbackEnabled !== client.feedbackEnabled) patch.feedbackEnabled = p.feedbackEnabled;

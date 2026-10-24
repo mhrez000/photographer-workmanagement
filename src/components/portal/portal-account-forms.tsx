@@ -9,8 +9,11 @@ import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api-client";
 import type { NotificationType } from "@/lib/constants";
 
-/** Display name of the portal account (PATCH /api/portal/me). */
-export function PortalNameForm({ name, email, version }: { name: string; email: string; version: number }) {
+/**
+ * Display name of the portal account (PATCH /api/portal/me). The email lives in its own card further down (UX-12: no
+ * second, greyed-out copy of it here).
+ */
+export function PortalNameForm({ name, version }: { name: string; version: number }) {
   const run = useMutationRunner();
   const [value, setValue] = React.useState(name);
   const [error, setError] = React.useState<string | null>(null);
@@ -30,9 +33,6 @@ export function PortalNameForm({ name, email, version }: { name: string; email: 
     <form onSubmit={submit} className="flex flex-col gap-4">
       <FormField label="Your name" error={error}>
         <Input value={value} onChange={(e) => setValue(e.target.value)} maxLength={120} autoComplete="name" />
-      </FormField>
-      <FormField label="Email" description="Ask your studio if this needs to change.">
-        <Input value={email} readOnly disabled />
       </FormField>
       <div>
         <Button type="submit" loading={pending} disabled={!changed}>

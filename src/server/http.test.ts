@@ -11,6 +11,22 @@ describe("trustedProxyCount", () => {
     expect(trustedProxyCount({ TRUSTED_PROXY_COUNT: "-1" })).toBe(0);
     expect(trustedProxyCount({ TRUSTED_PROXY_COUNT: "2" })).toBe(2);
   });
+
+  it("SEC-10: on Vercel in production without it, says so once (per-network limits can't see visitors)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      trustedProxyCount({ NODE_ENV: "development" });
+      trustedProxyCount({ NODE_ENV: "production" });
+      trustedProxyCount({ NODE_ENV: "production", VERCEL: "1", TRUSTED_PROXY_COUNT: "1" });
+      expect(warn).not.toHaveBeenCalled();
+      trustedProxyCount({ NODE_ENV: "production", VERCEL: "1" });
+      trustedProxyCount({ NODE_ENV: "production", VERCEL: "1" });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/TRUSTED_PROXY_COUNT is not set on Vercel/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("clientIp", () => {

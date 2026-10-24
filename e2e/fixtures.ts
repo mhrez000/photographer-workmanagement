@@ -125,9 +125,29 @@ function hydrateOnNavigate(page: Page): void {
   };
 }
 
+/**
+ * `next dev` draws its dev-tools badge (`<nextjs-portal>`) in the bottom-left corner; when it has something to say
+ * (an issue, or a "security insight" about the Next.js version) it grows into a pill that sits over the sidebar's
+ * Collapse button and swallows clicks there. It is not part of the product, so the specs hide it — through an adopted
+ * stylesheet, which touches no DOM node (no hydration mismatch). Set E2E_SHOW_DEV_OVERLAY=1 to keep it.
+ */
+export async function hideDevOverlay(context: BrowserContext): Promise<void> {
+  if (process.env.E2E_SHOW_DEV_OVERLAY) return;
+  await context.addInitScript(() => {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync("nextjs-portal { display: none !important; }");
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    } catch {
+      // Older engines without constructable stylesheets: leave the overlay alone.
+    }
+  });
+}
+
 /** Test-context setup shared by every browser context the fixtures create. */
 async function prepareContext(context: BrowserContext): Promise<void> {
   await muteHmr(context);
+  await hideDevOverlay(context);
   for (const p of context.pages()) hydrateOnNavigate(p);
   context.on("page", hydrateOnNavigate);
 }

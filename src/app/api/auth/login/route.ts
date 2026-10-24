@@ -6,7 +6,8 @@ import { methodNotAllowed } from "@/app/api/_lib/route";
 /**
  * POST /api/auth/login `{ email, password, next? }` → `{ data: { user, redirectTo } }` + session cookie.
  * `redirectTo` is the persona's landing page (plan §3): owner / photographer `/home`, editor `/my-jobs`,
- * client `/portal` — never `/dashboard` (`loginRedirectTarget`).
+ * client `/portal` — never `/dashboard` (`loginRedirectTarget`). Too many failures (5 / 15 min per email + network,
+ * 20 per email) → 429 "Too many sign-in attempts. Try again in N minutes." with `retry-after`.
  */
 export const POST = handle(async (req) => {
   const body = await bodyOrNull(req);

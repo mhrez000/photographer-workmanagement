@@ -2,7 +2,10 @@
  * DB-level integrity guards — thin view over the custom migrations
  * `drizzle/0001_guards.sql`, `drizzle/0003_roles_v2_data.sql` (roles v2:
  * users_keep_admin, users_client_link, org_primary_owner) and
- * `drizzle/0005_front_door.sql` (auth_tokens: at_no_delete, at_fill_once), which are the
+ * `drizzle/0005_front_door.sql` (auth_tokens: at_no_delete, at_fill_once), `drizzle/0007_accounts_data.sql`
+ * (accounts: a new body for at_fill_once — target_email is immutable too; no new trigger) and
+ * `drizzle/0008_accounts_hardening.sql` (at_fill_once again: a used link's target_email may be scrubbed to NULL when
+ * a person is anonymised; no new trigger), which are the
  * SINGLE source of truth (PL/pgSQL functions + triggers, applied by every
  * migrate: PGlite auto-migrate, makeTestDb(), `npm run db:migrate`,
  * `npm run db:migrate:remote`).
@@ -26,7 +29,7 @@ import { sql } from "drizzle-orm";
 import { execRows, type DbLike } from "./index";
 
 /** Custom migrations that install guard triggers, in apply order. */
-export const GUARD_MIGRATION_FILES = ["0001_guards.sql", "0003_roles_v2_data.sql", "0005_front_door.sql"] as const;
+export const GUARD_MIGRATION_FILES = ["0001_guards.sql", "0003_roles_v2_data.sql", "0005_front_door.sql", "0007_accounts_data.sql", "0008_accounts_hardening.sql"] as const;
 /** @deprecated use GUARD_MIGRATION_FILES (roles v2 and the front door added further guards files). */
 export const GUARD_MIGRATION_FILE = GUARD_MIGRATION_FILES[0];
 

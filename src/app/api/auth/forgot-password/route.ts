@@ -6,7 +6,8 @@ import { requestPasswordReset } from "@/server/services/passwordReset";
 /**
  * POST /api/auth/forgot-password `{ email }` (public, CSRF, 5 / 15 min per email + IP → 429)
  * → `{ data: { ok: true, emailed, resetUrl? } }`. ALWAYS ok: whether the address has an account is never
- * revealed. `resetUrl` appears only in local development without an email provider.
+ * revealed (a person of the demo studio gets no link at all). `resetUrl` appears only in local development without
+ * an email provider. The 429 says how many minutes to wait ("Too many reset emails asked for. Try again in N minutes.").
  */
 export const POST = handle(async (req, _ctx, meta) => {
   const body = await bodyOrNull(req);

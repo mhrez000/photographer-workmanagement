@@ -18,9 +18,17 @@ async function signInThroughForm(page: Page, email: string, password: string) {
 
 const accountMenu = (page: Page, user: InvitedUser) => page.getByRole("button", { name: `Account menu for ${user.user.name}` });
 
-test("the login page offers the four demo accounts of the small studio", async ({ page }) => {
+test("the login page never shows demo emails or passwords; the demo panel (one button per persona) only where a demo studio exists", async ({ page }) => {
   await page.goto("/login");
-  for (const label of ["Owner", "Photographer", "Editor", "Client"]) await expect(page.getByText(label, { exact: true }).first(), label).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(/sign in/i);
+  const text = await page.locator("body").innerText();
+  expect(text).not.toMatch(/@studio\.test|Password123!/);
+  await expect(page.locator("[data-demo-accounts]")).toHaveCount(0);
+  const panel = page.locator("[data-demo-panel]");
+  // The e2e studio is not a demo studio (SEED_DEMO=off): no panel. A demo deployment shows the four personas.
+  if ((await panel.count()) > 0) {
+    for (const label of ["Owner", "Photographer", "Editor", "Client"]) await expect(panel.getByRole("button", { name: new RegExp(`look around as ${label}`, "i") }), label).toBeVisible();
+  }
   await expect(page.getByText(/manager|team member|workloads/i)).toHaveCount(0);
 });
 
@@ -80,7 +88,9 @@ test("logout ends the session: protected pages redirect to /login afterwards", a
   await accountMenu(page, user).click();
   await page.getByRole("menuitem", { name: "Log out" }).click();
 
-  await expect(page).toHaveURL(/\/login/);
+  await expect(page).toHaveURL(/\/login\?logged_out=1/);
+  // UX-19: a quiet line says so.
+  await expect(page.getByText("You’re logged out.")).toBeVisible();
   expect((await page.context().cookies()).find((c) => c.name === "pwm_session" && c.value)).toBeUndefined();
 
   await page.goto("/my-jobs");
@@ -105,7 +115,8 @@ test("a deactivated user's live session gets 401 from the API and is bounced fro
   // A browser holding the old cookie is sent to /login?expired=1.
   await page.goto("/my-jobs");
   await expect(page).toHaveURL(/\/login\?expired=1/);
-  await expect(page.getByText(/your session ended/i)).toBeVisible();
+  // UX-05: plain words, no "session".
+  await expect(page.getByText("You’ve been logged out on this device. Sign in again to carry on.")).toBeVisible();
 
   // And they cannot sign in again.
   const relogin = await page.request.post("/api/auth/login", {

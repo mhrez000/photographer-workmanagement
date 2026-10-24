@@ -1,27 +1,27 @@
 import * as React from "react";
-import { redirect } from "next/navigation";
+import { homeLabelFor } from "@/components/auth/auth-helpers";
 import { PublicFooter, PublicHeader } from "@/components/marketing";
-import { getOptionalContext } from "@/server/auth/session";
+import { getViewer } from "@/server/auth/session";
 import { homePathFor } from "@/server/page";
 
 /**
  * Public front door (the landing page). No app shell: brand, "Sign in", "Create your studio".
  *
- * A signed-in person never sees it: they go to their landing page (docs/SIMPLIFICATION-PLAN.md §3:
- * clients → /portal, editors → /my-jobs, photographers → /home). The redirect lives in the LAYOUT so it
- * runs above the segment's loading boundary and the response is a real 307, not a streamed one.
+ * Accounts (docs/ACCOUNTS.md §1): a signed-in person sees the landing page too — no redirect — and the header swaps
+ * "Sign in" / "Create your studio" for one "Go to your studio" button (their landing page: clients /portal, editors
+ * /my-jobs, photographers /home), so the way back is always obvious.
  */
 export default async function PublicLayout({ children }: { children: React.ReactNode }) {
-  const ctx = await getOptionalContext();
-  if (ctx) redirect(homePathFor(ctx));
+  const viewer = await getViewer();
+  const account = viewer ? { name: viewer.name, homeHref: homePathFor({ role: viewer.role }), homeLabel: homeLabelFor(viewer.role) } : null;
 
   return (
     <div className="flex min-h-dvh flex-1 flex-col bg-canvas">
-      <PublicHeader />
+      <PublicHeader account={account} />
       <main id="main" className="flex-1">
         {children}
       </main>
-      <PublicFooter />
+      <PublicFooter home={account ? { href: account.homeHref, label: account.homeLabel } : null} />
     </div>
   );
 }

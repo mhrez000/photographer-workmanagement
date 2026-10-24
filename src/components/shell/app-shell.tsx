@@ -35,6 +35,11 @@ export interface AppShellProps {
   navGates: NavGates;
   /** Jobs waiting for the viewer to check (the red count on the phone Home tab). */
   toCheckCount?: number;
+  /**
+   * Accounts (docs/ACCOUNTS-PLAN.md §6): the quiet banner strip above the page content (`<AccountBanners />` —
+   * the demo studio, "Please confirm your email"). Rendered as given; null renders nothing.
+   */
+  banner?: React.ReactNode;
 }
 
 /**
@@ -55,6 +60,7 @@ export function AppShell({
   toasterPosition = "bottom-right",
   navGates,
   toCheckCount = 0,
+  banner = null,
 }: AppShellProps) {
   const pathname = usePathname();
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
@@ -149,6 +155,7 @@ export function AppShell({
           menuButton={tabs.length === 0}
         />
         <main id="main" tabIndex={-1} className="flex flex-1 flex-col overflow-x-clip pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom,0px))] outline-none lg:pb-0">
+          {banner}
           {children}
         </main>
       </div>
