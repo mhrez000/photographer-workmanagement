@@ -6,7 +6,7 @@ import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { SectionCard } from "@/components/common/section-card";
 import { RelativeTime } from "@/components/jobs/relative-time";
 import { useMutationRunner } from "@/components/jobs/mutation";
-import { InviteLinkPanel } from "@/components/settings/invite-link-panel";
+import { InviteLinkPanel, type InviteNotSentReason } from "@/components/settings/invite-link-panel";
 import { TempPasswordPanel } from "@/components/settings/temp-password-panel";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/dates";
+import { isDemoAccountEmail } from "@/lib/constants";
 import type { ClientPortalAccess, ClientPortalUser } from "@/lib/sharing";
 import { ClientInviteDialog } from "./client-invite-dialog";
 
@@ -30,6 +31,11 @@ export interface ClientOnlineAccessProps {
   timeZone: string;
   /** Pending invites by user id (people with `accepted_at` null); anyone missing has joined. */
   invites?: Record<string, ClientUserInvite>;
+  /**
+   * The demo studio (docs/ACCOUNTS.md §7): invites and password resets are refused there (403), so those controls are
+   * not offered and the Invite button says why.
+   */
+  demo?: boolean;
 }
 
 type PendingAction = { kind: "deactivate" | "reset" | "resend" | "revoke"; user: ClientPortalUser } | null;
@@ -38,6 +44,8 @@ interface ResendResult {
   inviteUrl: string;
   emailed: boolean;
   expiresAt: string;
+  /** Why it was not emailed ("unconfirmed_sender": the owner's own email is not confirmed yet). */
+  notSentReason?: InviteNotSentReason | null;
 }
 
 /**
@@ -48,13 +56,16 @@ interface ResendResult {
  * Invites (front door): the default is a LINK; a pending person shows "Invite pending · expires …" with
  * Send a new link / Revoke invite in their menu. Copying never invalidates a link; only a new one does.
  */
-export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} }: ClientOnlineAccessProps) {
+export function ClientOnlineAccess({ access, studioName, timeZone, invites = {}, demo = false }: ClientOnlineAccessProps) {
   const run = useMutationRunner();
   const [saving, setSaving] = React.useState<"portal" | "feedback" | null>(null);
   const [action, setAction] = React.useState<PendingAction>(null);
   const [tempPassword, setTempPassword] = React.useState<{ user: ClientPortalUser; password: string } | null>(null);
   const [freshLink, setFreshLink] = React.useState<{ user: ClientPortalUser; link: ResendResult } | null>(null);
   const activeUsers = access.users.filter((u) => u.isActive);
+  // The demo's Client persona belongs to this client (SEC-07 / DEMO-01): its online access can't be switched off and
+  // its people can't be removed — the services refuse both (403), so the screen doesn't offer them.
+  const demoPersonaClient = demo && access.users.some((u) => isDemoAccountEmail(u.email));
 
   async function setSwitch(which: "portal" | "feedback", value: boolean) {
     setSaving(which);
@@ -64,7 +75,7 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
         which === "portal"
           ? value
             ? `${access.clientName} can now see their work online`
-            : `${access.clientName} can no longer see their work online — their people are signed out`
+            : `${access.clientName} can no longer see their work online — their people are logged out`
           : value
             ? `${access.clientName} can leave feedback`
             : "Feedback turned off",
@@ -99,13 +110,13 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
   const confirmCopy: Record<NonNullable<PendingAction>["kind"], { title: (n: string) => string; description: string; confirm: string; destructive: boolean }> = {
     deactivate: {
       title: (n) => `Remove ${n}'s access?`,
-      description: "They are signed out and can't sign in until you give access back. Their feedback stays on the jobs.",
+      description: "They are logged out and can't sign in until you give access back. Their feedback stays on the jobs.",
       confirm: "Remove access",
       destructive: true,
     },
     reset: {
       title: (n) => `Reset ${n}'s password?`,
-      description: "They are signed out everywhere. You'll get a temporary password to send them.",
+      description: "They are logged out everywhere. You'll get a temporary password to send them.",
       confirm: "Reset password",
       destructive: false,
     },
@@ -145,14 +156,17 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
         <div className="flex flex-col gap-3">
           <Switch
             checked={access.portalEnabled}
-            disabled={saving !== null || access.archived}
+            disabled={saving !== null || access.archived || (demoPersonaClient && access.portalEnabled)}
             onCheckedChange={(v) => void setSwitch("portal", v)}
             label="Client can see their work online"
             description={
-              access.portalEnabled
-                ? `Showing ${access.sharedJobCount} ${access.sharedJobCount === 1 ? "job" : "jobs"}. You choose what to share when you approve a job.`
-                : "Off: nothing is shared, and nobody from this client can sign in."
+              demoPersonaClient && access.portalEnabled
+                ? "Stays on in the demo studio: it is how visitors look around as the client."
+                : access.portalEnabled
+                  ? `Showing ${access.sharedJobCount} ${access.sharedJobCount === 1 ? "job" : "jobs"}. You choose what to share when you approve a job.`
+                  : "Off: nothing is shared, and nobody from this client can sign in."
             }
+            data-demo-locked={demoPersonaClient ? "" : undefined}
           />
           <Switch
             checked={access.feedbackEnabled}
@@ -168,15 +182,23 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
             <h3 className="text-sm font-semibold text-ink">
               Who can sign in <span className="font-normal text-ink-muted">({activeUsers.length})</span>
             </h3>
-            <ClientInviteDialog clientId={access.clientId} clientName={access.clientName} studioName={studioName} timeZone={timeZone} disabled={!access.portalEnabled || access.archived} />
+            <ClientInviteDialog clientId={access.clientId} clientName={access.clientName} studioName={studioName} timeZone={timeZone} disabled={demo || !access.portalEnabled || access.archived} />
           </div>
-          {!access.portalEnabled && !access.archived ? <p className="text-xs text-ink-muted">Turn on online access first, then invite someone.</p> : null}
+          {demo ? (
+            <p className="text-xs text-ink-muted" data-demo-invites-off="">
+              Invites are turned off in the demo studio.
+            </p>
+          ) : !access.portalEnabled && !access.archived ? (
+            <p className="text-xs text-ink-muted">Turn on online access first, then invite someone.</p>
+          ) : null}
           {access.users.length === 0 ? (
             <p className="rounded-md border border-dashed border-border-strong px-3 py-4 text-center text-sm text-ink-muted">Nobody from {access.clientName} has a login yet.</p>
           ) : (
             <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
               {access.users.map((u) => {
                 const invite = u.isActive ? invites[u.id] : undefined;
+                // DEMO-03: the demo accounts can't be changed (403), so their row offers nothing that would fail.
+                const persona = demo && isDemoAccountEmail(u.email);
                 return (
                   <li key={u.id} className="flex items-center gap-3 px-3 py-2.5">
                     <Avatar name={u.name} size="sm" />
@@ -212,39 +234,47 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
                         )}
                       </p>
                     </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger variant="ghost" size="icon" aria-label={`Actions for ${u.name}`}>
-                        <MoreHorizontal aria-hidden="true" />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" aria-label={`Actions for ${u.name}`}>
-                        {u.isActive ? (
-                          <>
-                            {invite ? (
-                              <>
-                                <DropdownMenuItem icon={<Send aria-hidden="true" />} onSelect={() => setAction({ kind: "resend", user: u })}>
-                                  Send a new link
-                                </DropdownMenuItem>
-                                {invite.live ? (
-                                  <DropdownMenuItem icon={<Ban aria-hidden="true" />} onSelect={() => setAction({ kind: "revoke", user: u })}>
-                                    Revoke invite
+                    {persona ? (
+                      <Badge size="sm" variant="outline" data-demo-persona-row="">
+                        Demo account
+                      </Badge>
+                    ) : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger variant="ghost" size="icon" aria-label={`Actions for ${u.name}`}>
+                          <MoreHorizontal aria-hidden="true" />
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" aria-label={`Actions for ${u.name}`}>
+                          {u.isActive ? (
+                            <>
+                              {invite && !demo ? (
+                                <>
+                                  <DropdownMenuItem icon={<Send aria-hidden="true" />} onSelect={() => setAction({ kind: "resend", user: u })}>
+                                    Send a new link
                                   </DropdownMenuItem>
-                                ) : null}
-                              </>
-                            ) : null}
-                            <DropdownMenuItem icon={<KeyRound aria-hidden="true" />} onSelect={() => setAction({ kind: "reset", user: u })}>
-                              {invite ? "Set a temporary password" : "Reset password"}
+                                  {invite.live ? (
+                                    <DropdownMenuItem icon={<Ban aria-hidden="true" />} onSelect={() => setAction({ kind: "revoke", user: u })}>
+                                      Revoke invite
+                                    </DropdownMenuItem>
+                                  ) : null}
+                                </>
+                              ) : null}
+                              {demo ? null : (
+                                <DropdownMenuItem icon={<KeyRound aria-hidden="true" />} onSelect={() => setAction({ kind: "reset", user: u })}>
+                                  {invite ? "Set a temporary password" : "Reset password"}
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem destructive icon={<UserX aria-hidden="true" />} onSelect={() => setAction({ kind: "deactivate", user: u })}>
+                                Remove access
+                              </DropdownMenuItem>
+                            </>
+                          ) : (
+                            <DropdownMenuItem icon={<UserCheck aria-hidden="true" />} onSelect={() => void reactivate(u)}>
+                              Give access back
                             </DropdownMenuItem>
-                            <DropdownMenuItem destructive icon={<UserX aria-hidden="true" />} onSelect={() => setAction({ kind: "deactivate", user: u })}>
-                              Remove access
-                            </DropdownMenuItem>
-                          </>
-                        ) : (
-                          <DropdownMenuItem icon={<UserCheck aria-hidden="true" />} onSelect={() => void reactivate(u)}>
-                            Give access back
-                          </DropdownMenuItem>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </li>
                 );
               })}
@@ -299,6 +329,7 @@ export function ClientOnlineAccess({ access, studioName, timeZone, invites = {} 
               email={freshLink.user.email}
               inviteUrl={freshLink.link.inviteUrl}
               emailed={freshLink.link.emailed}
+              notSentReason={freshLink.link.notSentReason}
               expiresAt={freshLink.link.expiresAt}
               timeZone={timeZone}
             />

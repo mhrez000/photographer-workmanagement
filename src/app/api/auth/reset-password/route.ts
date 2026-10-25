@@ -6,7 +6,8 @@ import { resetPasswordAndSignIn } from "@/server/services/passwordReset";
 /**
  * POST /api/auth/reset-password `{ token, password }` (public, CSRF) → `{ data: { ok: true, redirectTo } }` +
  * session cookie (every other session of the account is revoked). An unknown / expired / used link → 400
- * `validation` "This reset link is no longer valid".
+ * `validation` "This reset link is no longer valid" (also for a person of the demo studio). Dead links are capped per
+ * known client IP (10 / 15 min → 429 in plain words, checked before the password is hashed).
  */
 export const POST = handle(async (req, _ctx, meta) => {
   const body = await bodyOrNull(req);

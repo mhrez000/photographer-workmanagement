@@ -368,11 +368,12 @@ export function statusRef(row: Pick<WorkflowStatus, "id" | "key" | "name" | "cat
 }
 
 /** A user row without secrets (password hash, session version). */
-export type SafeUser = Omit<User, "passwordHash" | "sessionVersion">;
+/** A user row without secrets or sign-in identifiers (accounts: the Google id and address stay server-side). */
+export type SafeUser = Omit<User, "passwordHash" | "sessionVersion" | "googleSub" | "googleEmail">;
 
 export function safeUser(row: User): SafeUser {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { passwordHash, sessionVersion, ...rest } = row;
+  const { passwordHash, sessionVersion, googleSub, googleEmail, ...rest } = row;
   return rest;
 }
 

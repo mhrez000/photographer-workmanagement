@@ -47,12 +47,25 @@ export function activeSettingsTab(pathname: string, tabs: readonly SettingsTab[]
 export function SettingsTabs({ isAdmin }: { isAdmin: boolean }) {
   const pathname = usePathname();
   const tabs = React.useMemo(() => settingsTabsFor(isAdmin), [isAdmin]);
-  if (isAdvancedRoute(pathname) || tabs.length < 2) return null;
+  const navRef = React.useRef<HTMLElement>(null);
   const active = activeSettingsTab(pathname, tabs);
+
+  // UX-17: on a phone the strip scrolls sideways; the page you are on is always in view, never cut off ("My a…").
+  React.useEffect(() => {
+    const strip = navRef.current;
+    const current = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!strip || !current) return;
+    const left = current.offsetLeft - strip.offsetLeft;
+    if (left < strip.scrollLeft || left + current.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = Math.max(0, left - (strip.clientWidth - current.offsetWidth) / 2);
+    }
+  }, [active]);
+
+  if (isAdvancedRoute(pathname) || tabs.length < 2) return null;
 
   return (
     <div className="border-b border-border bg-canvas">
-      <nav aria-label="Settings" className="mx-auto flex w-full max-w-[1440px] gap-1 overflow-x-auto px-4 scrollbar-none sm:px-6 lg:px-8" data-settings-tabs="">
+      <nav ref={navRef} aria-label="Settings" className="mx-auto flex w-full max-w-[1440px] gap-1 overflow-x-auto px-4 scrollbar-none sm:px-6 lg:px-8" data-settings-tabs="">
         {tabs.map((t) => {
           const Icon = t.icon;
           const isActive = t.href === active;

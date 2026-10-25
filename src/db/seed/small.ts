@@ -36,7 +36,7 @@ import { inviteUser, type PreparedSecret } from "@/server/services/users";
 import { deliverJob, startJob } from "@/server/services/workflow";
 import type { Tx } from "@/server/services/_shared";
 import { NORTHLIGHT, OWNER as FULL_OWNER, SEED_PASSWORD as DEMO_PASSWORD, TURNAROUND_DAYS, type JobTypeName, type SeedUserDef } from "./catalog";
-import { bootstrapOrganisation, createSeedClient } from "./org";
+import { bootstrapOrganisation, createSeedClient, markDemoStudios, seedDemoEnabled } from "./org";
 import { inviteSeedClientUser, postSeedClientFeedback, setSeedClientPortal } from "./portal";
 import { DAY, HOUR, MINUTE, SeedRuntime } from "./runtime";
 import type { SeedOptions, SeedResult } from "./index";
@@ -392,6 +392,8 @@ export async function runSmallSeed(db: Db, options: SeedOptions = {}): Promise<S
     const finalSweeps = [await runSweep(db, nl), await runSweep(db, otherStudioId)];
     for (const r of finalSweeps) if (r.errors.length > 0) throw new Error(`final sweep errors: ${JSON.stringify(r.errors)}`);
     lap("final sweep");
+
+    if (options.demo ?? seedDemoEnabled()) await markDemoStudios(db, [nl, otherStudioId]);
 
     return { northlightId: nl, otherStudioId, stepsRun: rt.stepsRun, skipped: rt.skipped, durationsMs: durations, finalSweeps, notificationsRead };
   } finally {

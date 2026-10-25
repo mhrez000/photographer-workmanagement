@@ -1,9 +1,10 @@
 /**
- * Zod schemas for authentication inputs: login, change password, and the front door
- * (sign-up, forgot / reset password, invite acceptance).
+ * Zod schemas for authentication inputs: login, change password, the front door (sign-up, forgot / reset
+ * password, invite acceptance) and accounts (email confirmation, email change, set password, demo sign-in,
+ * Google sign-in — docs/ACCOUNTS-PLAN.md §2).
  */
 import { z } from "zod";
-import { SLUG_MAX_LENGTH, SLUG_PATTERN, STUDIO_NAME_MAX_LENGTH, STUDIO_NAME_MIN_LENGTH } from "@/lib/constants";
+import { DEMO_PERSONAS, GOOGLE_INTENTS, SLUG_MAX_LENGTH, SLUG_PATTERN, STUDIO_NAME_MAX_LENGTH, STUDIO_NAME_MIN_LENGTH } from "@/lib/constants";
 
 export const PASSWORD_MIN_LENGTH = 10;
 export const PASSWORD_MAX_LENGTH = 200;
@@ -69,6 +70,13 @@ export const StudioNameSchema = z
 /** organisations.slug (optional on sign-up; derived from the studio name when omitted). */
 export const SlugSchema = z.string().trim().toLowerCase().min(1).max(SLUG_MAX_LENGTH).regex(SLUG_PATTERN, "Use lower-case letters, digits and hyphens");
 
+/**
+ * The sign-up honeypot (`SIGNUP_HONEYPOT_FIELD` = "website"): a hidden field people never fill in. Accepted by the
+ * schema (so a bot gets the SAME generic 400 the service gives, not a tell-tale "unknown field"); any non-empty
+ * value is refused by the service.
+ */
+export const HoneypotSchema = z.string().max(2000).optional();
+
 /** POST /api/auth/signup — "Create your studio". */
 export const SignUpInput = z.strictObject({
   ownerName: z.string({ error: "Enter your name" }).trim().min(1, "Enter your name").max(120),
@@ -76,6 +84,7 @@ export const SignUpInput = z.strictObject({
   password: NewPasswordSchema,
   studioName: StudioNameSchema,
   timezone: TimezoneSchema.optional(),
+  website: HoneypotSchema,
   ...RequestMetaSchema,
 });
 export type SignUpInput = z.infer<typeof SignUpInput>;
@@ -136,3 +145,63 @@ export type InviteTokenInput = z.infer<typeof InviteTokenInput>;
 /** POST /api/users/:id/invite/resend · /revoke. */
 export const InviteTargetInput = z.strictObject({ userId: z.string().trim().min(1).max(64) });
 export type InviteTargetInput = z.infer<typeof InviteTargetInput>;
+
+/* ------------------------------------------------------------------ */
+/*  Accounts (docs/ACCOUNTS-PLAN.md §2)                                */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/auth/verify-email — the button on /verify-email. */
+export const VerifyEmailInput = z.strictObject({ token: TokenSchema, ...RequestMetaSchema });
+export type VerifyEmailInput = z.infer<typeof VerifyEmailInput>;
+
+/** POST /api/auth/email-change — new address + the current password. */
+export const ChangeEmailInput = z.strictObject({
+  newEmail: EmailSchema,
+  password: z.string({ error: "Enter your current password" }).min(1, "Enter your current password").max(PASSWORD_MAX_LENGTH),
+  ...RequestMetaSchema,
+});
+export type ChangeEmailInput = z.infer<typeof ChangeEmailInput>;
+
+/** POST /api/auth/email-change/confirm — the button on /change-email. */
+export const ConfirmEmailChangeInput = z.strictObject({ token: TokenSchema, ...RequestMetaSchema });
+export type ConfirmEmailChangeInput = z.infer<typeof ConfirmEmailChangeInput>;
+
+/** POST /api/auth/set-password — a first password for an account that has none (Google sign-ups). */
+export const SetPasswordInput = z.strictObject({ password: NewPasswordSchema, ...RequestMetaSchema });
+export type SetPasswordInput = z.infer<typeof SetPasswordInput>;
+
+/**
+ * POST /api/auth/google/connect — "Connect Google" on My account asks for the current password first (SEC-03: a new
+ * way in must never be added by whoever happens to be at an unlocked computer).
+ */
+export const GoogleConnectInput = z.strictObject({
+  password: z.string({ error: "Enter your current password" }).min(1, "Enter your current password").max(PASSWORD_MAX_LENGTH),
+  ...RequestMetaSchema,
+});
+export type GoogleConnectInput = z.infer<typeof GoogleConnectInput>;
+
+/** POST /api/auth/demo — one of the "Look around the demo" persona buttons. */
+export const DemoSignInInput = z.strictObject({
+  persona: z.enum(DEMO_PERSONAS, { error: "Choose who to look around as" }),
+  ...RequestMetaSchema,
+});
+export type DemoSignInInput = z.infer<typeof DemoSignInInput>;
+
+/** GET /api/auth/google/start?intent&invite&next (query string → object). */
+export const GoogleStartInput = z.object({
+  intent: z.enum(GOOGLE_INTENTS).default("signin"),
+  invite: TokenSchema.optional(),
+  /** Sanitised with `safeNextPath` before use. */
+  next: z.string().max(2000).optional(),
+});
+export type GoogleStartInput = z.infer<typeof GoogleStartInput>;
+
+/** POST /api/auth/google/complete — /signup/google's form (the verified Google identity is in the signed cookie). */
+export const GoogleCompleteInput = z.strictObject({
+  studioName: StudioNameSchema,
+  ownerName: z.string().trim().min(1, "Enter your name").max(120).optional(),
+  timezone: TimezoneSchema.optional(),
+  website: HoneypotSchema,
+  ...RequestMetaSchema,
+});
+export type GoogleCompleteInput = z.infer<typeof GoogleCompleteInput>;

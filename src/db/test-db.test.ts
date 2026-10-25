@@ -32,7 +32,7 @@ describe("makeTestDb", () => {
   it("creates every table of the schema and installs every guard trigger", async () => {
     const db = await makeTestDb();
     const tables = await publicTables(db);
-    expect(tables).toHaveLength(28);
+    expect(tables).toHaveLength(29);
     expect(tables).toContain("activity_events");
     expect(tables.sort()).toEqual([...schema.TABLE_NAMES].sort());
     expect(ROW_GUARDS).toHaveLength(33);

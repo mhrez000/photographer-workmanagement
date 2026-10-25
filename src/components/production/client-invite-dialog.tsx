@@ -4,7 +4,7 @@ import * as React from "react";
 import { UserPlus } from "lucide-react";
 import { CopyButton } from "@/components/common/copy-button";
 import { firstFieldErrors, useMutationRunner } from "@/components/jobs/mutation";
-import { InviteLinkPanel } from "@/components/settings/invite-link-panel";
+import { InviteLinkPanel, type InviteNotSentReason } from "@/components/settings/invite-link-panel";
 import { inviteLinkMessage } from "@/components/settings/permission-copy";
 import { TempPasswordPanel } from "@/components/settings/temp-password-panel";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ interface InvitedUser {
 
 /** `POST /api/users { role: "client" }` — the shape depends on `method`. */
 type InviteResult =
-  | { method: "link"; user: InvitedUser; inviteUrl: string; emailed: boolean; expiresAt: string }
+  | { method: "link"; user: InvitedUser; inviteUrl: string; emailed: boolean; expiresAt: string; notSentReason?: InviteNotSentReason | null }
   | { method: "temp_password"; user: InvitedUser; tempPassword: string };
 
 export interface ClientInviteDialogProps {
@@ -116,7 +116,15 @@ export function ClientInviteDialog({ clientId, clientName, studioName, timeZone,
           <>
             <DialogBody className="flex flex-col gap-4">
               {result.method === "link" ? (
-                <InviteLinkPanel name={result.user.name} email={result.user.email} inviteUrl={result.inviteUrl} emailed={result.emailed} expiresAt={result.expiresAt} timeZone={timeZone} />
+                <InviteLinkPanel
+                  name={result.user.name}
+                  email={result.user.email}
+                  inviteUrl={result.inviteUrl}
+                  emailed={result.emailed}
+                  notSentReason={result.notSentReason}
+                  expiresAt={result.expiresAt}
+                  timeZone={timeZone}
+                />
               ) : (
                 <TempPasswordPanel name={result.user.name} email={result.user.email} password={result.tempPassword} />
               )}

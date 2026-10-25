@@ -2,11 +2,13 @@ import * as React from "react";
 import { redirect } from "next/navigation";
 import { after } from "next/server";
 import { AppShell } from "@/components/shell";
+import { AccountBanners } from "@/components/account/account-banners";
 import { CommandPaletteMount } from "@/components/search/command-palette";
 import { getDb } from "@/db";
 import { getOptionalContext, getViewer } from "@/server/auth/session";
 import { navGatesFor } from "@/server/nav-gates";
 import { PORTAL_HOME_PATH } from "@/server/page";
+import { accountBannerState } from "@/server/queries/accountSecurity";
 import { countSimpleRows, stageWhere } from "@/server/queries/jobsSimple";
 import { unreadCount } from "@/server/services/notifications";
 import { lazySweep } from "@/server/services/sweep";
@@ -25,6 +27,9 @@ import { lazySweep } from "@/server/services/sweep";
  *
  * Lazy sweep (ARCHITECTURE.md §8): after the response is sent, run the overdue
  * sweep for the org when it is due. It never blocks or breaks rendering.
+ *
+ * Accounts (docs/ACCOUNTS-PLAN.md §6): the shell's `banner` slot carries `<AccountBanners />` (the demo studio
+ * banner, or "Please confirm your email" while email is configured and the address is unconfirmed).
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const ctx = await getOptionalContext();
@@ -62,6 +67,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       logoutAction="/api/auth/logout"
       navGates={navGates}
       toCheckCount={toCheckCount}
+      banner={<AccountBanners state={accountBannerState(viewer)} />}
     >
       {children}
       <CommandPaletteMount gates={navGates} />

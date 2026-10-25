@@ -9,7 +9,6 @@ import { activityEvents, jobTypes, organisationSettings, organisations, users, w
 import { fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type TestDb } from "@/db/test-db";
 import { DEFAULT_JOB_TYPES, SIGNUP_RATE_LIMIT } from "@/lib/constants";
 import { verifyPassword } from "@/server/auth/password";
-import { clearAllRateLimits } from "@/server/auth/rate-limit";
 import { buildContextFromDb } from "@/server/auth/session";
 import { RateLimitedError, ValidationError } from "@/server/errors";
 import { authenticate } from "./auth";
@@ -22,7 +21,6 @@ const GOOD = { ownerName: "Mo Carter", email: "mo@northlight.test", password: "C
 
 beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  clearAllRateLimits();
   db = await makeTestDb();
   ids = await seedMinimalOrg(db); // an existing studio (slug "studio") with taken emails
 });
@@ -77,7 +75,7 @@ describe("signUp — happy path", () => {
 describe("signUp — validation", () => {
   it("rejects a short password, a 1-character studio name, a bad timezone, a bad email and unknown keys (400, nothing created)", async () => {
     const before = await orgCount();
-    for (const raw of [
+    for (const [i, raw] of [
       { ...GOOD, password: "short1!" },
       { ...GOOD, studioName: "N" },
       { ...GOOD, studioName: "x".repeat(81) },
@@ -87,8 +85,9 @@ describe("signUp — validation", () => {
       { ...GOOD, isAdmin: true },
       null,
       "string",
-    ]) {
-      const err = await fail(raw);
+    ].entries()) {
+      // Each from its own network: a form with mistakes still counts toward the sign-up limit (SEC-04).
+      const err = await fail(raw && typeof raw === "object" ? { ...raw, ip: `10.0.0.${i}` } : raw);
       expect(err, JSON.stringify(raw)).toBeInstanceOf(ValidationError);
     }
     expect(await orgCount()).toBe(before);
@@ -155,6 +154,10 @@ describe("signUp — rate limit", () => {
     expect(await first(db.select().from(users).where(eq(users.email, "blocked@northlight.test")))).toBeUndefined();
 
     await expect(signUp(db, { ...GOOD, ip: "8.8.8.8", email: "other-ip@northlight.test" })).resolves.toMatchObject({ email: "other-ip@northlight.test" });
+
+    // The hour drains (the Postgres limiter follows the services' clock).
+    fakeClock.advanceMinutes(SIGNUP_RATE_LIMIT.windowMinutes + 1);
+    await expect(signUp(db, { ...GOOD, ip: "7.7.7.7", email: "blocked@northlight.test" })).resolves.toMatchObject({ email: "blocked@northlight.test" });
   });
 
   it("failed attempts count too (a taken email five times blocks the IP)", async () => {

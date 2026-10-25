@@ -26,7 +26,8 @@ export function UserMenu({ user, logoutAction, showName = true, className }: Use
         variant="ghost"
         size="sm"
         aria-label={`Account menu for ${user.name}`}
-        className={cn("h-9 gap-2 rounded-full pl-1 pr-1", showName && "sm:pr-2")}
+        // UX-17: the only way to My account on a phone — at least 40px to tap there.
+        className={cn("h-9 gap-2 rounded-full pl-1 pr-1 pointer-coarse:h-10 pointer-coarse:min-w-10", showName && "sm:pr-2")}
       >
         <Avatar name={user.name} size="md" colour={user.avatarColour ?? undefined} className="size-7" />
         {showName ? (

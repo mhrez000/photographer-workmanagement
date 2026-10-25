@@ -160,6 +160,12 @@ export const organisations = pgTable(
     slug: text("slug").notNull(),
     /** Gap-free PJ-#### allocator; bumped inside the create-job transaction. */
     jobSequence: integer("job_sequence").notNull().default(0),
+    /**
+     * Accounts (docs/ACCOUNTS.md): the seeded demo studio (and the isolation org). No email is ever sent, invites
+     * are off, nobody can change passwords / emails / sign-in methods, and the sign-in page offers persona buttons
+     * into it. Set by the seed at creation; migration 0007 backfills the seeded demo orgs.
+     */
+    isDemo: bool("is_demo", false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -286,12 +292,28 @@ export const users = pgTable(
      * generic message. Migration 0005 backfills every existing user with `created_at`.
      */
     acceptedAt: text("accepted_at"),
+    // ---- accounts (docs/ACCOUNTS.md, drizzle/0006 + 0007) ----
+    /**
+     * When the person proved they own `email` (confirm link, invite accepted, password reset, Google). null =
+     * not confirmed. Any email change sets it back to null. 0007 backfills every pre-existing user.
+     */
+    emailVerifiedAt: text("email_verified_at"),
+    /**
+     * The account has a usable password (bcrypt). false for link-invitees until they accept with a password,
+     * Google-only accounts and anonymised accounts. Login refuses them anyway (the hash never matches).
+     */
+    hasPassword: bool("has_password", true),
+    /** Google account id (OIDC `sub`) for "Continue with Google". Never exposed through SafeUser. */
+    googleSub: text("google_sub"),
+    /** The Google address shown under Sign-in methods. Set iff google_sub is (CHECK users_google_pair_ck). */
+    googleEmail: text("google_email"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     version: version(),
   },
   (t) => [
     uniqueIndex("users_email_uq").on(t.email),
+    uniqueIndex("users_google_sub_uq").on(t.googleSub),
     index("users_org_role_idx").on(t.organisationId, t.role, t.isActive),
     index("users_org_client_idx").on(t.organisationId, t.clientId),
   ],
@@ -332,6 +354,12 @@ export const authTokens = pgTable(
     tokenHash: text("token_hash").notNull(),
     /** The admin who issued an invite; null for self-service password resets. */
     createdByUserId: userRef("created_by_user_id"),
+    /**
+     * The address the link was sent to: set iff kind is `email_verify` or `email_change` (CHECK
+     * auth_tokens_target_email_ck). For an email change it is the NEW address; a verify link only works while
+     * it still equals the user's email.
+     */
+    targetEmail: text("target_email"),
     expiresAt: text("expires_at").notNull(),
     /** Fill-once: consumed (accepted / reset) or superseded / revoked. */
     usedAt: text("used_at"),
@@ -342,6 +370,26 @@ export const authTokens = pgTable(
     index("auth_tokens_user_kind_idx").on(t.userId, t.kind, t.usedAt),
     index("auth_tokens_org_idx").on(t.organisationId, t.createdAt),
   ],
+);
+
+/**
+ * Postgres-backed sliding-window rate limits (src/server/auth/db-rate-limit.ts). One row per counted attempt;
+ * `key_hash = sha256(limiter + ":" + key)` so no email / IP is stored. NOT tenant data (no organisation_id) and
+ * NOT a ledger: rows past `expires_at` are pruned opportunistically. Single statements only, so it works through
+ * the Supabase transaction pooler.
+ */
+export const authRateLimits = pgTable(
+  "auth_rate_limits",
+  {
+    id: id(),
+    /** RateLimiterName (src/lib/constants.ts RATE_LIMITS). */
+    limiter: text("limiter").notNull(),
+    keyHash: text("key_hash").notNull(),
+    hitAt: text("hit_at").notNull(),
+    /** hit_at + the limiter's window: after this the row no longer counts and may be deleted. */
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => [index("auth_rate_limits_key_idx").on(t.limiter, t.keyHash, t.hitAt), index("auth_rate_limits_expires_idx").on(t.expiresAt)],
 );
 
 export const teams = pgTable(
@@ -1414,6 +1462,7 @@ export const TABLE_NAMES = [
   "automation_runs",
   "saved_views",
   "dashboard_layouts",
+  "auth_rate_limits",
 ] as const;
 export type TableName = (typeof TABLE_NAMES)[number];
 

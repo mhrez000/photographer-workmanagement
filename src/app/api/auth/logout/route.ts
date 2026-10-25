@@ -5,15 +5,17 @@ import { methodNotAllowed } from "@/app/api/_lib/route";
 
 /**
  * POST /api/auth/logout — when signed in, bumps the user's session_version
- * (revokes every outstanding cookie: all devices are signed out) and audits
- * `auth.logged_out`; then expires the cookie. HTML form posts (the shell's user menu) get a 303 to
- * /login; fetch callers get `{ data: { ok: true } }`.
+ * (revokes every outstanding cookie: all devices are logged out) and audits
+ * `auth.logged_out`; then expires the cookie. In the demo studio nothing is revoked (the persona accounts are
+ * shared by every visitor): only this browser is logged out. HTML form posts (the shell's user menu) get a 303 to
+ * /login?logged_out=1 ("You're logged out."); fetch callers get `{ data: { ok: true } }`.
  */
 export const POST = handle(async (req) => {
   const ctx = await getOptionalContext();
   await logout(ctx, { ip: clientIp(req.headers), userAgent: req.headers.get("user-agent") });
   if (wantsHtml(req)) {
-    return new Response(null, { status: 303, headers: { location: "/login" } });
+    // "You’re logged out." on the sign-in page (UX-19: a quiet line).
+    return new Response(null, { status: 303, headers: { location: "/login?logged_out=1" } });
   }
   return { ok: true };
 });

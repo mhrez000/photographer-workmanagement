@@ -5,26 +5,24 @@
  * (user id + session version + kind "staff" | "client", docs/ROLES.md §7.8;
  * `k` is a routing hint for the proxy only). Every request re-reads the user
  * row: inactive users, stale `sessionVersion`s (bumped on deactivate, role
- * change, password change) and client users whose client is archived or has
- * the portal off get no context → 401. `SESSION_SECRET` (≥ 32
- * chars) is required in production; the module throws at load time without
- * it. Local dev falls back to a generated data/.session-secret (devSecret).
+ * change, password change, "Log out of other devices") and client users whose
+ * client is archived or has the portal off get no context → 401. Signing,
+ * verifying, the secret (`SESSION_SECRET`, required in production) and the
+ * 30-day sliding renewal live in ./session-token.ts (also used by src/proxy.ts).
+ * Accounts: contexts carry `isDemo` (organisations.is_demo); the Viewer carries
+ * `isDemo`, `emailVerifiedAt` and `hasPassword` for the account banners.
  *
  * Context builders:
  *   - `await buildContextFromDb(db, userId, opts)` — pure DB → AuthContext (tests use it)
  *   - `requireContext()` — STAFF only (asserts `app.access`: a client gets 403)
  *   - `requirePortalContext()` — clients only (asserts `portal.access`)
- *   - `requireAnyContext()` — any signed-in user (/api/auth/me|logout|change-password only)
+ *   - `requireAnyContext()` — any signed-in user (the self-service /api/auth/* account routes only)
  *   - `getOptionalContext()` — cookie → AuthContext or null, cached per request
  *   - `await systemContext(orgId, { db: tx, … })` — automations / sweep / seed (isSystem, userId null);
  *     inside a transaction ALWAYS pass `db: tx` (it reads organisation_settings)
  */
-import { randomBytes } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { cache } from "react";
 import { cookies } from "next/headers";
-import { SignJWT, jwtVerify } from "jose";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { getDb, type DbLike } from "@/db/index";
@@ -33,7 +31,6 @@ import {
   DEFAULT_TIMEZONE,
   PERSONA_LABELS,
   SESSION_COOKIE_NAME,
-  SESSION_TTL_DAYS,
   personaOfUser,
   type EventCause,
   type Persona,
@@ -43,125 +40,42 @@ import type { AuthContext, ContextSettings, OrganisationSettings, SessionKind, S
 import { ForbiddenError, UnauthorizedError } from "@/server/errors";
 import { nowIso } from "@/server/clock";
 import { currentRequestId, newRequestId } from "@/server/request-scope";
+import { hasUsablePassword } from "./password";
+import { SESSION_TTL_SECONDS, sessionCookieOptions, signSessionToken, verifySessionToken } from "./session-token";
 
 /* ------------------------------------------------------------------ */
-/*  Secret                                                             */
+/*  Tokens + cookie (the pure half lives in ./session-token.ts)        */
 /* ------------------------------------------------------------------ */
 
-export const SESSION_SECRET_MIN_LENGTH = 32;
-
-/**
- * Fallback for builds without SESSION_SECRET: data/.session-secret (a random
- * per-deployment secret, never committed; traced into the server output by
- * next.config.ts). An explicit SESSION_SECRET always wins.
- */
-function secretFilePath(): string {
-  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), "data/.session-secret");
-}
-
-function readBuildSecret(): string | undefined {
-  try {
-    return fs.readFileSync(secretFilePath(), "utf8").trim();
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Zero-config local development: outside production, with neither
- * SESSION_SECRET nor data/.session-secret, generate a random secret once and
- * keep it in data/.session-secret (gitignored) so sessions survive restarts.
- * Production never generates one: it must be configured.
- */
-function devSecret(): string | undefined {
-  if (process.env.NODE_ENV === "production") return undefined;
-  try {
-    const file = secretFilePath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const secret = randomBytes(36).toString("base64url");
-    // "wx": never overwrite a secret another process wrote first.
-    fs.writeFileSync(file, `${secret}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    return secret;
-  } catch {
-    return readBuildSecret();
-  }
-}
-
-function loadSecret(): Uint8Array {
-  const raw = process.env.SESSION_SECRET?.trim() || readBuildSecret() || devSecret();
-  if (!raw || raw.length < SESSION_SECRET_MIN_LENGTH) {
-    throw new Error(
-      `SESSION_SECRET is missing or shorter than ${SESSION_SECRET_MIN_LENGTH} characters. Set it in .env (see .env.example).`,
-    );
-  }
-  return new TextEncoder().encode(raw);
-}
-
-const secretKey = loadSecret();
-const SESSION_TTL_SECONDS = SESSION_TTL_DAYS * 24 * 60 * 60;
-
-/* ------------------------------------------------------------------ */
-/*  Tokens (pure; testable without a request)                          */
-/* ------------------------------------------------------------------ */
+export { SESSION_SECRET_MIN_LENGTH, signSessionToken, verifySessionToken } from "./session-token";
 
 /** Session kind for a role (claim `k`). */
 export function sessionKindForRole(role: Role): SessionKind {
   return role === "client" ? "client" : "staff";
 }
 
-export async function signSessionToken(payload: SessionPayload): Promise<string> {
-  return new SignJWT({ sv: payload.sv, ...(payload.k ? { k: payload.k } : {}), ...(payload.r ? { r: payload.r } : {}) })
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setSubject(payload.sub)
-    .setIssuedAt()
-    .setExpirationTime(`${SESSION_TTL_SECONDS}s`)
-    .sign(secretKey);
-}
-
-/** Verifies signature + expiry; returns null for anything invalid. */
-export async function verifySessionToken(token: string | null | undefined): Promise<SessionPayload | null> {
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, secretKey, { algorithms: ["HS256"] });
-    const sv = payload.sv;
-    if (typeof payload.sub !== "string" || payload.sub.length === 0) return null;
-    if (typeof sv !== "number" || !Number.isInteger(sv)) return null;
-    const k = payload.k === "client" ? "client" : "staff";
-    const r = payload.r === "editor" || payload.r === "client" || payload.r === "photographer" ? payload.r : undefined;
-    return { sub: payload.sub, sv, k, ...(r ? { r } : {}) };
-  } catch {
-    return null;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Cookie                                                             */
-/* ------------------------------------------------------------------ */
-
-function cookieOptions(maxAge: number) {
-  return {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge,
-  };
-}
-
 /**
  * Sets the session cookie (route handlers / server actions only). `kind` defaults to staff; `role` is
  * the optional landing hint (`r` claim) the proxy uses to send editors to /my-jobs.
+ * Prefer `issueSessionCookie` (src/server/auth/sign-in.ts) in new code.
  */
-export async function createSession(userId: string, sessionVersion: number, kind: SessionKind = "staff", role?: Role): Promise<void> {
-  const token = await signSessionToken({ sub: userId, sv: sessionVersion, k: kind, ...(role ? { r: role } : {}) });
+export async function createSession(
+  userId: string,
+  sessionVersion: number,
+  kind: SessionKind = "staff",
+  role?: Role,
+  /** When this browser really signed in (epoch seconds); default now. A re-issue passes the old value on (null = unknown). */
+  signedInAt: number | null = Math.floor(Date.parse(nowIso()) / 1000),
+): Promise<void> {
+  const token = await signSessionToken({ sub: userId, sv: sessionVersion, k: kind, ...(role ? { r: role } : {}), ...(signedInAt ? { at: signedInAt } : {}) });
   const jar = await cookies();
-  jar.set(SESSION_COOKIE_NAME, token, cookieOptions(SESSION_TTL_SECONDS));
+  jar.set(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS));
 }
 
 /** Expires the session cookie (route handlers / server actions only). */
 export async function clearSession(): Promise<void> {
   const jar = await cookies();
-  jar.set(SESSION_COOKIE_NAME, "", cookieOptions(0));
+  jar.set(SESSION_COOKIE_NAME, "", sessionCookieOptions(0));
 }
 
 /** Reads + verifies the cookie of the current request. */
@@ -193,13 +107,21 @@ export function settingsToContext(row: OrganisationSettings | undefined): Contex
   };
 }
 
-async function loadSettingsRow(db: DbLike, organisationId: string): Promise<OrganisationSettings | undefined> {
-  const [row] = await db.select().from(organisationSettings).where(eq(organisationSettings.organisationId, organisationId)).limit(1);
-  return row;
+interface OrgContextRow {
+  settings: OrganisationSettings | undefined;
+  /** organisations.is_demo (accounts: the demo studio). */
+  isDemo: boolean;
 }
 
-async function loadSettings(db: DbLike, organisationId: string): Promise<ContextSettings> {
-  return settingsToContext(await loadSettingsRow(db, organisationId));
+/** The organisation's settings row and its demo flag, in one query. */
+async function loadOrgContextRow(db: DbLike, organisationId: string): Promise<OrgContextRow> {
+  const [row] = await db
+    .select({ isDemo: organisations.isDemo, settings: organisationSettings })
+    .from(organisations)
+    .leftJoin(organisationSettings, eq(organisationSettings.organisationId, organisations.id))
+    .where(eq(organisations.id, organisationId))
+    .limit(1);
+  return { settings: row?.settings ?? undefined, isDemo: row?.isDemo ?? false };
 }
 
 /** The switches a context carries: EFFECTIVE values (docs/ROLES.md §2.1). */
@@ -304,7 +226,7 @@ async function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions
   const client = await loadClientAccess(db, user);
   if (user.role === "client" && !client) return null;
   const teamUserIds = user.role === "client" ? new Set<string>() : await loadTeamUserIds(db, user.organisationId, user.id);
-  const settingsRow = await loadSettingsRow(db, user.organisationId);
+  const { settings: settingsRow, isDemo } = await loadOrgContextRow(db, user.organisationId);
   const isAdmin = user.role === "photographer" && user.isAdmin;
   return {
     client,
@@ -324,6 +246,7 @@ async function contextFromUser(db: DbLike, user: User, opts: BuildContextOptions
       now: opts.now ?? nowIso,
       requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
       ...(opts.cause ? { cause: opts.cause } : {}),
+      isDemo,
     },
   };
 }
@@ -365,7 +288,8 @@ export interface SystemContextOptions {
 export async function systemContext(organisationId: string, opts: SystemContextOptions = {}): Promise<AuthContext> {
   const db = opts.db ?? getDb();
   const role: Role = "photographer";
-  const settings = await loadSettings(db, organisationId);
+  const { settings: settingsRow, isDemo } = await loadOrgContextRow(db, organisationId);
+  const settings = settingsToContext(settingsRow);
   return {
     userId: null,
     organisationId,
@@ -389,6 +313,7 @@ export async function systemContext(organisationId: string, opts: SystemContextO
     requestId: opts.requestId ?? currentRequestId() ?? newRequestId(),
     cause: opts.cause ?? (opts.automationRunId ? "automation" : "sweep"),
     automationRunId: opts.automationRunId ?? null,
+    isDemo,
   };
 }
 
@@ -414,6 +339,12 @@ export interface Viewer {
   /** Client users only. */
   clientId: string | null;
   clientName: string | null;
+  /** Accounts: the organisation is the demo studio. */
+  isDemo: boolean;
+  /** Accounts: when the email was confirmed (null = not yet). */
+  emailVerifiedAt: string | null;
+  /** Accounts: the account has a usable password (false = Google-only). */
+  hasPassword: boolean;
 }
 
 interface ResolvedSession {
@@ -429,8 +360,14 @@ const resolveSession = cache(async (): Promise<ResolvedSession | null> => {
   if (!user || !user.isActive || user.anonymisedAt || user.sessionVersion !== payload.sv) return null;
   const resolved = await contextFromUser(db, user, {});
   if (!resolved) return null;
-  const { ctx, client } = resolved;
-  const [org] = await db.select({ name: organisations.name }).from(organisations).where(eq(organisations.id, user.organisationId)).limit(1);
+  const { client } = resolved;
+  // The cookie's sign-in time (SEC-03: a few account changes ask for a recent sign-in).
+  const ctx: AuthContext = { ...resolved.ctx, signedInAt: payload.at ?? null };
+  const [org] = await db
+    .select({ name: organisations.name, isDemo: organisations.isDemo })
+    .from(organisations)
+    .where(eq(organisations.id, user.organisationId))
+    .limit(1);
   const persona = personaOfUser(user);
   return {
     ctx,
@@ -449,6 +386,9 @@ const resolveSession = cache(async (): Promise<ResolvedSession | null> => {
       organisationName: org?.name ?? "",
       clientId: ctx.clientId,
       clientName: client?.clientName ?? null,
+      isDemo: org?.isDemo ?? false,
+      emailVerifiedAt: user.emailVerifiedAt,
+      hasPassword: hasUsablePassword(user),
     },
   };
 });
@@ -481,7 +421,10 @@ export async function requirePortalContext(): Promise<AuthContext> {
   return session.ctx;
 }
 
-/** Any signed-in user (staff or client). Only /api/auth/me, /api/auth/logout, /api/auth/change-password. */
+/**
+ * Any signed-in user (staff or client). Only the self-service account routes under /api/auth/* (me, logout,
+ * change-password, set-password, email-change, sign-out-others, email-verification/resend, google/disconnect).
+ */
 export async function requireAnyContext(): Promise<AuthContext> {
   const session = await resolveSession();
   if (!session) throw new UnauthorizedError();

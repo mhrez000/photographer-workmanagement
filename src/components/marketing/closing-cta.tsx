@@ -2,7 +2,8 @@ import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Container } from "./section";
 
-export function ClosingCta() {
+/** `home` = a signed-in visitor's landing page and its words (UX-11): one button instead of Create / Sign in. */
+export function ClosingCta({ home = null }: { home?: { href: string; label: string } | null } = {}) {
   return (
     <section aria-labelledby="closing-heading" className="py-14 sm:py-20">
       <Container>
@@ -12,12 +13,20 @@ export function ClosingCta() {
           </h2>
           <p className="max-w-md text-md text-ink-secondary">A studio takes a minute to set up. Your first job takes less.</p>
           <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
-            <Button href="/signup" size="lg" trailingIcon={<ArrowRight aria-hidden="true" />}>
-              Create your studio
-            </Button>
-            <Button href="/login" size="lg" variant="outline">
-              Sign in
-            </Button>
+            {home ? (
+              <Button href={home.href} size="lg" trailingIcon={<ArrowRight aria-hidden="true" />}>
+                {home.label}
+              </Button>
+            ) : (
+              <>
+                <Button href="/signup" size="lg" trailingIcon={<ArrowRight aria-hidden="true" />}>
+                  Create your studio
+                </Button>
+                <Button href="/login" size="lg" variant="outline">
+                  Sign in
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </Container>

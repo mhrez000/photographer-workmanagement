@@ -229,6 +229,13 @@ export interface SeedMinimalOrgOptions {
   settings?: Partial<Omit<NewOrganisationSettings, "organisationId">>;
   /** Timestamp for created_at columns (default: the clock). */
   at?: string;
+  /** Accounts: mark the organisation as the demo studio (`organisations.is_demo`). Default false. */
+  isDemo?: boolean;
+  /**
+   * Accounts: fixture users start with a confirmed email (`email_verified_at = at`, like migration 0007's
+   * backfill of existing users). Pass false for unconfirmed users.
+   */
+  emailVerified?: boolean;
 }
 
 export interface SeedIds {
@@ -349,7 +356,14 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
   return db.transaction(async (tx) => {
     await tx
       .insert(schema.organisations)
-      .values({ id: organisationId, name: overrides.name ?? `${slug[0].toUpperCase()}${slug.slice(1)} Studio`, slug, createdAt: at, updatedAt: at });
+      .values({
+        id: organisationId,
+        name: overrides.name ?? `${slug[0].toUpperCase()}${slug.slice(1)} Studio`,
+        slug,
+        isDemo: overrides.isDemo ?? false,
+        createdAt: at,
+        updatedAt: at,
+      });
     await tx
       .insert(schema.organisationSettings)
       .values({ timezone: DEFAULT_TIMEZONE, jobNumberPrefix: DEFAULT_JOB_NUMBER_PREFIX, ...overrides.settings, organisationId, updatedAt: at });
@@ -378,6 +392,7 @@ export async function seedMinimalOrg(db: Db, overrides: SeedMinimalOrgOptions = 
         avatarColour: u.colour,
         // Front door: fixture users have a usable password, so they count as accepted (like migration 0005's backfill).
         acceptedAt: at,
+        emailVerifiedAt: overrides.emailVerified === false ? null : at,
         createdAt: at,
         updatedAt: at,
       };

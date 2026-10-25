@@ -12,6 +12,11 @@ import { InvitePersonDialog, type PortalClientOption } from "./invite-person-dia
 
 export interface PeopleToolbarProps {
   canInvite: boolean;
+  /**
+   * Why an admin cannot invite right now (the demo studio: "Invites are turned off in the demo studio"). Shown next to
+   * a disabled Invite button instead of the dialog.
+   */
+  inviteBlockedReason?: string | null;
   studioName: string;
   portalClients: PortalClientOption[];
   /** The studio's timezone (invite links show their expiry date). */
@@ -19,11 +24,16 @@ export interface PeopleToolbarProps {
 }
 
 /** Search + Active / Deactivated (URL state) and the invite dialog (`?invite=1`, `?invite=client`). */
-export function PeopleToolbar({ canInvite, studioName, portalClients, timeZone }: PeopleToolbarProps) {
+export function PeopleToolbar({ canInvite, inviteBlockedReason = null, studioName, portalClients, timeZone }: PeopleToolbarProps) {
   const url = useUrlState();
+  const blockedNoteId = React.useId();
   const status = url.get("status") ?? "active";
   const invite = url.get("invite");
-  const inviteOpen = canInvite && (invite === "1" || invite === "client" || invite === "editor");
+  // Closing clears `?invite` with a server round trip; until it lands the URL still says "open". Remember the close
+  // locally so the dialog disappears at once instead of flashing its emptied form ("Done" after an invite).
+  const [closedFor, setClosedFor] = React.useState<string | null>(null);
+  if (closedFor !== null && closedFor !== invite) setClosedFor(null);
+  const inviteOpen = canInvite && (invite === "1" || invite === "client" || invite === "editor") && closedFor !== invite;
   const inviteRole: Role = invite === "client" ? "client" : invite === "editor" ? "editor" : "photographer";
 
   return (
@@ -48,15 +58,35 @@ export function PeopleToolbar({ canInvite, studioName, portalClients, timeZone }
         ]}
       />
       {canInvite ? (
-        <Button className="sm:ml-auto" leadingIcon={<UserPlus aria-hidden="true" />} onClick={() => url.set("invite", "1")} data-invite-button="">
+        <Button
+          className="sm:ml-auto"
+          leadingIcon={<UserPlus aria-hidden="true" />}
+          onClick={() => {
+            setClosedFor(null);
+            url.set("invite", "1");
+          }}
+          data-invite-button=""
+        >
           Invite someone
         </Button>
+      ) : inviteBlockedReason ? (
+        <div className="flex flex-col gap-1 sm:ml-auto sm:items-end" data-invite-blocked="">
+          <Button disabled leadingIcon={<UserPlus aria-hidden="true" />} aria-describedby={blockedNoteId}>
+            Invite someone
+          </Button>
+          <p id={blockedNoteId} className="text-xs text-ink-muted">
+            {inviteBlockedReason}
+          </p>
+        </div>
       ) : null}
       {canInvite ? (
         <InvitePersonDialog
           key={inviteRole}
           open={inviteOpen}
-          onOpenChange={(open) => url.set("invite", open ? invite ?? "1" : null)}
+          onOpenChange={(open) => {
+            setClosedFor(open ? null : invite);
+            url.set("invite", open ? (invite ?? "1") : null);
+          }}
           studioName={studioName}
           portalClients={portalClients}
           timeZone={timeZone}

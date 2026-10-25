@@ -13,6 +13,7 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { PHOTOGRAPHER_PRESET_META, photographerPresetOf, type Role } from "@/lib/constants";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/dates";
 import type { ReducedUser, UserProfile } from "@/lib/types";
+import { DEMO_BLOCKED_MESSAGES } from "@/server/auth/demo";
 import { listClients } from "@/server/queries/clients";
 import { getSettingsView } from "@/server/queries/settings";
 import { listUsers } from "@/server/queries/users";
@@ -103,7 +104,10 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
   const allClients = await load(() => listClients(db, ctx, { includeArchived: true }));
   const clientNames = new Map(allClients.map((c) => [c.client.id, c.client.name]));
   const portalClients = allClients.filter((c) => c.client.portalEnabled && c.client.archivedAt === null).map((c) => ({ id: c.client.id, name: c.client.name }));
-  const canInvite = allowed(ctx, "user.invite");
+  // Accounts (docs/ACCOUNTS.md §7): invites are off in the demo studio — the button explains why instead.
+  const mayInvite = allowed(ctx, "user.invite");
+  const canInvite = mayInvite && !ctx.isDemo;
+  const inviteBlockedReason = mayInvite && ctx.isDemo ? DEMO_BLOCKED_MESSAGES.invite : null;
   const filtered = Boolean(q || roleFilter || status !== "active");
   // Front door: which pending people still have a live link ("Invite pending · expires …").
   const liveInvites = new Map(await Promise.all(people.filter(invitePending).map(async (u) => [u.id, await load(() => pendingInviteFor(db, u.id, ctx.now()))] as const)));
@@ -149,7 +153,13 @@ export default async function PeoplePage({ searchParams }: PageProps<"/settings/
         })}
       </ul>
 
-      <PeopleToolbar canInvite={canInvite} studioName={view.organisation.name} portalClients={portalClients} timeZone={tz} />
+      <PeopleToolbar
+        canInvite={canInvite}
+        inviteBlockedReason={inviteBlockedReason}
+        studioName={view.organisation.name}
+        portalClients={portalClients}
+        timeZone={tz}
+      />
 
       {people.length === 0 ? (
         <Card>

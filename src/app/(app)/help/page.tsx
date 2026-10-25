@@ -238,7 +238,7 @@ export default async function HelpPage() {
                 (or a client’s page for portal logins). They get a link to choose their own password: it is emailed when your studio has email set up, and always shown to you to copy. A link works for 7 days; until it is opened the person shows as “Invite pending”, and their page lets you send a new link or revoke it. You can also set a temporary password instead.{" "}
               </>
             ) : null}
-            Forgot a password? Use <span className="font-medium text-ink">Forgot your password?</span> on the sign-in page: the reset link works for 60 minutes and signs out every other session when used.
+            Forgot a password? Use <span className="font-medium text-ink">Forgot password?</span> on the sign-in page: the reset link works for 60 minutes, and using it logs you out on every other device.
             {canManage ? " An owner can also set a temporary password from a person’s page." : " Signed in? Change it any time under My account."}
           </span>
         </p>

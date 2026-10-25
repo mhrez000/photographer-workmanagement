@@ -12,7 +12,6 @@ import { contextFor, fakeClock, makeTestDb, seedMinimalOrg, type SeedIds, type T
 import { INVITE_TTL_HOURS } from "@/lib/constants";
 import type { AuthContext } from "@/lib/types";
 import { verifyPassword } from "@/server/auth/password";
-import { clearAllRateLimits } from "@/server/auth/rate-limit";
 import { hashToken } from "@/server/auth/tokens";
 import { ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from "@/server/errors";
 import { withTx } from "./_shared";
@@ -27,7 +26,6 @@ const NEW_PASSWORD = "BrandNewPass42!";
 
 beforeEach(async () => {
   fakeClock.set("2026-10-08T00:00:00.000Z");
-  clearAllRateLimits();
   db = await makeTestDb();
   ids = await seedMinimalOrg(db);
 });
@@ -92,7 +90,6 @@ describe("inviteUser — method 'link' (default)", () => {
     const failures = await eventsOf("auth.login_failed");
     expect(failures.length).toBeGreaterThan(0);
     expect(failures[failures.length - 1].metadata).toMatchObject({ reason: "not_accepted" });
-    clearAllRateLimits();
   });
 
   it("inviteUserByMethod picks the path from the body; 'temp_password' keeps the old behaviour (usable password, accepted at once)", async () => {
